@@ -97,7 +97,7 @@ jobs:
       matrix:
         job_info:
           - name: "CPU Presubmit Tests"
-            config: "ci_cpu_presubmit_rbe"
+            config: "ci_cpu_presubmit"
             suite: "cpu_only"
             extra_flags: ""
           - name: "TPU v5e Tests (Full RBE)"

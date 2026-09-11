@@ -119,3 +119,35 @@ scripts/spot_tpu_fleet.sh down
 > returns "no more capacity" and `us-east5-a` has no reservation at all. Asking
 > for 12 VMs can easily get you 4, so `up` is resumable — re-run it to fill the
 > gaps.
+
+---
+
+## 6. SSH Relay Architecture
+
+We use a Bazel `--run_under` wrapper (`ci/tools/relay_test_runner.sh`) that intercepts test actions on the host, leases a Cloud TPU v5e VM from a pool via `flock`, and runs the test in a sandbox on the remote VM (`ci/tools/remote_tpu_executor.sh`).
+
+### Performance and the Base Cache
+
+A real 57-target run expands to 330 test actions holding 7,895s of test body time. With 8 VMs, a perfect floor is 987s. The original wall time was 3,015s — a 32.7% efficiency caused by 49.2s of relay overhead per action. The pool averaged 2.58 active VMs; adding more VMs does not speed up the run if they stay locked in I/O.
+
+The overhead was mostly the `libpywrap_torch_tpu_common.so` extension module. At 493 MB out of a 499 MB payload, it was identical for every test but got packaged and shipped repeatedly.
+
+`ci/tools/stage_relay_base.sh` now pushes `_main/csrc` alongside the shared C++ solibs into the base cache on the VM. `ci/tools/remote_tpu_executor.sh` symlinks `${BASE_CACHE}/csrc` directly into the sandbox workspace root on a cache miss, and `relay_test_runner.sh` excludes it from the per-action payload. The payload packing step dropped from 14.63s (120 MB gzipped) to 0.066s (200 KB). The base cache layer stamp already hashes file size and mtime, so a rebuilt extension module re-stages automatically.
+
+### Bazel Execution Strategy
+
+`.bazelrc` now uses `--strategy=TestRunner=local` to pin only test actions to the relay runner. The previous flag, `--spawn_strategy=standalone,local`, inadvertently forced compilation and linking jobs onto the host instead of sending them to RBE.
+
+### Watchdogs and Quarantine
+
+We removed the in-guest shutdown watchdogs from `spot_tpu_manager.sh`. Guest-side `shutdown -h` tells the TPU service to reboot the VM, not stop billing. Reboots wipe `/tmp` (deleting the base cache) and kill the SSH control master.
+
+Before, a broken VM failed tests in milliseconds, released its `flock` instantly, and won the race for the next lease. We saw one rebooted VM instantly fail 64 shards while seven healthy VMs sat idle.
+
+Now `relay_test_runner.sh` writes a `.quarantine` marker next to the session file of any VM answering without a base cache or SSH connection. The fleet scripts skip it from then on.
+
+To catch orphaned billing, `scripts/spot_tpu_fleet.sh up` arms a detached host-side deadline (default 180 min, disable with `--deadline-minutes 0`). The timeout runs `down`, which sweeps both zones explicitly for unknown VMs named `spot-tpu-v5e-*`.
+
+### Unrunnable Multi-Chip Targets
+
+The relay leases one `v5litepod-1` VM per action. Multi-chip targets will hang until they hit their timeout, then fail. The relay excludes `requires-tpu-v5lite:8` by default. 20 of the 77 v5 targets need 8 chips, leaving 57 targets holding the 330 shards.

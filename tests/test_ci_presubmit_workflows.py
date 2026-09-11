@@ -350,5 +350,46 @@ class TestTpuConfigsPinOnlyTestActions(unittest.TestCase):
     self.assertIn("--spawn_strategy=standalone,local", self.flags_for("bench"))
 
 
+class TestWorkflowsOnlyNameConfigsThatExist(unittest.TestCase):
+  """Bazel exits immediately on an undefined --config, before running anything.
+
+  test_rbe_opt_in.yml shipped naming `ci_cpu_presubmit_rbe` and
+  `ci_tpu_v5_full_rbe`; neither was defined, so both matrix jobs could only
+  fail at startup. The workflow is opt-in and had never been run, so nothing
+  caught it.
+  """
+
+  def defined_configs(self):
+    names = set()
+    with open(BAZELRC, encoding="utf-8") as fh:
+      for raw in fh:
+        line = raw.strip()
+        if line and not line.startswith("#"):
+          names.add(line.partition(" ")[0].partition(":")[2])
+    names.discard("")
+    return names
+
+  def referenced_configs(self, path):
+    """Matrix entries plus any --config= written out literally."""
+    with open(path, encoding="utf-8") as fh:
+      text = fh.read()
+
+    names = set(re.findall(r"--config=([A-Za-z0-9_]+)", text))
+    for job in yaml.safe_load(text).get("jobs", {}).values():
+      for entry in job.get("strategy", {}).get("matrix", {}).get("job_info", []):
+        if isinstance(entry, dict) and entry.get("config"):
+          names.add(entry["config"])
+    return names
+
+  def test_every_config_a_workflow_names_is_defined(self):
+    defined = self.defined_configs()
+    for path in (PRESUBMIT_YML, TEST_RBE_YML):
+      for config in sorted(self.referenced_configs(path)):
+        with self.subTest(workflow=os.path.basename(path), config=config):
+          self.assertIn(
+              config, defined, f"{config} is not defined in .bazelrc"
+          )
+
+
 if __name__ == "__main__":
   unittest.main()

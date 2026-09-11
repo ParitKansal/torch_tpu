@@ -1,0 +1,114 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: RBE Hardware TPU Tests (Opt-In)
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Execution mode (shadow = non-blocking, replacement = gating presubmit)'
+        type: choice
+        default: 'shadow'
+        options:
+          - 'shadow'
+          - 'replacement'
+      test_suite:
+        description: 'Test suite to execute'
+        type: choice
+        default: 'all'
+        options:
+          - 'all'
+          - 'tpu_v5e_only'
+          - 'cpu_only'
+
+concurrency:
+  group: shadow-rbe-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  run_tests:
+    name: "${{ matrix.job_info.name }}"
+    if: >-
+      contains(github.event.pull_request.labels.*.name, 'run-rbe') ||
+      contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5') ||
+      contains(github.event.pull_request.labels.*.name, 'replace-tpu-v5') ||
+      contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5-rbe') ||
+      contains(github.event.pull_request.labels.*.name, 'replace-tpu-v5-with-rbe') ||
+      contains(github.event.pull_request.labels.*.name, 'ci:rbe') ||
+      github.event_name == 'workflow_dispatch'
+    continue-on-error: >-
+      ${{
+        (contains(github.event.pull_request.labels.*.name, 'run-rbe') &&
+         !contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5') &&
+         !contains(github.event.pull_request.labels.*.name, 'replace-tpu-v5') &&
+         !contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5-rbe') &&
+         !contains(github.event.pull_request.labels.*.name, 'replace-tpu-v5-with-rbe')) ||
+        (github.event_name == 'workflow_dispatch' && inputs.mode != 'replacement')
+      }}
+    strategy:
+      fail-fast: false
+      matrix:
+        job_info: [
+          {
+            name: "CPU Presubmit Tests",
+            runner: "ubuntu-latest",
+            config: "ci_cpu_presubmit_rbe",
+            extra_flags: '--bes_backend=""',
+          },
+          {
+            name: "TPU v5e Tests (Full RBE)",
+            runner: "ubuntu-latest",
+            config: "ci_tpu_v5_full_rbe",
+            extra_flags: '--bes_backend="" --test_tag_filters=presubmit-v5,-fails-on-tpu-v5,-nopresubmit,-notest,-nobuild',
+          },
+        ]
+    runs-on: ${{ matrix.job_info.runner }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+
+      - name: Fix Git Workspace Ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Authenticate to GCP RBE
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_RBE_SERVICE_ACCOUNT_KEY }}
+
+      - name: Set up Bazel
+        if: matrix.job_info.runner == 'ubuntu-latest'
+        run: |
+          sudo npm install -g @bazel/bazelisk
+          sudo ln -sf $(which bazelisk) /usr/local/bin/bazel || true
+
+      - name: Run Test Suite
+        if: ${{ inputs.test_suite == '' || inputs.test_suite == 'all' || (inputs.test_suite == 'tpu_v5e_only' && matrix.job_info.config == 'ci_tpu_v5_full_rbe') || (inputs.test_suite == 'cpu_only' && matrix.job_info.config == 'ci_cpu_presubmit_rbe') }}
+        run: |
+          bazel test \
+            --config=${{ matrix.job_info.config }} \
+            --nocache_test_results \
+            --test_output=errors \
+            ${{ matrix.job_info.extra_flags }} \
+            -- //tests/... \
+               -//tests:fp4_test \
+               -//tests:ops_unit_test \
+               -//tests:async_transfer_test \
+               -//tests/compile:activation_checkpointing_mem_test \
+               -//tests/distributed:single_tpu_pg_test \
+               -//tests:ops_unit_test_tier3_cache \
+               -//tests:ops_unit_test_tier3_cache_no_backup

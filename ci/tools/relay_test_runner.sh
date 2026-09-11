@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 # ci/tools/relay_test_runner.sh
 # Bazel --run_under test runner wrapper for physical Cloud TPU execution.
 set -uo pipefail
@@ -14,11 +27,15 @@ fi
 shift || true
 readonly TEST_ARGS=("$@")
 
-readonly SESSION_ENV="${TPU_SESSION_ENV:-/tmp/tpu_active_session.env}"
+SESSION_ENV="${TPU_SESSION_ENV:-/tmp/tpu_active_session.env}"
 readonly TARGET_LABEL="${TEST_TARGET:-$(basename "$TEST_BIN")}"
 readonly CLEAN_TARGET="$(echo "$TARGET_LABEL" | tr '/:' '__')"
 readonly SANDBOX_ID="${CLEAN_TARGET}_$$_${RANDOM}"
-readonly REMOTE_SANDBOX="/tmp/torch_tpu_relay/sandboxes/${SANDBOX_ID}"
+readonly REMOTE_RELAY_DIR="/tmp/torch_tpu_relay"
+readonly REMOTE_EXECUTOR="${REMOTE_RELAY_DIR}/remote_tpu_executor.sh"
+readonly REMOTE_PAYLOAD_CACHE="${REMOTE_RELAY_DIR}/payloads"
+readonly REMOTE_BASE_CACHE="${REMOTE_RELAY_DIR}/base"
+readonly REMOTE_SANDBOX="${REMOTE_RELAY_DIR}/sandboxes/${SANDBOX_ID}"
 readonly TIMEOUT_RAW="${TEST_TIMEOUT:-900}"
 _clean_timeout="${TIMEOUT_RAW%[sS]}"
 if [[ "$_clean_timeout" =~ ^[0-9]+$ && "$_clean_timeout" -gt 0 ]]; then
@@ -27,42 +44,42 @@ else
   readonly TIMEOUT_SEC="900"
 fi
 
-# Helper: write fallback JUnit XML
-write_fallback_xml() {
-  local failure_msg="${1:-Test execution failed}"
-  local failure_detail="${2:-No additional details}"
-  local xml_path="${XML_OUTPUT_FILE:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/tools/relay_ssh.sh
+source "${SCRIPT_DIR}/relay_ssh.sh"
+readonly SSH_OPTS=("${RELAY_SSH_OPTS[@]}")
 
-  if [[ -n "$xml_path" && ! -s "$xml_path" ]]; then
-    mkdir -p "$(dirname "$xml_path")"
-    cat <<XML_EOF > "$xml_path"
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuites>
-  <testsuite name="${CLEAN_TARGET}" tests="1" failures="1" errors="0" time="0.0">
-    <testcase classname="${CLEAN_TARGET}" name="execution" time="0.0">
-      <failure message="${failure_msg}">
-<![CDATA[${failure_detail}]]>
-      </failure>
-    </testcase>
-  </testsuite>
-</testsuites>
-XML_EOF
-  fi
+# Runs a command on the TPU VM over the shared ControlMaster socket.
+rsh() {
+  ssh -S "$SSH_CONTROL_PATH" "${SSH_OPTS[@]}" "${SSH_USER}@${TPU_IP}" "$@"
 }
 
-write_success_xml() {
+# Writes a single-case JUnit report when the remote run left none behind. With
+# no arguments the case passes; with a message it fails.
+write_stub_xml() {
+  local failure_msg="${1:-}"
+  local failure_detail="${2:-}"
   local xml_path="${XML_OUTPUT_FILE:-}"
-  if [[ -n "$xml_path" && ! -s "$xml_path" ]]; then
-    mkdir -p "$(dirname "$xml_path")"
-    cat <<XML_EOF > "$xml_path"
+  [[ -n "$xml_path" && ! -s "$xml_path" ]] || return 0
+
+  local failures=0
+  local testcase_tail="/>"
+  if [[ -n "$failure_msg" ]]; then
+    failures=1
+    testcase_tail=">
+      <failure message=\"${failure_msg}\"><![CDATA[${failure_detail}]]></failure>
+    </testcase>"
+  fi
+
+  mkdir -p "$(dirname "$xml_path")"
+  cat <<XML_EOF > "$xml_path"
 <?xml version="1.0" encoding="UTF-8"?>
 <testsuites>
-  <testsuite name="${CLEAN_TARGET}" tests="1" failures="0" errors="0" time="0.0">
-    <testcase classname="${CLEAN_TARGET}" name="execution" time="0.0"/>
+  <testsuite name="${CLEAN_TARGET}" tests="1" failures="${failures}" errors="0" time="0.0">
+    <testcase classname="${CLEAN_TARGET}" name="execution" time="0.0"${testcase_tail}
   </testsuite>
 </testsuites>
 XML_EOF
-  fi
 }
 
 # Host-level trap for cleanup on premature termination
@@ -75,20 +92,15 @@ cleanup_host() {
     INT)  exit_code=130 ;;
     TERM) exit_code=143 ;;
     HUP)  exit_code=129 ;;
-    EXIT) exit_code="$origin_rc" ;;
     *)    exit_code="$origin_rc" ;;
   esac
 
-  if [[ -n "${REMOTE_SANDBOX:-}" && -n "${SSH_CONTROL_PATH:-}" && -S "${SSH_CONTROL_PATH:-}" && -n "${TPU_IP:-}" && -n "${SSH_USER:-}" ]]; then
-    ssh -S "$SSH_CONTROL_PATH" -o BatchMode=yes \
-      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o ConnectTimeout=2 \
-      "${SSH_USER}@${TPU_IP}" \
-      "rm -rf '${REMOTE_SANDBOX}'" 2>/dev/null || true
+  if [[ -n "${SSH_CONTROL_PATH:-}" && -S "${SSH_CONTROL_PATH}" && -n "${TPU_IP:-}" && -n "${SSH_USER:-}" ]]; then
+    rsh "rm -rf '${REMOTE_SANDBOX}'" 2>/dev/null || true
   fi
 
   if [[ "$exit_code" -ne 0 ]]; then
-    write_fallback_xml "Test interrupted by signal ${trap_sig}" "Process received signal ${trap_sig} (exit code ${exit_code})."
+    write_stub_xml "Test interrupted by signal ${trap_sig}" "Process received signal ${trap_sig} (exit code ${exit_code})."
   fi
 
   exit "$exit_code"
@@ -104,7 +116,7 @@ enforce_project_boundary() {
   if [[ -n "$target_project" && "$target_project" != "$ALLOWED_PROJECT" ]]; then
     echo "ERROR [relay_test_runner]: Project boundary violation: '$target_project' is not allowed." >&2
     echo "This runner is strictly restricted to project '$ALLOWED_PROJECT'." >&2
-    write_fallback_xml "Project Boundary Violation" "Project '$target_project' violates allowed project '$ALLOWED_PROJECT'."
+    write_stub_xml "Project Boundary Violation" "Project '$target_project' violates allowed project '$ALLOWED_PROJECT'."
     exit 1
   fi
 
@@ -112,7 +124,7 @@ enforce_project_boundary() {
   for var in "${env_vars[@]}"; do
     if [[ -n "${!var:-}" && "${!var}" != "$ALLOWED_PROJECT" ]]; then
       echo "ERROR [relay_test_runner]: Project boundary violation: Environment variable $var is set to '${!var}' (violates allowed project '$ALLOWED_PROJECT')." >&2
-      write_fallback_xml "Project Boundary Violation" "Environment variable $var violates allowed project '$ALLOWED_PROJECT'."
+      write_stub_xml "Project Boundary Violation" "Environment variable $var violates allowed project '$ALLOWED_PROJECT'."
       exit 1
     fi
   done
@@ -121,10 +133,58 @@ enforce_project_boundary() {
 # 1. Environment discovery and session validation
 enforce_project_boundary "${TPU_PROJECT:-$ALLOWED_PROJECT}"
 
+# Point TPU_SESSION_POOL at a directory of session files to spread tests over a
+# fleet. Each action holds an exclusive lock on one VM for as long as it runs,
+# the same way parallel_accelerator_execute.sh leases a single chip. The lock fd
+# stays open until this process exits, so a crashed test can't strand a VM.
+#
+# A VM that turns out to be unusable gets a .quarantine marker and is passed
+# over from then on. Without that, a broken VM is the *fastest* member of the
+# pool -- it fails in milliseconds and frees its lock immediately, so it wins
+# the next race and the one after that. One rebooted VM failed 64 shards this
+# way while seven healthy VMs sat idle.
+quarantine_session() {
+  local session="$1"
+  local reason="$2"
+  printf '%s\t%s\n' "$(date -u +%FT%TZ)" "$reason" > "${session}.quarantine" 2>/dev/null || true
+  echo "WARNING [relay_test_runner]: took $(basename "$session") out of the pool: ${reason}" >&2
+}
+
+lease_session_from_pool() {
+  local deadline=$((SECONDS + TIMEOUT_SEC))
+  while true; do
+    local candidate
+    for candidate in "$TPU_SESSION_POOL"/*.env; do
+      [[ -f "$candidate" ]] || continue
+      [[ -f "${candidate}.quarantine" ]] && continue
+      local fd
+      exec {fd}>"${candidate}.lock" || continue
+      if flock -n "$fd"; then
+        SESSION_ENV="$candidate"
+        return 0
+      fi
+      exec {fd}>&-
+    done
+    if (( SECONDS >= deadline )); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+if [[ -n "${TPU_SESSION_POOL:-}" ]]; then
+  if ! lease_session_from_pool; then
+    echo "ERROR [relay_test_runner]: No free TPU VM in $TPU_SESSION_POOL after ${TIMEOUT_SEC}s." >&2
+    write_stub_xml "No free TPU in pool" "Every VM in $TPU_SESSION_POOL stayed busy for ${TIMEOUT_SEC}s."
+    exit 1
+  fi
+fi
+readonly SESSION_ENV
+
 if [[ ! -f "$SESSION_ENV" ]]; then
   echo "ERROR [relay_test_runner]: Active TPU session file $SESSION_ENV not found." >&2
   echo "Provision a Spot TPU first using: scripts/spot_tpu_manager.sh up" >&2
-  write_fallback_xml "No active TPU session" "Session file $SESSION_ENV not found on host."
+  write_stub_xml "No active TPU session" "Session file $SESSION_ENV not found on host."
   exit 1
 fi
 
@@ -135,87 +195,90 @@ TPU_PROJECT="$ALLOWED_PROJECT"
 
 if [[ -z "${TPU_IP:-}" || -z "${SSH_USER:-}" || -z "${SSH_CONTROL_PATH:-}" ]]; then
   echo "ERROR [relay_test_runner]: Incomplete TPU session environment in $SESSION_ENV." >&2
-  write_fallback_xml "Incomplete TPU session" "Required variables missing in $SESSION_ENV (TPU_IP, SSH_USER, or SSH_CONTROL_PATH)."
+  write_stub_xml "Incomplete TPU session" "Required variables missing in $SESSION_ENV (TPU_IP, SSH_USER, or SSH_CONTROL_PATH)."
   exit 1
 fi
 
 # 2. ControlMaster socket health check, auto-reconnection, and preemption detection
 check_ssh_socket() {
-  [[ -n "${SSH_CONTROL_PATH:-}" && -S "${SSH_CONTROL_PATH}" ]] && \
-  ssh -O check -S "$SSH_CONTROL_PATH" \
-    -o BatchMode=yes \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    "${SSH_USER}@${TPU_IP}" 2>/dev/null
+  relay_ssh_master_alive "${SSH_CONTROL_PATH:-}" "${SSH_USER}@${TPU_IP}"
 }
 
 reconnect_ssh() {
   echo "WARNING [relay_test_runner]: SSH ControlMaster socket is not active. Attempting reconnection..." >&2
-  rm -f "$SSH_CONTROL_PATH"
-
-  local ssh_identity_args=()
-  if [[ -f "${HOME}/.ssh/google_compute_engine" ]]; then
-    ssh_identity_args+=("-i" "${HOME}/.ssh/google_compute_engine")
-  fi
-
-  ssh -M -N -f \
-    -S "$SSH_CONTROL_PATH" \
-    -o ControlPersist=1h \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o IdentitiesOnly=yes \
-    ${ssh_identity_args[@]+"${ssh_identity_args[@]}"} \
-    -o ServerAliveInterval=15 \
-    -o ServerAliveCountMax=4 \
-    -o BatchMode=yes \
-    -o ConnectTimeout=10 \
-    "${SSH_USER}@${TPU_IP}" 2>/dev/null || true
-
-  check_ssh_socket
+  relay_ssh_ensure_master "$SSH_CONTROL_PATH" "${SSH_USER}@${TPU_IP}"
 }
 
 check_preemption() {
-  local vm_state
+  local vm_state query_rc
+
+  # Keep "the VM is gone" separate from "I could not ask". Collapsing the two
+  # reported 64 shards as preempted against a VM that was READY the whole time;
+  # the real fault was local, and the report blamed Google Cloud for it.
   vm_state=$(gcloud compute tpus tpu-vm describe "${TPU_NAME:-}" \
     --project="$ALLOWED_PROJECT" \
     --zone="${TPU_ZONE:-europe-west4-b}" \
-    --format="value(state)" 2>/dev/null || echo "NOT_FOUND")
+    --format="value(state)" 2>/dev/null)
+  query_rc=$?
 
-  if [[ "$vm_state" == "PREEMPTED" || "$vm_state" == "TERMINATED" || "$vm_state" == "NOT_FOUND" ]]; then
-    echo "FATAL [relay_test_runner]: Spot TPU VM '${TPU_NAME:-}' in zone '${TPU_ZONE:-europe-west4-b}' was PREEMPTED by Google Cloud (state: $vm_state)." >&2
-    write_fallback_xml "Spot TPU Preempted" "VM ${TPU_NAME:-} entered state $vm_state during run."
-    return 0
-  else
-    echo "ERROR [relay_test_runner]: Cannot connect to TPU VM at ${TPU_IP} via SSH (state: $vm_state)." >&2
-    write_fallback_xml "SSH Connection Failed" "Host unreachable at ${TPU_IP} (state: $vm_state)."
+  if [[ "$query_rc" -ne 0 || -z "$vm_state" ]]; then
+    echo "ERROR [relay_test_runner]: SSH to ${TPU_IP} failed and the state of '${TPU_NAME:-}' could not be read (gcloud rc=${query_rc})." >&2
+    write_stub_xml "TPU State Unknown" \
+      "SSH to ${TPU_IP} failed. Could not read the state of ${TPU_NAME:-} to tell preemption from a local fault."
     return 1
   fi
+
+  if [[ "$vm_state" == "PREEMPTED" || "$vm_state" == "TERMINATED" ]]; then
+    echo "FATAL [relay_test_runner]: TPU VM '${TPU_NAME:-}' in zone '${TPU_ZONE:-europe-west4-b}' is gone (state: $vm_state)." >&2
+    write_stub_xml "Spot TPU Preempted" "VM ${TPU_NAME:-} entered state $vm_state during run."
+    return 0
+  fi
+
+  # The node is alive but unreachable, which is what a guest reboot looks like:
+  # the SSH control master dies with it and every later action fails instantly.
+  echo "ERROR [relay_test_runner]: Cannot reach TPU VM at ${TPU_IP} over SSH though the node reports $vm_state." >&2
+  write_stub_xml "SSH Connection Failed" "Host unreachable at ${TPU_IP} (node state: $vm_state)."
+  return 1
 }
 
 if ! check_ssh_socket; then
   if ! reconnect_ssh; then
+    [[ -z "${TPU_SESSION_POOL:-}" ]] || quarantine_session "$SESSION_ENV" "unreachable over SSH"
     check_preemption || true
     exit 255
   fi
 fi
 
+# A TPU VM that reboots comes back with /tmp emptied, so the base cache that
+# ci/tools/stage_relay_base.sh put there is gone. SSH still works and the node
+# still reports READY, so nothing upstream notices: the test just runs without
+# an interpreter and dies with a bare exit 1. Check before spending a payload
+# on it.
+if ! rsh "test -d '${REMOTE_BASE_CACHE}'" >/dev/null 2>&1; then
+  echo "ERROR [relay_test_runner]: ${TPU_NAME:-the VM} has no base cache at ${REMOTE_BASE_CACHE}; it needs re-staging." >&2
+  [[ -z "${TPU_SESSION_POOL:-}" ]] || quarantine_session "$SESSION_ENV" "base cache missing (rebooted?)"
+  write_stub_xml "TPU Base Cache Missing" \
+    "${REMOTE_BASE_CACHE} is gone on ${TPU_NAME:-the VM}. Re-run ci/tools/stage_relay_base.sh for this session."
+  exit 1
+fi
+
 # 3. Synchronize remote_tpu_executor.sh to remote TPU VM
 ensure_remote_executor() {
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  local local_executor="${script_dir}/remote_tpu_executor.sh"
+  local local_executor="${SCRIPT_DIR}/remote_tpu_executor.sh"
+
   if [[ ! -f "$local_executor" ]]; then
-    local_executor="/usr/local/google/home/jonathanskim/torch_tpu/ci/tools/remote_tpu_executor.sh"
+    echo "ERROR [relay_test_runner]: $local_executor is missing." >&2
+    write_stub_xml "Relay executor missing" "Expected $local_executor next to relay_test_runner.sh."
+    exit 1
   fi
 
-  if [[ -f "$local_executor" ]]; then
-    local local_hash
-    local_hash=$(sha256sum "$local_executor" 2>/dev/null | awk '{print $1}')
-    ssh -S "$SSH_CONTROL_PATH" -o BatchMode=yes \
-      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      "${SSH_USER}@${TPU_IP}" \
-      "if [ \"\$(sha256sum /tmp/torch_tpu_relay/remote_tpu_executor.sh 2>/dev/null | awk '{print \$1}')\" != \"$local_hash\" ]; then mkdir -p /tmp/torch_tpu_relay && cat > /tmp/torch_tpu_relay/remote_tpu_executor.sh && chmod +x /tmp/torch_tpu_relay/remote_tpu_executor.sh; fi" < "$local_executor" 2>/dev/null || true
-  fi
+  local local_hash
+  local_hash=$(sha256sum "$local_executor" | awk '{print $1}')
+
+  # Ship the file only when the copy on the VM is stale or absent. Sandboxes
+  # come and go, but the executor is shared by every test on this VM.
+  rsh "if [ \"\$(sha256sum ${REMOTE_EXECUTOR} 2>/dev/null | awk '{print \$1}')\" != \"$local_hash\" ]; then mkdir -p ${REMOTE_RELAY_DIR} && cat > ${REMOTE_EXECUTOR} && chmod +x ${REMOTE_EXECUTOR}; fi" \
+    < "$local_executor" 2>/dev/null || true
 }
 ensure_remote_executor
 
@@ -241,41 +304,122 @@ if [[ ${#TEST_ARGS[@]} -gt 0 ]]; then
   printf -v remote_args "%q " "${TEST_ARGS[@]}"
 fi
 
-# 5. Delta runfiles streaming and remote execution
-tar -czhf - \
-  --ignore-failed-read \
-  --exclude='*rules_python*' \
-  --exclude='*._*.venv' \
-  --exclude='*.venv' \
-  --exclude='*/_solib_x86_64*' \
-  --exclude='_solib_x86_64' \
-  --exclude='*/torch_tpu/common*' \
-  --exclude='torch_tpu/common' \
-  --exclude='*.a' \
-  --exclude='*.o' \
-  --exclude='*.params' \
-  --exclude='*.cppmap' \
-  --exclude='*__pycache__*' \
-  --exclude='*.pyc' \
-  --exclude='MANIFEST' \
-  --exclude='_repo_mapping' \
-  -C "${RUNFILES_ROOT}" . 2>/dev/null | \
-  timeout --foreground --signal=TERM --kill-after=10s "${TIMEOUT_SEC}s" \
-  ssh -S "$SSH_CONTROL_PATH" \
-    -o BatchMode=yes \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    "${SSH_USER}@${TPU_IP}" \
-    "/tmp/torch_tpu_relay/remote_tpu_executor.sh '${REMOTE_SANDBOX}' '${TEST_BIN}' -- ${remote_args}"
+# Bazel hands a sharded test its slice through TEST_SHARD_INDEX, and rejects the
+# result unless the runner creates TEST_SHARD_STATUS_FILE to prove it understood
+# the request. The test binary would normally create that file itself, but it
+# runs on the VM where bazel can't see it, so forward the slice and stamp the
+# file here.
+remote_env=""
+if [[ -n "${TEST_TOTAL_SHARDS:-}" ]]; then
+  remote_env="TEST_SHARD_INDEX=${TEST_SHARD_INDEX:-0} TEST_TOTAL_SHARDS=${TEST_TOTAL_SHARDS} "
+  [[ -z "${TEST_SHARD_STATUS_FILE:-}" ]] || : > "$TEST_SHARD_STATUS_FILE"
+fi
 
-pipestatus=("${PIPESTATUS[@]}")
-ssh_rc="${pipestatus[1]:-0}"
+# Every shard of a target ships the same runfiles tree, and the big ops targets
+# have 30-50 shards each. Name the tree so the VM can keep a prepared copy and
+# hardlink it for the later shards instead of unpacking it again.
+#
+# The run id comes from run_presubmit_v5_relay.sh, which builds every target
+# before any test starts. Within one run a tree cannot change underneath us, and
+# a key from a previous run is never reused, so a stale tree cannot be served.
+# No run id means no caching, which is the safe default for a bare bazel run.
+payload_key=""
+if [[ -n "${TORCH_TPU_RELAY_RUN_ID:-}" ]]; then
+  payload_key="${TORCH_TPU_RELAY_RUN_ID}_$(printf '%s' "$RUNFILES_ROOT" | sha256sum | cut -c1-16)"
+  remote_env+="TORCH_TPU_PAYLOAD_KEY=${payload_key} "
+fi
+
+# 5. Stream this test's own files and run it
+#
+# The payload goes over as three concatenated archives, because the runfiles
+# tree mixes several kinds of link that need different treatment.
+#
+#   1. Everything outside the venv, dereferenced. Bazel points these at
+#      absolute paths in the local output base, which mean nothing on the VM.
+#   2. The venv itself, links intact. Its site-packages is a farm of relative
+#      links back up at the dependency repositories, which resolve on the VM
+#      once the base cache is linked in at the sandbox root.
+#   3. The few absolute links inside the venv that point somewhere other than a
+#      staged repository -- pyvenv.cfg and the bazel .pth files. Those are real
+#      content and have to be dereferenced.
+#
+# The three sets are kept strictly disjoint. GNU tar 1.34, which is what the TPU
+# image ships, will not replace an existing symlink with a regular file: it
+# keeps the link and still reports success. So whichever archive writes a name
+# first wins, and (2) has to skip everything (3) is about to send.
+#
+# Deliberately not in (3): the ~41 venv links into external/, which name torch,
+# libtpu and friends. Dereferencing those drags 1.7 GB through every single
+# test action. remote_tpu_executor.sh repoints them at the base cache instead.
+#
+# Left out entirely: the dependency repositories, the shared solibs and this
+# repo's own extension modules under _main/csrc, which
+# ci/tools/stage_relay_base.sh already put on the VM. csrc matters most:
+# libpywrap_torch_tpu_common.so is 493 MB of the 499 MB payload, and it is the
+# same build for every test.
+readonly PAYLOAD_EXCLUDES=(
+  --exclude='*rules_python*'
+  --exclude='*/_solib_x86_64*'
+  --exclude='_solib_x86_64'
+  --exclude='_main/csrc'
+  --exclude='*.a'
+  --exclude='*.o'
+  --exclude='*.params'
+  --exclude='*.cppmap'
+  --exclude='*__pycache__*'
+  --exclude='*.pyc'
+  --exclude='MANIFEST'
+  --exclude='_repo_mapping'
+)
+
+stream_payload() {
+  cd "$RUNFILES_ROOT" || return 1
+
+  tar -czhf - --ignore-failed-read "${PAYLOAD_EXCLUDES[@]}" \
+    --exclude='*.venv' . 2>/dev/null
+
+  local venvs=()
+  mapfile -t venvs < <(find . -maxdepth 4 -name '*.venv' -type d 2>/dev/null)
+  [[ ${#venvs[@]} -gt 0 ]] || return 0
+
+  local host_only
+  host_only="$(mktemp)"
+  find "${venvs[@]}" -type l -lname '/*' ! -lname '*/external/*' \
+    > "$host_only" 2>/dev/null || true
+
+  tar -czf - --ignore-failed-read "${PAYLOAD_EXCLUDES[@]}" \
+    --exclude-from="$host_only" "${venvs[@]}" 2>/dev/null
+
+  [[ ! -s "$host_only" ]] || tar -czhf - --ignore-failed-read -T "$host_only" 2>/dev/null
+  rm -f "$host_only"
+}
+
+run_remote() {
+  timeout --foreground --signal=TERM --kill-after=10s "${TIMEOUT_SEC}s" \
+    ssh -S "$SSH_CONTROL_PATH" "${SSH_OPTS[@]}" "${SSH_USER}@${TPU_IP}" \
+      "${remote_env}${REMOTE_EXECUTOR} '${REMOTE_SANDBOX}' '${TEST_BIN}' -- ${remote_args}"
+}
+
+# Ask before sending. The probe rides the existing control master, so it costs
+# a few milliseconds against the ~20s of tar and transfer it avoids.
+payload_cached=0
+if [[ -n "$payload_key" ]] &&
+   rsh "test -d '${REMOTE_PAYLOAD_CACHE}/${payload_key}'" >/dev/null 2>&1; then
+  payload_cached=1
+fi
+
+if [[ "$payload_cached" -eq 1 ]]; then
+  run_remote < /dev/null
+  ssh_rc=$?
+else
+  stream_payload | run_remote
+  pipestatus=("${PIPESTATUS[@]}")
+  ssh_rc="${pipestatus[1]:-0}"
+fi
 
 # 6. Fetch remote test metadata (exitcode and test.xml) and clean remote sandbox
-remote_meta=$(ssh -S "$SSH_CONTROL_PATH" -o BatchMode=yes \
-  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  "${SSH_USER}@${TPU_IP}" \
-  "cat '${REMOTE_SANDBOX}/test.exitcode' 2>/dev/null || true; echo '---TORCH_TPU_SPLIT---'; cat '${REMOTE_SANDBOX}/test.xml' 2>/dev/null || true; rm -rf '${REMOTE_SANDBOX}'" 2>/dev/null || echo "")
+remote_meta=$(rsh "cat '${REMOTE_SANDBOX}/test.exitcode' 2>/dev/null || true; echo '---TORCH_TPU_SPLIT---'; cat '${REMOTE_SANDBOX}/test.xml' 2>/dev/null || true; rm -rf '${REMOTE_SANDBOX}'" 2>/dev/null)
+meta_rc=$?
 
 remote_exitcode=$(echo "$remote_meta" | awk '/---TORCH_TPU_SPLIT---/{exit} {print}' | tr -d ' \r\n')
 remote_xml=$(echo "$remote_meta" | awk 'f{print} /---TORCH_TPU_SPLIT---/{f=1}')
@@ -283,43 +427,59 @@ remote_xml=$(echo "$remote_meta" | awk 'f{print} /---TORCH_TPU_SPLIT---/{f=1}')
 # Disarm cleanup trap since remote sandbox was deleted above
 trap - EXIT INT TERM HUP
 
-# 7. Write JUnit XML artifact
-xml_written=0
-if [[ -n "$remote_xml" && "$remote_xml" =~ \<testsuite && -n "${XML_OUTPUT_FILE:-}" ]]; then
-  mkdir -p "$(dirname "$XML_OUTPUT_FILE")"
-  echo "$remote_xml" > "$XML_OUTPUT_FILE"
-  xml_written=1
-fi
-
-# 8. Exit code resolution and SSH 255 disambiguation
-if [[ "$ssh_rc" -eq 124 ]]; then
-  echo "ERROR [relay_test_runner]: Test action timed out after ${TIMEOUT_SEC}s." >&2
-  write_fallback_xml "Test Timeout" "Test execution timed out after ${TIMEOUT_SEC} seconds."
-  exit 124
-fi
-
-if [[ "$ssh_rc" -eq 255 ]]; then
-  if [[ "$remote_exitcode" == "255" ]]; then
-    # Test legitimately exited with code 255
-    if [[ "$xml_written" -eq 0 ]]; then
-      write_fallback_xml "Test failed with exit code 255" "Process explicitly exited with code 255."
-    fi
-    exit 255
+# 7. Turn what came back from the VM into a report and an exit code.
+#
+# Reads ssh_rc (how the test invocation ended), meta_rc (whether we managed to
+# read the result back), remote_exitcode and remote_xml. Every path has to leave
+# a JUnit report behind: bazel shows a bare "FAILED" with no explanation if it
+# finds none.
+resolve_outcome() {
+  local xml_written=0
+  if [[ -n "$remote_xml" && "$remote_xml" =~ \<testsuite && -n "${XML_OUTPUT_FILE:-}" ]]; then
+    mkdir -p "$(dirname "$XML_OUTPUT_FILE")"
+    echo "$remote_xml" > "$XML_OUTPUT_FILE"
+    xml_written=1
   fi
 
-  # Transport error or VM preemption occurred
-  check_preemption || true
-  exit 255
-fi
+  if [[ "$ssh_rc" -eq 124 ]]; then
+    echo "ERROR [relay_test_runner]: Test action timed out after ${TIMEOUT_SEC}s." >&2
+    write_stub_xml "Test Timeout" "Test execution timed out after ${TIMEOUT_SEC} seconds."
+    return 124
+  fi
 
-# For any non-zero exit code without valid XML, synthesize fallback
-if [[ "$ssh_rc" -ne 0 && "$xml_written" -eq 0 ]]; then
-  write_fallback_xml "Test failed with exit code $ssh_rc" "Process exited with code $ssh_rc without generating valid test.xml."
-fi
+  # 255 is ambiguous: ssh uses it for transport failures, but a test is also
+  # free to exit with it. The exit code the VM recorded settles which happened.
+  if [[ "$ssh_rc" -eq 255 ]]; then
+    if [[ "$remote_exitcode" == "255" ]]; then
+      [[ "$xml_written" -eq 1 ]] || write_stub_xml \
+        "Test failed with exit code 255" "Process explicitly exited with code 255."
+      return 255
+    fi
+    check_preemption || true
+    return 255
+  fi
 
-# If successful but XML missing, synthesize success XML
-if [[ "$ssh_rc" -eq 0 && "$xml_written" -eq 0 ]]; then
-  write_success_xml
-fi
+  if [[ "$ssh_rc" -ne 0 ]]; then
+    [[ "$xml_written" -eq 1 ]] || write_stub_xml \
+      "Test failed with exit code $ssh_rc" \
+      "Process exited with code $ssh_rc without generating valid test.xml."
+    return "$ssh_rc"
+  fi
 
-exit "$ssh_rc"
+  [[ "$xml_written" -eq 0 ]] || return 0
+
+  # A clean exit with no report is only a pass if we know the report is
+  # genuinely absent. If the fetch failed we never saw the VM's answer, and
+  # calling that a pass invents a result nobody observed.
+  if [[ "$meta_rc" -ne 0 || -z "$remote_exitcode" ]]; then
+    write_stub_xml "Test Report Not Retrieved" \
+      "The test exited 0 but its report could not be read back from ${TPU_NAME:-the VM} (fetch rc ${meta_rc})."
+    return 1
+  fi
+
+  write_stub_xml
+  return 0
+}
+
+resolve_outcome
+exit $?

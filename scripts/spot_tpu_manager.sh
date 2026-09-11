@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 set -euo pipefail
 
 readonly ALLOWED_PROJECT="rbe-tpu-oss"
@@ -12,7 +25,12 @@ _WITH_TPU_ACTIVE_NAME=""
 _WITH_TPU_ACTIVE_ZONE=""
 _CURRENT_PROVISIONING_NAME=""
 _CURRENT_PROVISIONING_ZONE=""
-readonly SESSION_ENV_FILE="/tmp/tpu_active_session.env"
+# Honors TPU_SESSION_ENV so several relays can share a host, each pinned to its
+# own TPU VM. relay_test_runner.sh reads the same variable.
+readonly SESSION_ENV_FILE="${TPU_SESSION_ENV:-/tmp/tpu_active_session.env}"
+# Where the TPU runtime gets pip-installed on the VM. The remote executor puts
+# this on PYTHONPATH; nothing here depends on the image's Python version.
+readonly REMOTE_BASE_DIR="/tmp/torch_tpu_relay/base"
 
 cleanup_standalone_up() {
   local sig="${1:-TERM}"
@@ -84,6 +102,29 @@ enforce_project_boundary() {
   done
 }
 
+# Reads one field off a TPU VM. Returns empty rather than failing, so callers
+# can tell "no answer" apart from a specific state.
+tpu_describe() {
+  local tpu_name="$1"
+  local zone="$2"
+  local field="$3"
+  gcloud compute tpus tpu-vm describe "$tpu_name" \
+    --project="$ALLOWED_PROJECT" \
+    --zone="$zone" \
+    --format="value(${field})" 2>/dev/null || true
+}
+
+# Gives up on a half-built VM. Deleting it here is what keeps a failed
+# provision from leaving Spot capacity billing in the background.
+fail_and_teardown() {
+  local tpu_name="$1"
+  local zone="$2"
+  shift 2
+  echo "ERROR: $*" >&2
+  cmd_down --name "$tpu_name" --zone "$zone"
+  exit 1
+}
+
 cmd_up() {
   enforce_project_boundary "${CLI_PROJECT:-$ALLOWED_PROJECT}"
 
@@ -106,12 +147,18 @@ cmd_up() {
   for z in "${candidate_zones[@]}"; do
     _CURRENT_PROVISIONING_ZONE="$z"
     echo "Attempting to create Spot TPU '$tpu_name' in zone '$z'..."
-    if gcloud compute tpus tpu-vm create "$tpu_name" \
-        --project="$ALLOWED_PROJECT" \
-        --zone="$z" \
-        --accelerator-type="v5litepod-1" \
-        --version="v2-alpha-tpuv5-lite" \
-        --spot; then
+    local create_args=(
+      --project="$ALLOWED_PROJECT"
+      --zone="$z"
+      --accelerator-type="v5litepod-1"
+      --version="v2-alpha-tpuv5-lite"
+    )
+    # Spot v5e in this project has been getting preempted within minutes, which
+    # a 78-minute presubmit cannot survive. --on-demand trades cost for a VM
+    # that stays put.
+    [[ "$CLI_ON_DEMAND" == "true" ]] || create_args+=(--spot)
+
+    if gcloud compute tpus tpu-vm create "$tpu_name" "${create_args[@]}"; then
       chosen_zone="$z"
       _CURRENT_PROVISIONING_ZONE="$chosen_zone"
       if [[ "${_WITH_TPU_ACTIVE:-0}" -eq 1 ]]; then
@@ -119,15 +166,9 @@ cmd_up() {
         _WITH_TPU_ACTIVE_ZONE="${chosen_zone}"
       fi
       echo "Creation request accepted for zone '$z'."
-      local session_env="$SESSION_ENV_FILE"
-      local tmp_env="${session_env}.tmp.$$"
-      cat <<EOF > "$tmp_env"
-export TPU_NAME="${tpu_name}"
-export TPU_ZONE="${chosen_zone}"
-export TPU_PROJECT="${ALLOWED_PROJECT}"
-EOF
-      chmod 600 "$tmp_env"
-      mv -f "$tmp_env" "$session_env"
+      # The session file is only written once the VM is fully usable (see the
+      # end of this function). Until then _CURRENT_PROVISIONING_* and
+      # `spot_tpu_manager.sh reap` are what find a half-built VM.
       break
     else
       echo "WARNING: Creation failed in zone '$z'. Cleaning up any partial state..." >&2
@@ -150,46 +191,37 @@ EOF
   local state=""
   local max_attempts=60
   for ((i=1; i<=max_attempts; i++)); do
-    state=$(gcloud compute tpus tpu-vm describe "$tpu_name" \
-      --project="$ALLOWED_PROJECT" \
-      --zone="$chosen_zone" \
-      --format="value(state)" 2>/dev/null || true)
+    state=$(tpu_describe "$tpu_name" "$chosen_zone" "state")
     if [[ "$state" == "READY" ]]; then
       echo "TPU VM entered READY state."
       break
     elif [[ "$state" == "FAILED" || "$state" == "PREEMPTED" ]]; then
-      echo "ERROR: TPU VM entered unexpected state '$state'." >&2
-      cmd_down --name "$tpu_name" --zone "$chosen_zone"
-      exit 1
+      fail_and_teardown "$tpu_name" "$chosen_zone" \
+        "TPU VM entered unexpected state '$state'."
     fi
     echo "Current state: '${state:-PROVISIONING}', waiting 5s (attempt $i/$max_attempts)..."
     sleep 5
   done
 
   if [[ "$state" != "READY" ]]; then
-    echo "ERROR: Timed out waiting for TPU VM '$tpu_name' to become READY (state: $state)." >&2
-    cmd_down --name "$tpu_name" --zone "$chosen_zone"
-    exit 1
+    fail_and_teardown "$tpu_name" "$chosen_zone" \
+      "Timed out waiting for TPU VM '$tpu_name' to become READY (state: $state)."
   fi
 
+  # Prefer the external IP; VMs created without one still answer on the
+  # internal address from inside the VPC.
   local tpu_ip=""
-  tpu_ip=$(gcloud compute tpus tpu-vm describe "$tpu_name" \
-    --project="$ALLOWED_PROJECT" \
-    --zone="$chosen_zone" \
-    --format="value(networkEndpoints[0].accessConfig.externalIp)" 2>/dev/null || true)
+  tpu_ip=$(tpu_describe "$tpu_name" "$chosen_zone" \
+    "networkEndpoints[0].accessConfig.externalIp")
 
   if [[ -z "$tpu_ip" ]]; then
     echo "External IP not in accessConfig, falling back to networkEndpoints[0].ipAddress..." >&2
-    tpu_ip=$(gcloud compute tpus tpu-vm describe "$tpu_name" \
-      --project="$ALLOWED_PROJECT" \
-      --zone="$chosen_zone" \
-      --format="value(networkEndpoints[0].ipAddress)" 2>/dev/null || true)
+    tpu_ip=$(tpu_describe "$tpu_name" "$chosen_zone" "networkEndpoints[0].ipAddress")
   fi
 
   if [[ -z "$tpu_ip" ]]; then
-    echo "ERROR: Could not resolve IP for TPU VM '$tpu_name'." >&2
-    cmd_down --name "$tpu_name" --zone "$chosen_zone"
-    exit 1
+    fail_and_teardown "$tpu_name" "$chosen_zone" \
+      "Could not resolve IP for TPU VM '$tpu_name'."
   fi
   echo "Resolved TPU VM public IP: $tpu_ip"
 
@@ -226,10 +258,12 @@ EOF
     rm -f "$control_path"
   fi
 
+  # setsid so the master outlives this script. spot_tpu_fleet.sh runs `up` as a
+  # background job and the whole process group goes away when it returns.
   echo "Starting OpenSSH ControlMaster daemon at $control_path..."
-  ssh -M -N -f \
+  setsid ssh -M -N -f \
     -S "$control_path" \
-    -o ControlPersist=1h \
+    -o ControlPersist=4h \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o IdentitiesOnly=yes \
@@ -260,160 +294,31 @@ EOF
     sleep 0.5
   '
 
-  echo "Preparing remote Python environment..."
-  ssh -S "$control_path" "${ssh_user}@${tpu_ip}" '
-    if [ ! -d "/tmp/tpu_venv" ]; then
-      if command -v python3.12 >/dev/null 2>&1; then
-        python3.12 -m venv /tmp/tpu_venv 2>/dev/null || true
-      else
-        python3 -m venv /tmp/tpu_venv 2>/dev/null || true
-      fi
-      if [ -x "/tmp/tpu_venv/bin/pip" ]; then
-        /tmp/tpu_venv/bin/pip install --upgrade pip 2>/dev/null || true
-        /tmp/tpu_venv/bin/pip install --no-cache-dir \
-          "torch==2.11.0+cpu" "torchvision==0.26.0+cpu" --extra-index-url https://download.pytorch.org/whl/cpu \
-          "libtpu==0.0.41" "numpy==2.0.0" "absl-py==2.0.0" "filelock==3.29.7" "jinja2==3.1.6" "sympy==1.14.0" "networkx==3.6.1" 2>/dev/null || true
-      fi
-    fi
-  '
-
-  local remote_libtpu=""
-  remote_libtpu=$(ssh -S "$control_path" "${ssh_user}@${tpu_ip}" '
-    found=""
-    if [ -x "/tmp/tpu_venv/bin/python3" ]; then
-      found=$(/tmp/tpu_venv/bin/python3 -c "import libtpu; print(libtpu.get_library_path())" 2>/dev/null || true)
-    fi
-    if [ -z "$found" ]; then
-      found=$(python3 -c "import libtpu; print(libtpu.get_library_path())" 2>/dev/null || true)
-    fi
-    if [ -z "$found" ]; then
-      found=$(find /tmp/tpu_venv /usr/local /lib -name "libtpu.so" 2>/dev/null | head -n 1)
-    fi
-    echo "$found"
-  ' | tr -d '\r\n')
-
-  echo "Resolved remote libtpu path: ${remote_libtpu:-[system default]}"
-
-  echo "Executing inline Python hardware verification probe on TPU_0..."
-  if ! ssh -S "$control_path" "${ssh_user}@${tpu_ip}" "
-    export TPU_VISIBLE_DEVICES=0
-    export TPU_VISIBLE_CHIPS=0
-    export TPU_SKIP_MDS_QUERY=1
-    export TPU_ACCELERATOR_TYPE=v5litepod-1
-    [ -n \"$remote_libtpu\" ] && export TPU_LIBRARY_PATH=\"$remote_libtpu\"
-
-    PYTHON_CMD=\"python3\"
-    if [ -x \"/tmp/tpu_venv/bin/python3\" ]; then
-      PYTHON_CMD=\"/tmp/tpu_venv/bin/python3\"
-    fi
-
-    \$PYTHON_CMD -c '
-import os, sys
-
-print(\"Probing TPU hardware accessibility...\")
-if not os.path.exists(\"/dev/vfio\"):
-    print(\"ERROR: /dev/vfio directory not found; TPU silicon device nodes unavailable.\", file=sys.stderr)
-    sys.exit(1)
-
-vfio_nodes = os.listdir(\"/dev/vfio\")
-print(f\"VFIO nodes present: {vfio_nodes}\")
-device_nodes = [n for n in vfio_nodes if n != \"vfio\"]
-if not device_nodes:
-    print(\"ERROR: No TPU VFIO accelerator nodes found in /dev/vfio.\", file=sys.stderr)
-    sys.exit(1)
-
-try:
-    try:
-        import torch_tpu
-    except ImportError:
-        pass
-    try:
-        import torch_xla
-    except ImportError:
-        pass
-
-    import torch
-
-    dev = None
-    last_err = None
-    for target in [\"tpu:0\", \"tpu\", \"xla:0\"]:
-        try:
-            d = torch.device(target)
-            t = torch.ones((2, 2), device=d)
-            dev = d
-            break
-        except Exception as e:
-            last_err = e
-            continue
-
-    if dev is None:
-        raise RuntimeError(f\"Physical TPU silicon tensor allocation failed on TPU_0: {last_err}\")
-
-    a = torch.ones((2, 2), device=dev)
-    b = a + a
-    res = b.cpu()
-    assert res[0, 0].item() == 2.0, f\"Tensor computation mismatch: {res}\"
-    print(f\"TPU hardware verification passed on device {dev}.\")
-except Exception as e:
-    print(f\"ERROR: TPU hardware probe failed: {e}\", file=sys.stderr)
-    sys.exit(1)
-'
-  "; then
-    echo "ERROR: TPU hardware verification probe failed on VM '$tpu_name'." >&2
-    cmd_down --name "$tpu_name" --zone "$chosen_zone"
-    exit 1
+  # No Python runtime is installed here on purpose. The relay ships the
+  # hermetic CPython and the exact wheels bazel resolved (see
+  # ci/tools/stage_relay_base.sh), so anything pip put on the VM would be a
+  # second, different copy of torch and libtpu with the wrong ABI.
+  echo "Checking TPU device nodes..."
+  if ! ssh -S "$control_path" "${ssh_user}@${tpu_ip}" '
+    set -e
+    [ -d /dev/vfio ] || { echo "no /dev/vfio directory" >&2; exit 1; }
+    nodes=$(ls /dev/vfio | grep -v "^vfio$" || true)
+    [ -n "$nodes" ] || { echo "no TPU device nodes under /dev/vfio" >&2; exit 1; }
+    echo "TPU device nodes: $nodes"
+  '; then
+    fail_and_teardown "$tpu_name" "$chosen_zone" \
+      "TPU silicon is not visible on VM '$tpu_name'."
   fi
 
-  echo "Staging preheated C++ libraries to /tmp/torch_tpu_relay/base/ on TPU VM..."
-  ssh -S "$control_path" "${ssh_user}@${tpu_ip}" "mkdir -p /tmp/torch_tpu_relay/base"
+  ssh -S "$control_path" "${ssh_user}@${tpu_ip}" "mkdir -p ${REMOTE_BASE_DIR}"
 
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  local repo_root
-  repo_root="$(cd "${script_dir}/.." && pwd)"
-
-  local runfiles_dir="${repo_root}/bazel-bin/tests/empty_test.runfiles/_main"
-  if [[ -d "$runfiles_dir" ]]; then
-    tar -ch --ignore-failed-read \
-      --exclude='*.a' --exclude='*.params' --exclude='*.cppmap' \
-      -C "$runfiles_dir" \
-      "_solib_x86_64" "torch_tpu/common" 2>/dev/null | \
-      ssh -S "$control_path" "${ssh_user}@${tpu_ip}" "tar -x -C /tmp/torch_tpu_relay/base/" 2>/dev/null || true
-  fi
-
-  ssh -S "$control_path" "${ssh_user}@${tpu_ip}" "
-    find /tmp/torch_tpu_relay/base/ -name '*.so' -exec cat {} + > /dev/null 2>&1 || true
-    if [ -n \"$remote_libtpu\" ] && [ -f \"$remote_libtpu\" ]; then
-      cat \"$remote_libtpu\" > /dev/null 2>&1 || true
-    fi
-  "
-
-  echo "Setting remote watchdogs on TPU VM..."
-  ssh -S "$control_path" "${ssh_user}@${tpu_ip}" "sudo shutdown -h +120 'Failsafe watchdog: 2h hard deadline' 2>/dev/null || true"
-
-  ssh -S "$control_path" "${ssh_user}@${tpu_ip}" '
-    cat << "EOF" > /tmp/tpu_idle_watchdog.sh
-#!/usr/bin/env bash
-idle_count=0
-while true; do
-  sleep 60
-  conns=$(ss -nt "( sport = :22 )" state established 2>/dev/null | grep -v Recv-Q | wc -l)
-  active=$(pgrep -f "torch_tpu|empty_test|pytest|bazel|python" 2>/dev/null | wc -l)
-  if [ "$conns" -eq 0 ] && [ "$active" -eq 0 ]; then
-    idle_count=$(( idle_count + 1 ))
-    if [ "$idle_count" -ge 15 ]; then
-      echo "Idle watchdog triggered: halting instance after 15m inactivity" | logger
-      sudo poweroff
-      exit 0
-    fi
-  else
-    idle_count=0
-  fi
-done
-EOF
-    chmod +x /tmp/tpu_idle_watchdog.sh
-    nohup /tmp/tpu_idle_watchdog.sh > /tmp/tpu_idle_watchdog.log 2>&1 &
-  '
+  # Nothing schedules a shutdown or a poweroff inside the guest. `shutdown -h`
+  # does not release a TPU node: the service brings the guest straight back up,
+  # so it keeps billing, but it comes back with /tmp wiped (that is where the
+  # base cache lives) and with a dead SSH control master. A pool has no way to
+  # tell that VM apart from a healthy one, so it keeps handing it work and it
+  # keeps failing in milliseconds. The deadline belongs on the host, where
+  # `spot_tpu_fleet.sh` can delete the node through the API.
 
   local session_env="$SESSION_ENV_FILE"
   local tmp_env="${session_env}.tmp.$$"
@@ -424,7 +329,7 @@ export TPU_PROJECT="${ALLOWED_PROJECT}"
 export TPU_IP="${tpu_ip}"
 export SSH_CONTROL_PATH="${control_path}"
 export SSH_USER="${ssh_user}"
-export REMOTE_LIBTPU_PATH="${remote_libtpu}"
+export SSH_IDENTITY="${HOME}/.ssh/google_compute_engine"
 EOF
   chmod 600 "$tmp_env"
   mv -f "$tmp_env" "$session_env"
@@ -573,7 +478,7 @@ cmd_down() {
   if [[ -n "${session_env:-}" ]]; then
     rm -f "$session_env" "${session_env}.tmp."* 2>/dev/null || true
   fi
-  unset TPU_NAME TPU_ZONE TPU_PROJECT TPU_IP SSH_CONTROL_PATH SSH_USER REMOTE_LIBTPU_PATH 2>/dev/null || true
+  unset TPU_NAME TPU_ZONE TPU_PROJECT TPU_IP SSH_CONTROL_PATH SSH_USER 2>/dev/null || true
   _CURRENT_PROVISIONING_NAME=""
   _CURRENT_PROVISIONING_ZONE=""
   _WITH_TPU_ACTIVE_NAME=""
@@ -602,7 +507,6 @@ cmd_status() {
   echo "Public IP:         ${TPU_IP:-unknown}"
   echo "SSH User:          ${SSH_USER:-unknown}"
   echo "Control Socket:    ${SSH_CONTROL_PATH:-unknown}"
-  echo "Remote LibTPU:     ${REMOTE_LIBTPU_PATH:-[none]}"
 
   local gcp_state
   gcp_state=$(gcloud compute tpus tpu-vm describe "${TPU_NAME:-}" \
@@ -781,6 +685,7 @@ CLI_NAME=""
 CLI_PROJECT=""
 CLI_MAX_AGE_HOURS=2
 CLI_DRY_RUN=false
+CLI_ON_DEMAND=false
 REMAINING_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -818,6 +723,10 @@ fi
 if [[ "$CLI_SUBCOMMAND" == "with-tpu" ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --on-demand)
+        CLI_ON_DEMAND=true
+        shift
+        ;;
       --zone)
         CLI_ZONE="$2"
         shift 2
@@ -859,6 +768,10 @@ if [[ "$CLI_SUBCOMMAND" == "with-tpu" ]]; then
 else
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --on-demand)
+        CLI_ON_DEMAND=true
+        shift
+        ;;
       --zone)
         CLI_ZONE="$2"
         shift 2

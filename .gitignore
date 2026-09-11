@@ -26,3 +26,24 @@ dist/
 # Vim undo files.
 *.un~
 .*.un~
+
+# Relay presubmit run output.
+presubmit_reports/
+# Agent scratch state.
+.agents/
+# Scratch notes and exploratory test scaffolding from bringing the relay up.
+/ORIGINAL_REQUEST.md
+/PROJECT.md
+/TEST_INFRA.md
+/TEST_READY.md
+tests/e2e/
+tests/stress_test_spot_tpu_manager.py
+tests/test_m2_process_and_vfio_stress.py
+tests/test_m3_lifecycle_process_supervision_stress.py
+tests/test_m3_signal_termination_stress.py
+tests/test_process_supervision_challenger.py
+tests/test_relay_runner.py
+tests/test_relay_runner_adversarial.py
+tests/test_relay_test_runner.sh
+tests/test_run_presubmit_v5_relay.sh
+tests/test_spot_tpu_manager_adversarial.sh

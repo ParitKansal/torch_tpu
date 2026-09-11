@@ -12,6 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Runs the presubmit test suite through Remote Build Execution instead of the
+# shared self-hosted runners. Bazel fans the test actions out across a pool of
+# single-chip TPU workers, so a PR finishes in minutes rather than sitting in
+# the ct5lp queue. Opt in per PR with a label:
+#
+#   run-rbe            Run alongside the normal presubmits and report advisory
+#                      results. Never blocks the PR.
+#   ci:replace-tpu-v5  Take TPU v5 out of presubmit.yml's matrix and gate the PR
+#                      on this workflow instead.
+#
+# See docs/CI_PRESUBMIT_AND_RBE_GUIDE.md.
+
 name: RBE Hardware TPU Tests (Opt-In)
 
 on:
@@ -20,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Execution mode (shadow = non-blocking, replacement = gating presubmit)'
+        description: 'shadow = advisory, replacement = gates the PR'
         type: choice
         default: 'shadow'
         options:
@@ -35,80 +47,132 @@ on:
           - 'tpu_v5e_only'
           - 'cpu_only'
 
+permissions:
+  contents: read
+  # Lets google-github-actions/auth mint a Workload Identity Federation token.
+  id-token: write
+
 concurrency:
-  group: shadow-rbe-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  # Labels unrelated to RBE still fire a `labeled` event. Park those runs in a
+  # group of their own so they can't cancel an RBE run already in flight.
+  group: >-
+    ${{ github.workflow }}-${{ github.head_ref || github.ref }}${{
+    github.event.action == 'labeled'
+    && !contains(fromJSON('["run-rbe", "ci:replace-tpu-v5"]'), github.event.label.name)
+    && format('-ignored-label-{0}', github.run_id) || '' }}
   cancel-in-progress: true
+
+env:
+  # RBE streams results over its own gRPC channel; the Build Event Service
+  # upload just adds latency here.
+  RBE_BAZEL_FLAGS: --bes_backend=
+
+  # Targets that don't yet run under full RBE. Each needs more than the single
+  # chip an RBE worker exposes, or reaches the network mid-test.
+  # TODO(jonathanskim): Tag these `no-rbe` in BUILD files and filter on the tag
+  # so this list can't go stale.
+  RBE_EXCLUDED_TARGETS: >-
+    -//tests:fp4_test
+    -//tests:ops_unit_test
+    -//tests:async_transfer_test
+    -//tests:ops_unit_test_tier3_cache
+    -//tests:ops_unit_test_tier3_cache_no_backup
+    -//tests/compile:activation_checkpointing_mem_test
+    -//tests/distributed:single_tpu_pg_test
 
 jobs:
   run_tests:
     name: "${{ matrix.job_info.name }}"
     if: >-
-      contains(github.event.pull_request.labels.*.name, 'run-rbe') ||
-      contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5') ||
-      contains(github.event.pull_request.labels.*.name, 'replace-tpu-v5') ||
-      contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5-rbe') ||
-      contains(github.event.pull_request.labels.*.name, 'replace-tpu-v5-with-rbe') ||
-      contains(github.event.pull_request.labels.*.name, 'ci:rbe') ||
       github.event_name == 'workflow_dispatch'
+      || contains(github.event.pull_request.labels.*.name, 'run-rbe')
+      || contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5')
+    # Shadow runs report results without blocking. Replacement runs stand in for
+    # the TPU v5 presubmit, so a failure has to block the PR.
     continue-on-error: >-
-      ${{
-        (contains(github.event.pull_request.labels.*.name, 'run-rbe') &&
-         !contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5') &&
-         !contains(github.event.pull_request.labels.*.name, 'replace-tpu-v5') &&
-         !contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5-rbe') &&
-         !contains(github.event.pull_request.labels.*.name, 'replace-tpu-v5-with-rbe')) ||
-        (github.event_name == 'workflow_dispatch' && inputs.mode != 'replacement')
-      }}
+      ${{ !(contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5')
+      || (github.event_name == 'workflow_dispatch' && inputs.mode == 'replacement')) }}
     strategy:
       fail-fast: false
       matrix:
-        job_info: [
-          {
-            name: "CPU Presubmit Tests",
-            runner: "ubuntu-latest",
-            config: "ci_cpu_presubmit_rbe",
-            extra_flags: '--bes_backend=""',
-          },
-          {
-            name: "TPU v5e Tests (Full RBE)",
-            runner: "ubuntu-latest",
-            config: "ci_tpu_v5_full_rbe",
-            extra_flags: '--bes_backend="" --test_tag_filters=presubmit-v5,-fails-on-tpu-v5,-nopresubmit,-notest,-nobuild',
-          },
-        ]
-    runs-on: ${{ matrix.job_info.runner }}
+        job_info:
+          - name: "CPU Presubmit Tests"
+            config: "ci_cpu_presubmit_rbe"
+            suite: "cpu_only"
+            extra_flags: ""
+          - name: "TPU v5e Tests (Full RBE)"
+            config: "ci_tpu_v5_full_rbe"
+            suite: "tpu_v5e_only"
+            extra_flags: "--test_tag_filters=presubmit-v5,-fails-on-tpu-v5,-nopresubmit,-notest,-nobuild"
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Fix Git Workspace Ownership
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # Workload Identity Federation, because rbe-tpu-oss carries
+      # constraints/iam.disableServiceAccountKeyCreation and so cannot hand out
+      # exportable service account keys.
+      - name: Check RBE credentials are configured
+        id: creds
+        env:
+          WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          IS_GATING: >-
+            ${{ contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5')
+            || (github.event_name == 'workflow_dispatch' && inputs.mode == 'replacement') }}
+        run: |
+          if [[ -n "$WIF_PROVIDER" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::RBE credentials are not configured." \
+            "Set the GCP_WIF_PROVIDER and GCP_RBE_SERVICE_ACCOUNT repository" \
+            "variables to point at a Workload Identity Federation provider" \
+            "with access to rbe-tpu-oss."
+          # A gating run that cannot reach RBE has verified nothing, so say so
+          # instead of reporting a green check.
+          if [[ "$IS_GATING" == "true" ]]; then
+            echo "::error::ci:replace-tpu-v5 gates this PR on RBE, but RBE" \
+              "credentials are missing. Configure Workload Identity Federation" \
+              "or drop the label and let the TPU v5 presubmit run."
+            exit 1
+          fi
+
       - name: Authenticate to GCP RBE
-        uses: google-github-actions/auth@v2
+        if: steps.creds.outputs.configured == 'true'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
         with:
-          credentials_json: ${{ secrets.GCP_RBE_SERVICE_ACCOUNT_KEY }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_RBE_SERVICE_ACCOUNT }}
 
       - name: Set up Bazel
-        if: matrix.job_info.runner == 'ubuntu-latest'
-        run: |
-          sudo npm install -g @bazel/bazelisk
-          sudo ln -sf $(which bazelisk) /usr/local/bin/bazel || true
+        if: steps.creds.outputs.configured == 'true'
+        # The npm package ships both `bazel` and `bazelisk` shims, and bazelisk
+        # picks the version out of .bazelversion.
+        run: sudo npm install -g @bazel/bazelisk
 
       - name: Run Test Suite
-        if: ${{ inputs.test_suite == '' || inputs.test_suite == 'all' || (inputs.test_suite == 'tpu_v5e_only' && matrix.job_info.config == 'ci_tpu_v5_full_rbe') || (inputs.test_suite == 'cpu_only' && matrix.job_info.config == 'ci_cpu_presubmit_rbe') }}
+        if: >-
+          steps.creds.outputs.configured == 'true'
+          && (inputs.test_suite == null
+          || inputs.test_suite == 'all'
+          || inputs.test_suite == matrix.job_info.suite)
+        env:
+          BAZEL_CONFIG: ${{ matrix.job_info.config }}
+          EXTRA_FLAGS: ${{ matrix.job_info.extra_flags }}
         run: |
+          # EXTRA_FLAGS, RBE_BAZEL_FLAGS and RBE_EXCLUDED_TARGETS are
+          # space-separated lists that have to word-split into separate Bazel
+          # arguments.
+          # shellcheck disable=SC2086
           bazel test \
-            --config=${{ matrix.job_info.config }} \
+            "--config=${BAZEL_CONFIG}" \
             --nocache_test_results \
             --test_output=errors \
-            ${{ matrix.job_info.extra_flags }} \
-            -- //tests/... \
-               -//tests:fp4_test \
-               -//tests:ops_unit_test \
-               -//tests:async_transfer_test \
-               -//tests/compile:activation_checkpointing_mem_test \
-               -//tests/distributed:single_tpu_pg_test \
-               -//tests:ops_unit_test_tier3_cache \
-               -//tests:ops_unit_test_tier3_cache_no_backup
+            ${RBE_BAZEL_FLAGS} \
+            ${EXTRA_FLAGS} \
+            -- //tests/... ${RBE_EXCLUDED_TARGETS}

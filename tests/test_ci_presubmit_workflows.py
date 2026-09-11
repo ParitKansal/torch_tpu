@@ -13,252 +13,342 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for GitHub Actions CI presubmit workflows and RBE bypass logic."""
+"""Tests for the CI presubmit workflows and the TPU v5 bypass path.
+
+These run the real matrix script and read the real workflow YAML. Nothing here
+re-implements the workflow logic, so a broken workflow fails the test.
+"""
 
 import json
 import os
 import re
+import subprocess
 import unittest
+
 import yaml
 
-REPO_ROOT = "/usr/local/google/home/jonathanskim/torch_tpu"
-PRESUBMIT_YML = os.path.join(REPO_ROOT, ".github", "workflows", "presubmit.yml")
-TEST_RBE_YML = os.path.join(REPO_ROOT, ".github", "workflows", "test_rbe_opt_in.yml")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORKFLOW_DIR = os.path.join(REPO_ROOT, ".github", "workflows")
+PRESUBMIT_YML = os.path.join(WORKFLOW_DIR, "presubmit.yml")
+TEST_RBE_YML = os.path.join(WORKFLOW_DIR, "test_rbe_opt_in.yml")
+MATRIX_SCRIPT = os.path.join(REPO_ROOT, "ci", "tools", "presubmit_job_matrix.sh")
+BAZELRC = os.path.join(REPO_ROOT, ".bazelrc")
+
+TPU_V5_RUNNER = "linux-x86-ct5lp-224-8tpu"
 
 
-class TestWorkflowSchemaAndYaml(unittest.TestCase):
-    """Verifies that the workflow YAML files are well-formed and meet schema requirements."""
-
-    def test_presubmit_yaml_valid(self):
-        self.assertTrue(os.path.exists(PRESUBMIT_YML), f"Missing {PRESUBMIT_YML}")
-        with open(PRESUBMIT_YML, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        self.assertIn("name", data)
-        on_data = data.get("on") or data.get(True)
-        self.assertIsNotNone(on_data, "Missing 'on' trigger section in presubmit.yml")
-        self.assertIn("jobs", data)
-        self.assertIn("setup", data["jobs"])
-        self.assertIn("run_tests", data["jobs"])
-        self.assertIn("tpu_v5_bypass_notice", data["jobs"])
-
-        # Check pull_request types
-        pr_config = on_data["pull_request"]
-        self.assertIn("types", pr_config)
-        self.assertIn("labeled", pr_config["types"])
-        self.assertIn("opened", pr_config["types"])
-        self.assertIn("synchronize", pr_config["types"])
-
-        # Check workflow_dispatch inputs
-        dispatch_inputs = on_data["workflow_dispatch"]["inputs"]
-        self.assertIn("bypass-tpu-v5", dispatch_inputs)
-        self.assertEqual(dispatch_inputs["bypass-tpu-v5"]["type"], "boolean")
-
-    def test_test_rbe_opt_in_yaml_valid(self):
-        self.assertTrue(os.path.exists(TEST_RBE_YML), f"Missing {TEST_RBE_YML}")
-        with open(TEST_RBE_YML, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        self.assertIn("name", data)
-        on_data = data.get("on") or data.get(True)
-        self.assertIsNotNone(on_data, "Missing 'on' trigger section in test_rbe_opt_in.yml")
-        self.assertIn("jobs", data)
-        self.assertIn("run_tests", data["jobs"])
-
-        # Check workflow_dispatch inputs
-        dispatch_inputs = on_data["workflow_dispatch"]["inputs"]
-        self.assertIn("mode", dispatch_inputs)
-        self.assertIn("test_suite", dispatch_inputs)
+def load_workflow(path):
+  """Parses a workflow file, working around YAML reading `on:` as True."""
+  with open(path, "r", encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+  if True in data:
+    data["on"] = data.pop(True)
+  return data
 
 
-class TestPresubmitMatrixLogic(unittest.TestCase):
-    """Verifies the exact matrix resolution logic embedded in presubmit.yml setup step."""
+def run_matrix_script(bypass=None):
+  """Runs the matrix script and returns (parsed matrix, raw stdout)."""
+  env = dict(os.environ)
+  env.pop("BYPASS_TPU_V5", None)
+  if bypass is not None:
+    env["BYPASS_TPU_V5"] = bypass
+  result = subprocess.run(
+      ["bash", MATRIX_SCRIPT],
+      cwd=REPO_ROOT,
+      env=env,
+      capture_output=True,
+      text=True,
+      check=True,
+  )
+  return json.loads(result.stdout), result.stdout
 
-    def evaluate_setup(self, event_name, event_action, label_added, labels, pr_title, pr_body, input_bypass):
-        ci_control_labels = {
-            "ci:bypass-tpu-v5", "ci:skip-tpu-v5", "bypass-tpu-v5", "skip-tpu-v5",
-            "ci:replace-tpu-v5", "replace-tpu-v5", "ci:replace-tpu-v5-rbe",
-            "replace-tpu-v5-with-rbe", "ci:disable-bazel-diff", "run-presubmit"
-        }
 
-        should_run = True
-        if event_name == "pull_request" and event_action == "labeled":
-            if label_added not in ci_control_labels:
-                should_run = False
+def runners(matrix):
+  return [entry["runner"] for entry in matrix]
 
-        bypass_labels = {
-            "ci:bypass-tpu-v5", "ci:skip-tpu-v5", "bypass-tpu-v5", "skip-tpu-v5",
-            "ci:replace-tpu-v5", "replace-tpu-v5", "ci:replace-tpu-v5-rbe",
-            "replace-tpu-v5-with-rbe"
-        }
-        has_bypass_label = any(l in bypass_labels for l in labels)
 
-        tag_pattern = r"\[(skip|bypass)[-_]tpu[-_]?v?5\]"
-        has_tag = bool(re.search(tag_pattern, pr_title, re.I) or re.search(tag_pattern, pr_body, re.I))
+def control_labels(expression):
+  """Pulls the label list out of a `contains(fromJSON('[...]'), ...)` call."""
+  match = re.search(r"fromJSON\('(\[.*?\])'\)", expression, re.DOTALL)
+  if not match:
+    return None
+  return json.loads(match.group(1))
 
-        bypass_v5 = input_bypass or has_bypass_label or has_tag
 
-        cpu_job = {
-            "name": "CPU",
-            "runner": "linux-x86-n4-16",
-            "config": "ci_cpu_presubmit",
-            "extra_flags": ""
-        }
-        v5_job = {
-            "runner": "linux-x86-ct5lp-224-8tpu",
-            "config": "ci_tpu_v5_presubmit",
-            "extra_flags": '--run_under="$(pwd)/ci/tools/parallel_accelerator_execute.sh"'
-        }
-        v7_job = {
-            "runner": "linux-x86-tpu7x-224-4tpu",
-            "config": "ci_tpu_v7_presubmit",
-            "extra_flags": '--run_under="$(pwd)/ci/tools/parallel_accelerator_execute.sh"'
-        }
+class TestPresubmitJobMatrixScript(unittest.TestCase):
+  """Runs ci/tools/presubmit_job_matrix.sh and checks what it prints."""
 
-        matrix = [cpu_job, v7_job] if bypass_v5 else [cpu_job, v5_job, v7_job]
-        return should_run, bypass_v5, matrix
+  def test_default_matrix_covers_cpu_v5_and_v7(self):
+    matrix, _ = run_matrix_script()
+    self.assertEqual(
+        runners(matrix),
+        ["linux-x86-n4-16", TPU_V5_RUNNER, "linux-x86-tpu7x-224-4tpu"],
+    )
 
-    def test_default_pr_runs_all_three(self):
-        should_run, bypass_v5, matrix = self.evaluate_setup(
-            "pull_request", "opened", "", [], "Fix aten kernels", "", False
+  def test_bypass_drops_only_the_tpu_v5_entry(self):
+    default_matrix, _ = run_matrix_script()
+    bypassed, _ = run_matrix_script(bypass="true")
+    self.assertNotIn(TPU_V5_RUNNER, runners(bypassed))
+    self.assertEqual(
+        bypassed,
+        [e for e in default_matrix if e["runner"] != TPU_V5_RUNNER],
+        "Bypass must remove the TPU v5 entry and leave the others untouched",
+    )
+
+  def test_only_the_literal_string_true_bypasses(self):
+    for value in ["false", "", "TRUE", "1", "yes"]:
+      with self.subTest(value=value):
+        matrix, _ = run_matrix_script(bypass=value)
+        self.assertIn(TPU_V5_RUNNER, runners(matrix))
+
+  def test_output_is_a_single_line(self):
+    # The workflow appends this to $GITHUB_OUTPUT as `job_matrix=<json>`, which
+    # only reads back correctly if the JSON has no embedded newlines.
+    _, raw = run_matrix_script()
+    self.assertEqual(raw.count("\n"), 1)
+
+  def test_accelerator_runners_use_the_chip_lease_wrapper(self):
+    matrix, _ = run_matrix_script()
+    for entry in matrix:
+      if entry["runner"] == "linux-x86-n4-16":
+        self.assertEqual(entry["extra_flags"], "")
+      else:
+        self.assertIn(
+            "ci/tools/parallel_accelerator_execute.sh", entry["extra_flags"]
         )
-        self.assertTrue(should_run)
-        self.assertFalse(bypass_v5)
-        self.assertEqual(len(matrix), 3)
-        runners = [item.get("name", item.get("runner")) for item in matrix]
-        self.assertIn("CPU", runners)
-        self.assertIn("linux-x86-ct5lp-224-8tpu", runners)
-        self.assertIn("linux-x86-tpu7x-224-4tpu", runners)
 
-    def test_shadow_run_mode(self):
-        # run-rbe label applied: presubmit matrix must KEEP TPU v5 running
-        should_run, bypass_v5, matrix = self.evaluate_setup(
-            "pull_request", "labeled", "run-rbe", ["run-rbe"], "Fix aten kernels", "", False
+  def test_default_matrix_matches_upstream_main(self):
+    """The default matrix must stay identical to the one on main.
+
+    Without this, a change here silently drops or renames a presubmit leg.
+    """
+    try:
+      upstream = subprocess.run(
+          ["git", "show", "origin/main:.github/workflows/presubmit.yml"],
+          cwd=REPO_ROOT,
+          capture_output=True,
+          text=True,
+          check=True,
+      ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+      self.skipTest("origin/main is not available in this checkout")
+
+    upstream_matrix = yaml.safe_load(upstream)["jobs"]["run_tests"]["strategy"][
+        "matrix"
+    ]["job_info"]
+    generated, _ = run_matrix_script()
+    self.assertEqual(generated, upstream_matrix)
+
+
+class TestPresubmitWorkflow(unittest.TestCase):
+  """Checks presubmit.yml wiring that the matrix script can't cover."""
+
+  @classmethod
+  def setUpClass(cls):
+    cls.workflow = load_workflow(PRESUBMIT_YML)
+    cls.jobs = cls.workflow["jobs"]
+
+  def test_reacts_to_label_changes(self):
+    types = self.workflow["on"]["pull_request"]["types"]
+    for event_type in ["opened", "synchronize", "reopened", "labeled"]:
+      self.assertIn(event_type, types)
+
+  def test_bypass_is_also_a_manual_dispatch_input(self):
+    dispatch = self.workflow["on"]["workflow_dispatch"]["inputs"]
+    self.assertEqual(dispatch["bypass-tpu-v5"]["type"], "boolean")
+    self.assertFalse(dispatch["bypass-tpu-v5"]["default"])
+
+  def test_concurrency_and_setup_agree_on_control_labels(self):
+    """Both sites list the labels that CI reacts to, so they must match.
+
+    `concurrency` can't read `env`, so the list is written twice. If they drift,
+    a control label either cancels a run it shouldn't or fails to start one.
+    """
+    from_concurrency = control_labels(self.workflow["concurrency"]["group"])
+    from_setup = control_labels(self.jobs["setup"]["if"])
+    self.assertIsNotNone(from_concurrency)
+    self.assertIsNotNone(from_setup)
+    self.assertEqual(from_concurrency, from_setup)
+
+  def test_control_labels_include_both_bypass_labels(self):
+    labels = control_labels(self.jobs["setup"]["if"])
+    self.assertIn("ci:bypass-tpu-v5", labels)
+    self.assertIn("ci:replace-tpu-v5", labels)
+
+  def test_unrelated_labels_get_their_own_concurrency_group(self):
+    group = self.workflow["concurrency"]["group"]
+    self.assertIn("github.event.action == 'labeled'", group)
+    self.assertIn("ignored-label", group)
+    self.assertIn("github.run_id", group)
+
+  def test_setup_gate_lets_non_label_events_through(self):
+    self.assertIn("github.event.action != 'labeled'", self.jobs["setup"]["if"])
+
+  def test_both_bypass_labels_set_bypass_tpu_v5(self):
+    bypass_env = self.jobs["setup"]["steps"][-1]["env"]["BYPASS_TPU_V5"]
+    self.assertIn("inputs.bypass-tpu-v5", bypass_env)
+    self.assertIn("'ci:bypass-tpu-v5'", bypass_env)
+    self.assertIn("'ci:replace-tpu-v5'", bypass_env)
+
+  def test_run_tests_takes_its_matrix_from_setup(self):
+    run_tests = self.jobs["run_tests"]
+    self.assertEqual(run_tests["needs"], "setup")
+    self.assertIn(
+        "needs.setup.outputs.job_matrix",
+        run_tests["strategy"]["matrix"]["job_info"],
+    )
+
+  def test_bypass_notice_reports_the_tpu_v5_check_name(self):
+    """The notice job stands in for the required check, so names must match."""
+    matrix, _ = run_matrix_script()
+    v5_entry = next(e for e in matrix if e["runner"] == TPU_V5_RUNNER)
+    expected = self.jobs["run_tests"]["name"].replace(
+        "${{ matrix.job_info.name || matrix.job_info.runner }}",
+        v5_entry.get("name", v5_entry["runner"]),
+    )
+    self.assertEqual(self.jobs["tpu_v5_bypass_notice"]["name"], expected)
+
+  def test_bypass_notice_only_runs_when_v5_is_bypassed(self):
+    notice = self.jobs["tpu_v5_bypass_notice"]
+    self.assertEqual(notice["needs"], "setup")
+    self.assertIn("needs.setup.outputs.tpu_v5_bypassed == 'true'", notice["if"])
+
+
+class TestRbeOptInWorkflow(unittest.TestCase):
+  """Checks the trigger, gating, and auth wiring in test_rbe_opt_in.yml."""
+
+  @classmethod
+  def setUpClass(cls):
+    cls.workflow = load_workflow(TEST_RBE_YML)
+    cls.job = cls.workflow["jobs"]["run_tests"]
+    cls.steps = {step["name"]: step for step in cls.job["steps"]}
+
+  def test_runs_only_when_opted_in(self):
+    condition = self.job["if"]
+    self.assertIn("'run-rbe'", condition)
+    self.assertIn("'ci:replace-tpu-v5'", condition)
+    self.assertIn("github.event_name == 'workflow_dispatch'", condition)
+
+  def test_replacement_mode_gates_the_pr(self):
+    """continue-on-error must be false exactly when RBE stands in for TPU v5."""
+    expression = self.job["continue-on-error"]
+    self.assertIn("'ci:replace-tpu-v5'", expression)
+    self.assertIn("inputs.mode == 'replacement'", expression)
+    # The whole opt-in test is negated, so anything else stays advisory.
+    self.assertTrue(expression.lstrip().startswith("${{ !("))
+
+  def test_shadow_label_is_not_in_the_gating_expression(self):
+    self.assertNotIn("run-rbe", self.job["continue-on-error"])
+
+  def test_auth_uses_workload_identity_not_a_service_account_key(self):
+    """rbe-tpu-oss blocks service account key creation, so WIF is the only way."""
+    auth = self.steps["Authenticate to GCP RBE"]
+    self.assertIn("workload_identity_provider", auth["with"])
+    self.assertNotIn("credentials_json", auth["with"])
+    self.assertEqual(self.workflow["permissions"]["id-token"], "write")
+
+  def test_third_party_actions_are_pinned_to_a_commit(self):
+    for name, step in self.steps.items():
+      if "uses" not in step:
+        continue
+      with self.subTest(step=name):
+        ref = step["uses"].split("@")[1]
+        self.assertRegex(ref, r"^[0-9a-f]{40}$", "Pin actions to a full SHA")
+
+  def test_missing_credentials_fail_a_gating_run(self):
+    check = self.steps["Check RBE credentials are configured"]
+    self.assertIn("'ci:replace-tpu-v5'", check["env"]["IS_GATING"])
+    self.assertIn("exit 1", check["run"])
+
+  def test_steps_needing_credentials_are_skipped_without_them(self):
+    for name in ["Authenticate to GCP RBE", "Set up Bazel", "Run Test Suite"]:
+      with self.subTest(step=name):
+        self.assertIn("steps.creds.outputs.configured == 'true'",
+                      self.steps[name]["if"])
+
+  def test_test_suite_input_selects_a_matrix_leg(self):
+    suites = {
+        entry["suite"]
+        for entry in self.job["strategy"]["matrix"]["job_info"]
+    }
+    options = set(self.workflow["on"]["workflow_dispatch"]["inputs"]
+                  ["test_suite"]["options"])
+    self.assertEqual(options, suites | {"all"})
+
+  def test_excluded_targets_are_negated_bazel_patterns(self):
+    excluded = self.workflow["env"]["RBE_EXCLUDED_TARGETS"].split()
+    self.assertTrue(excluded)
+    for target in excluded:
+      with self.subTest(target=target):
+        self.assertTrue(target.startswith("-//"))
+
+
+class TestTpuConfigsPinOnlyTestActions(unittest.TestCase):
+  """TPU CI must send compilation to RBE and keep only tests on the runner.
+
+  `--spawn_strategy` sets the default for every spawn, so
+  `--spawn_strategy=standalone,local` also dragged every compile action onto
+  the ct5lp host while its eight chips sat idle. A live A/B against
+  projects/tensorflow-testing showed the same genrule reporting runner=local
+  under `--spawn_strategy` and runner=remote under `--strategy=TestRunner`.
+  """
+
+  TPU_CONFIGS = (
+      "ci_tpu_base",
+      "ci_tpu_nightly",
+      "ci_tpu_v5",
+      "ci_tpu_v5_presubmit",
+      "ci_tpu_v6",
+  )
+
+  def flags_for(self, config, seen=None):
+    """Expands a --config the way bazel does, following --config= chains."""
+    seen = set() if seen is None else seen
+    if config in seen:
+      return []
+    seen.add(config)
+
+    flags = []
+    with open(BAZELRC, encoding="utf-8") as fh:
+      for raw in fh:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+          continue
+        head, _, rest = line.partition(" ")
+        if head.partition(":")[2] != config:
+          continue
+        for flag in rest.split():
+          if flag.startswith("--config="):
+            flags.extend(self.flags_for(flag.split("=", 1)[1], seen))
+          else:
+            flags.append(flag)
+    return flags
+
+  def test_every_tpu_config_pins_the_test_mnemonic(self):
+    for config in self.TPU_CONFIGS:
+      with self.subTest(config=config):
+        self.assertIn("--strategy=TestRunner=local", self.flags_for(config))
+
+  def test_no_tpu_config_sets_a_default_spawn_strategy(self):
+    for config in self.TPU_CONFIGS:
+      with self.subTest(config=config):
+        pins = [f for f in self.flags_for(config) if f.startswith("--spawn_strategy")]
+        self.assertEqual(pins, [], f"{config} pins every spawn locally: {pins}")
+
+  def test_tpu_configs_still_reach_remote_execution(self):
+    """A local pin is pointless if the config never had an executor."""
+    for config in self.TPU_CONFIGS:
+      with self.subTest(config=config):
+        flags = self.flags_for(config)
+        self.assertTrue(
+            any(f.startswith("--remote_executor=") for f in flags),
+            f"{config} has no remote executor to offload to",
         )
-        self.assertFalse(bypass_v5)
-        self.assertEqual(len(matrix), 3)
-        runners = [item.get("name", item.get("runner")) for item in matrix]
-        self.assertIn("linux-x86-ct5lp-224-8tpu", runners)
 
-    def test_replacement_mode_via_label(self):
-        for lbl in ["ci:replace-tpu-v5", "replace-tpu-v5", "ci:replace-tpu-v5-rbe", "replace-tpu-v5-with-rbe"]:
-            with self.subTest(label=lbl):
-                should_run, bypass_v5, matrix = self.evaluate_setup(
-                    "pull_request", "labeled", lbl, [lbl], "Fix aten kernels", "", False
-                )
-                self.assertTrue(should_run)
-                self.assertTrue(bypass_v5)
-                self.assertEqual(len(matrix), 2)
-                runners = [item.get("name", item.get("runner")) for item in matrix]
-                self.assertNotIn("linux-x86-ct5lp-224-8tpu", runners)
-                self.assertIn("CPU", runners)
-                self.assertIn("linux-x86-tpu7x-224-4tpu", runners)
-
-    def test_standalone_bypass_labels(self):
-        for lbl in ["ci:bypass-tpu-v5", "ci:skip-tpu-v5", "bypass-tpu-v5", "skip-tpu-v5"]:
-            with self.subTest(label=lbl):
-                should_run, bypass_v5, matrix = self.evaluate_setup(
-                    "pull_request", "labeled", lbl, [lbl], "Fix aten kernels", "", False
-                )
-                self.assertTrue(should_run)
-                self.assertTrue(bypass_v5)
-                self.assertEqual(len(matrix), 2)
-                runners = [item.get("name", item.get("runner")) for item in matrix]
-                self.assertNotIn("linux-x86-ct5lp-224-8tpu", runners)
-
-    def test_pr_title_and_body_tags(self):
-        test_cases = [
-            ("[skip-tpu-v5] Fix docs", ""),
-            ("Fix docs [bypass-tpu-v5]", ""),
-            ("[skip-tpu5] Update tests", ""),
-            ("[bypass-tpu5] Update tests", ""),
-            ("Fix docs", "Please [skip-tpu-v5] on this PR"),
-            ("Fix docs", "[bypass-tpu-v5] due to runner outage"),
-        ]
-        for title, body in test_cases:
-            with self.subTest(title=title, body=body):
-                should_run, bypass_v5, matrix = self.evaluate_setup(
-                    "pull_request", "opened", "", [], title, body, False
-                )
-                self.assertTrue(should_run)
-                self.assertTrue(bypass_v5)
-                self.assertEqual(len(matrix), 2)
-
-    def test_workflow_dispatch_input(self):
-        should_run, bypass_v5, matrix = self.evaluate_setup(
-            "workflow_dispatch", "", "", [], "", "", True
-        )
-        self.assertTrue(should_run)
-        self.assertTrue(bypass_v5)
-        self.assertEqual(len(matrix), 2)
-
-    def test_unrelated_label_does_not_trigger_rerun(self):
-        should_run, bypass_v5, matrix = self.evaluate_setup(
-            "pull_request", "labeled", "documentation", ["documentation"], "Fix docs", "", False
-        )
-        self.assertFalse(should_run)
-
-    def test_adversarial_inputs(self):
-        # Malformed JSON in PR_LABELS string or None values
-        should_run, bypass_v5, matrix = self.evaluate_setup(
-            "pull_request", "opened", "", [], "Emoji PR 🚀💥 [skip-tpu-v5] 🎉", "Details 🧠", "  TRUE "
-        )
-        self.assertTrue(should_run)
-        self.assertTrue(bypass_v5)
-        self.assertEqual(len(matrix), 2)
-
-        # Unicode Japanese / German text with skip tag
-        should_run, bypass_v5, matrix = self.evaluate_setup(
-            "pull_request", "opened", "", [], "テスト修正 [skip-tpu5]", "Änderung", False
-        )
-        self.assertTrue(bypass_v5)
-        self.assertEqual(len(matrix), 2)
-
-
-class TestRbeTriggerAndGatingLogic(unittest.TestCase):
-    """Verifies the trigger and continue-on-error gating logic in test_rbe_opt_in.yml."""
-
-    def evaluate_rbe(self, labels, event_name, input_mode):
-        rbe_trigger_labels = {
-            "run-rbe", "ci:replace-tpu-v5", "replace-tpu-v5",
-            "ci:replace-tpu-v5-rbe", "replace-tpu-v5-with-rbe", "ci:rbe"
-        }
-        triggered = any(l in rbe_trigger_labels for l in labels) or (event_name == "workflow_dispatch")
-
-        replace_labels = {
-            "ci:replace-tpu-v5", "replace-tpu-v5",
-            "ci:replace-tpu-v5-rbe", "replace-tpu-v5-with-rbe"
-        }
-        is_replace = any(l in replace_labels for l in labels) or (event_name == "workflow_dispatch" and input_mode == "replacement")
-
-        continue_on_error = not is_replace
-        return triggered, continue_on_error
-
-    def test_rbe_idle_by_default(self):
-        triggered, continue_on_error = self.evaluate_rbe([], "pull_request", "shadow")
-        self.assertFalse(triggered)
-
-    def test_rbe_shadow_run_mode(self):
-        triggered, continue_on_error = self.evaluate_rbe(["run-rbe"], "pull_request", "shadow")
-        self.assertTrue(triggered)
-        self.assertTrue(continue_on_error, "Shadow mode must NOT block PR (continue-on-error=true)")
-
-    def test_rbe_replacement_mode_is_gating(self):
-        for lbl in ["ci:replace-tpu-v5", "replace-tpu-v5", "ci:replace-tpu-v5-rbe", "replace-tpu-v5-with-rbe"]:
-            with self.subTest(label=lbl):
-                triggered, continue_on_error = self.evaluate_rbe([lbl], "pull_request", "shadow")
-                self.assertTrue(triggered)
-                self.assertFalse(continue_on_error, "Replacement mode MUST block PR on failure (continue-on-error=false)")
-
-    def test_rbe_workflow_dispatch_modes(self):
-        # Dispatch with shadow
-        triggered, continue_on_error = self.evaluate_rbe([], "workflow_dispatch", "shadow")
-        self.assertTrue(triggered)
-        self.assertTrue(continue_on_error)
-
-        # Dispatch with replacement
-        triggered, continue_on_error = self.evaluate_rbe([], "workflow_dispatch", "replacement")
-        self.assertTrue(triggered)
-        self.assertFalse(continue_on_error)
+  def test_the_benchmark_config_keeps_its_local_pin(self):
+    """Benchmarks want stable timing, not throughput. Leave that one alone."""
+    self.assertIn("--spawn_strategy=standalone,local", self.flags_for("bench"))
 
 
 if __name__ == "__main__":
-    unittest.main()
+  unittest.main()

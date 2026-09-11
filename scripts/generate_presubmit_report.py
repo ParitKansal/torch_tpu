@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """generate_presubmit_report.py
 
 Parses test logs, JUnit XML artifacts, and Bazel execution metadata
@@ -34,17 +48,38 @@ def extract_diagnostics(log_path: str, max_lines: int = 50) -> str:
   if not lines:
     return "Empty log file."
 
-  # 1. Search for Python Traceback
+  # 1. Relay and infrastructure faults come first. They explain every traceback
+  # printed after them, so reporting the traceback instead just points the
+  # reader at a test that was never the problem.
+  relay_patterns = [
+      "ERROR [relay_test_runner]",
+      "ERROR [remote_tpu_executor]",
+      "Project boundary violation",
+      "Preemption detected",
+      "ControlMaster connection failed",
+  ]
+  relay_indices = [
+      i
+      for i, line in enumerate(lines)
+      if any(pat in line for pat in relay_patterns)
+  ]
+  if relay_indices:
+    return "\n".join(lines[relay_indices[0] : relay_indices[0] + max_lines])
+
+  # 2. Search for Python Traceback
+  #
+  # The first one, not the last: chained exceptions print the root cause first
+  # and the handler's own failure last, and the root cause is what's wanted.
   tb_indices = [
       i
       for i, line in enumerate(lines)
       if "Traceback (most recent call last):" in line
   ]
   if tb_indices:
-    start = tb_indices[-1]
+    start = tb_indices[0]
     return "\n".join(lines[start : start + max_lines])
 
-  # 2. Search for C++ Fatal Errors, SIGSEGV, or Check failed
+  # 3. Search for C++ Fatal Errors, SIGSEGV, or Check failed
   fatal_patterns = [
       "Check failed:",
       "SIGSEGV",
@@ -65,7 +100,7 @@ def extract_diagnostics(log_path: str, max_lines: int = 50) -> str:
     start = max(0, fatal_indices[-1] - 3)
     return "\n".join(lines[start : start + max_lines])
 
-  # 3. Search for TPU device or runtime errors
+  # 4. Search for TPU device or runtime errors
   tpu_patterns = [
       "InitializePjrtPlugin failed",
       "The TPU is already in use",
@@ -81,23 +116,6 @@ def extract_diagnostics(log_path: str, max_lines: int = 50) -> str:
   ]
   if tpu_indices:
     start = max(0, tpu_indices[0] - 2)
-    return "\n".join(lines[start : start + max_lines])
-
-  # 4. Search for Relay runner errors or preemption
-  relay_patterns = [
-      "ERROR [relay_test_runner]",
-      "ERROR [remote_tpu_executor]",
-      "Project boundary violation",
-      "Preemption detected",
-      "ControlMaster connection failed",
-  ]
-  relay_indices = [
-      i
-      for i, line in enumerate(lines)
-      if any(pat in line for pat in relay_patterns)
-  ]
-  if relay_indices:
-    start = relay_indices[0]
     return "\n".join(lines[start : start + max_lines])
 
   # 5. Fallback: last 40 lines
@@ -260,6 +278,107 @@ def parse_xml_report(xml_path: str):
   }
 
 
+# Bazel prints one of these per target once the run ends. The status column is
+# padded out to a fixed width, so the target and the verdict are separated by a
+# run of spaces rather than a single one.
+BAZEL_STATUS_LINE = re.compile(
+    r"^(?P<target>//\S+)\s+(?:\(cached\)\s+)?"
+    r"(?P<status>PASSED|FAILED|TIMEOUT|FLAKY|NO STATUS)\b"
+)
+
+RELAY_INFRA_FAILURES = frozenset({
+    "Spot TPU Preempted",
+    "SSH Connection Failed",
+    "TPU State Unknown",
+    "TPU Base Cache Missing",
+    "No free TPU in pool",
+    "No active TPU session",
+    "Incomplete TPU session",
+    "Relay executor missing",
+    "Test Report Not Retrieved",
+    "Test Timeout",
+})
+
+
+def parse_bazel_statuses(bazel_log: str) -> dict:
+  """Reads the verdict bazel itself reached for each target.
+
+  This is the only source that knows whether an action ran at all. The xml is
+  for counts and diagnostics; it cannot answer "did this target run in *this*
+  invocation", and a sharded target leaves no top-level test.xml to find.
+  """
+  statuses = {}
+  if not bazel_log or not os.path.isfile(bazel_log):
+    return statuses
+
+  try:
+    with open(bazel_log, "r", errors="replace") as f:
+      content = f.read()
+  except OSError:
+    return statuses
+
+  # Bazel redraws its progress line with carriage returns.
+  for line in strip_ansi(content).replace("\r", "\n").splitlines():
+    match = BAZEL_STATUS_LINE.match(line.strip())
+    if match:
+      statuses[match.group("target")] = match.group("status")
+  return statuses
+
+
+def collect_xml_paths(testlogs_dir: str, target: str, min_mtime: float = 0.0):
+  """Returns this target's report files, newest run only.
+
+  A sharded target writes shard_1_of_N/test.xml and has nothing at the top
+  level, so looking only for test.xml finds nothing and the target reads as
+  though it never built.
+  """
+  base = os.path.join(testlogs_dir, target_to_testlog_relpath(target))
+  if not os.path.isdir(base):
+    return [], 0
+
+  candidates = []
+  top = os.path.join(base, "test.xml")
+  if os.path.isfile(top):
+    candidates.append(top)
+  try:
+    entries = sorted(os.listdir(base))
+  except OSError:
+    entries = []
+  for entry in entries:
+    shard = os.path.join(base, entry, "test.xml")
+    if os.path.isfile(shard):
+      candidates.append(shard)
+
+  fresh, stale = [], 0
+  for path in candidates:
+    try:
+      if os.path.getmtime(path) < min_mtime:
+        stale += 1
+        continue
+    except OSError:
+      continue
+    fresh.append(path)
+  return fresh, stale
+
+
+def parse_target_reports(xml_paths):
+  """Sums every shard's report into one record for the target."""
+  totals = None
+  for path in xml_paths:
+    shard = parse_xml_report(path)
+    if shard is None:
+      continue
+    if totals is None:
+      totals = dict(shard)
+      continue
+    for key in ("tests", "failures", "errors", "skipped"):
+      totals[key] += shard[key]
+    totals["time"] += shard["time"]
+    if not totals["error_message"]:
+      totals["error_message"] = shard["error_message"]
+  return totals
+
+
 def parse_session_env(session_env_path: str) -> dict:
   res = {
       "TPU_NAME": "unknown",
@@ -284,6 +403,36 @@ def parse_session_env(session_env_path: str) -> dict:
   except OSError:
     pass
   return res
+
+
+def summarize_pool(pool_dir: str) -> dict:
+  """Describes a fleet the way parse_session_env describes one VM.
+
+  A pool run has no single session file, so the header names the fleet and the
+  JSON keeps the individual VMs. Which VM served which shard is the first thing
+  you need when a run goes wrong.
+  """
+  sessions = []
+  if pool_dir and os.path.isdir(pool_dir):
+    sessions = sorted(
+        os.path.join(pool_dir, name)
+        for name in os.listdir(pool_dir)
+        if name.endswith(".env")
+    )
+  if not sessions:
+    return {}
+
+  parsed = [parse_session_env(path) for path in sessions]
+  names = sorted(p["TPU_NAME"] for p in parsed if p["TPU_NAME"] != "unknown")
+  if not names:
+    return {}
+
+  return {
+      "TPU_NAME": f"{len(names)} VM pool",
+      "TPU_VMS": names,
+      "TPU_ZONE": ", ".join(sorted({p["TPU_ZONE"] for p in parsed})),
+      "TPU_PROJECT": parsed[0]["TPU_PROJECT"],
+  }
 
 
 def discover_targets_from_testlogs(testlogs_dir: str) -> list[str]:
@@ -363,6 +512,11 @@ def parse_args():
       help="Path to active TPU session file",
   )
   parser.add_argument(
+      "--session-pool",
+      default="",
+      help="Directory of session files, when the run spread across a fleet",
+  )
+  parser.add_argument(
       "--duration",
       type=float,
       default=0.0,
@@ -379,6 +533,15 @@ def parse_args():
       default=0,
       help="Exit code returned by Bazel process",
   )
+  parser.add_argument(
+      "--run-started-at",
+      type=float,
+      default=0.0,
+      help=(
+          "Unix time this run started. bazel-testlogs survives across runs, so "
+          "anything older than this is from a previous run and is ignored."
+      ),
+  )
   return parser.parse_args()
 
 
@@ -386,7 +549,9 @@ def main():
   args = parse_args()
   os.makedirs(args.output_dir, exist_ok=True)
 
-  session_info = parse_session_env(args.session_env)
+  session_info = summarize_pool(args.session_pool) or parse_session_env(
+      args.session_env
+  )
   if args.dry_run and session_info["TPU_NAME"] == "unknown":
     session_info["TPU_NAME"] = "simulated-dry-run-vm"
 
@@ -407,11 +572,14 @@ def main():
     if not targets:
       targets = discover_targets_from_testlogs(testlogs_dir)
 
+  bazel_statuses = parse_bazel_statuses(args.bazel_log)
+
   target_records = []
   total_targets = len(targets)
   passed_targets = 0
   failed_targets = 0
   skipped_targets = 0
+  infra_failures = 0
 
   for target in targets:
     rel_path = target_to_testlog_relpath(target)
@@ -424,7 +592,7 @@ def main():
           "status": "DRY_RUN",
           "duration_seconds": 0.0,
           "exit_code": 0,
-          "tests_count": 1,
+          "tests_count": 0,
           "failures_count": 0,
           "errors_count": 0,
           "skipped_count": 0,
@@ -433,86 +601,86 @@ def main():
           "error_message": "",
           "failure_details": "",
       })
-      passed_targets += 1
       continue
 
-    xml_data = parse_xml_report(xml_path)
-    if xml_data is not None:
-      has_fail = xml_data["failures"] > 0 or xml_data["errors"] > 0
-      status = "FAILED" if has_fail else "PASSED"
-      exit_code = 1 if has_fail else 0
-      err_msg = xml_data["error_message"]
-      diag = extract_diagnostics(log_path) if has_fail else ""
+    xml_paths, stale_count = collect_xml_paths(
+        testlogs_dir, target, args.run_started_at
+    )
+    xml_data = parse_target_reports(xml_paths)
+    bazel_status = bazel_statuses.get(target)
 
-      if has_fail:
-        failed_targets += 1
-      else:
-        passed_targets += 1
+    # Bazel decides pass or fail. It is the only party that knows whether the
+    # action ran in this invocation; the xml only says what a test process
+    # wrote, whenever that was. Deriving status from the xml alone reported a
+    # green run as 14 failures, because a sharded target has no top-level
+    # test.xml and "no xml" was being read as "did not build".
+    if bazel_status == "PASSED":
+      status, exit_code = "PASSED", 0
+    elif bazel_status in ("FAILED", "TIMEOUT", "FLAKY"):
+      status, exit_code = bazel_status, 1
+    elif bazel_status == "NO STATUS":
+      status, exit_code = "NO_STATUS", 1
+    elif xml_paths:
+      # No summary line, but this run did leave a report behind.
+      has_fail = xml_data is not None and (
+          xml_data["failures"] > 0 or xml_data["errors"] > 0
+      )
+      status, exit_code = ("FAILED", 1) if has_fail else ("PASSED", 0)
+    else:
+      status, exit_code = "NO_STATUS", 1
+
+    err_msg = xml_data["error_message"] if xml_data else ""
+
+    # An infra failure is not a code regression, and reporting it as a plain
+    # FAILED sends whoever reads this hunting through a test they never broke.
+    if err_msg in RELAY_INFRA_FAILURES and status != "PASSED":
+      status = "INFRA_FAILED"
+
+    failed = status not in ("PASSED", "DRY_RUN")
+    if failed:
+      failed_targets += 1
+      if status == "INFRA_FAILED":
+        infra_failures += 1
+    else:
+      passed_targets += 1
+
+    if not err_msg and status == "NO_STATUS":
+      err_msg = (
+          f"No result for this target in this run "
+          f"({stale_count} report(s) on disk from an earlier run)"
+          if stale_count
+          else "No result for this target in this run"
+      )
+
+    diag = ""
+    if failed:
+      if os.path.isfile(log_path):
+        diag = extract_diagnostics(log_path)
+      elif xml_paths:
+        diag = extract_diagnostics(
+            os.path.join(os.path.dirname(xml_paths[0]), "test.log")
+        )
+      elif args.bazel_log and os.path.isfile(args.bazel_log):
+        diag = extract_diagnostics(args.bazel_log)
+
+    if xml_data:
       skipped_targets += xml_data["skipped"]
 
-      target_records.append({
-          "target": target,
-          "status": status,
-          "duration_seconds": round(xml_data["time"], 2),
-          "exit_code": exit_code,
-          "tests_count": xml_data["tests"],
-          "failures_count": xml_data["failures"],
-          "errors_count": xml_data["errors"],
-          "skipped_count": xml_data["skipped"],
-          "log_file": log_path,
-          "xml_file": xml_path,
-          "error_message": err_msg,
-          "failure_details": diag,
-      })
-    else:
-      passed_in_log = False
-      if args.bazel_log and os.path.isfile(args.bazel_log):
-        try:
-          with open(args.bazel_log, "r", errors="replace") as bf:
-            log_content = bf.read()
-            if f"{target} PASSED" in log_content or f"{target} (cached) PASSED" in log_content:
-              passed_in_log = True
-        except OSError:
-          pass
-
-      if passed_in_log or (args.bazel_exit_code == 0):
-        passed_targets += 1
-        target_records.append({
-            "target": target,
-            "status": "PASSED",
-            "duration_seconds": 0.0,
-            "exit_code": 0,
-            "tests_count": 1,
-            "failures_count": 0,
-            "errors_count": 0,
-            "skipped_count": 0,
-            "log_file": log_path,
-            "xml_file": xml_path,
-            "error_message": "",
-            "failure_details": "",
-        })
-      else:
-        failed_targets += 1
-        diag = ""
-        if os.path.isfile(log_path):
-          diag = extract_diagnostics(log_path)
-        elif args.bazel_log and os.path.isfile(args.bazel_log):
-          diag = extract_diagnostics(args.bazel_log)
-
-        target_records.append({
-            "target": target,
-            "status": "BUILD_FAILED",
-            "duration_seconds": 0.0,
-            "exit_code": 1,
-            "tests_count": 1,
-            "failures_count": 1,
-            "errors_count": 0,
-            "skipped_count": 0,
-            "log_file": log_path,
-            "xml_file": xml_path,
-            "error_message": "Action failed before generating test.xml",
-            "failure_details": diag,
-        })
+    target_records.append({
+        "target": target,
+        "status": status,
+        "duration_seconds": round(xml_data["time"], 2) if xml_data else 0.0,
+        "exit_code": exit_code,
+        "tests_count": xml_data["tests"] if xml_data else 0,
+        "failures_count": xml_data["failures"] if xml_data else 0,
+        "errors_count": xml_data["errors"] if xml_data else 0,
+        "skipped_count": xml_data["skipped"] if xml_data else 0,
+        "shards": len(xml_paths),
+        "log_file": log_path,
+        "xml_file": xml_path,
+        "error_message": err_msg,
+        "failure_details": diag,
+    })
 
   overall_status = "PASSED"
   if args.dry_run:
@@ -532,6 +700,7 @@ def main():
       "project": session_info["TPU_PROJECT"],
       "tpu_zone": session_info["TPU_ZONE"],
       "tpu_vm": session_info["TPU_NAME"],
+      "tpu_vms": session_info.get("TPU_VMS", []),
       "status": overall_status,
       "total_targets": total_targets,
       "targets_total": total_targets,

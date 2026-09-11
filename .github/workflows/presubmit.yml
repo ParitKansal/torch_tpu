@@ -50,118 +50,77 @@ permissions:
 
 # Cancel old jobs when they are replaced by new runs
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  # Labels that don't change what CI runs (triage, release tags) still fire a
+  # `labeled` event. Park those runs in a group of their own so they can't
+  # cancel a presubmit that is already running and throw away its results.
+  # Keep this list in sync with the `if:` on the setup job below.
+  group: >-
+    ${{ github.workflow }}-${{ github.head_ref || github.ref }}${{
+    github.event.action == 'labeled'
+    && !contains(fromJSON('["ci:bypass-tpu-v5", "ci:replace-tpu-v5", "ci:disable-bazel-diff"]'), github.event.label.name)
+    && format('-ignored-label-{0}', github.run_id) || '' }}
   # Don't cancel in-progress jobs for main branch
   cancel-in-progress: ${{ github.ref != 'main' }}
 
 jobs:
   setup:
     name: "Presubmit Setup"
+    # Only react to a label if that label changes what CI does. Without this,
+    # every triage label would re-run the whole presubmit for nothing.
+    # Keep this list in sync with the concurrency group above.
+    if: >-
+      github.event.action != 'labeled'
+      || contains(fromJSON('["ci:bypass-tpu-v5", "ci:replace-tpu-v5", "ci:disable-bazel-diff"]'), github.event.label.name)
     runs-on: ubuntu-latest
     outputs:
       job_matrix: ${{ steps.set-matrix.outputs.job_matrix }}
       tpu_v5_bypassed: ${{ steps.set-matrix.outputs.tpu_v5_bypassed }}
-      should_run: ${{ steps.set-matrix.outputs.should_run }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
       - id: set-matrix
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_ACTION: ${{ github.event.action }}
-          LABEL_ADDED: ${{ github.event.label.name }}
-          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          INPUT_BYPASS: ${{ inputs.bypass-tpu-v5 }}
+          # Both labels take TPU v5 out of the matrix. `ci:replace-tpu-v5` also
+          # promotes the RBE run in test_rbe_opt_in.yml to a gating check, so
+          # the hardware still gets covered; `ci:bypass-tpu-v5` skips it
+          # outright and is meant for runner outages.
+          BYPASS_TPU_V5: >-
+            ${{ inputs.bypass-tpu-v5
+            || contains(github.event.pull_request.labels.*.name, 'ci:bypass-tpu-v5')
+            || contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5') }}
         run: |
-          python3 -c "
-          import json, os, re
-
-          event_name = os.environ.get('EVENT_NAME', '')
-          event_action = os.environ.get('EVENT_ACTION', '')
-          label_added = os.environ.get('LABEL_ADDED', '')
-          labels_json = os.environ.get('PR_LABELS', '[]')
-          pr_title = os.environ.get('PR_TITLE', '')
-          pr_body = os.environ.get('PR_BODY', '')
-          input_bypass = str(os.environ.get('INPUT_BYPASS', 'false')).strip().lower() == 'true'
-
-          try:
-              labels = json.loads(labels_json) if labels_json else []
-          except Exception:
-              labels = []
-
-          ci_control_labels = {
-              'ci:bypass-tpu-v5', 'ci:skip-tpu-v5', 'bypass-tpu-v5', 'skip-tpu-v5',
-              'ci:replace-tpu-v5', 'replace-tpu-v5', 'ci:replace-tpu-v5-rbe',
-              'replace-tpu-v5-with-rbe', 'ci:disable-bazel-diff', 'run-presubmit'
-          }
-
-          should_run = True
-          if event_name == 'pull_request' and event_action == 'labeled':
-              if label_added not in ci_control_labels:
-                  should_run = False
-
-          bypass_labels = {
-              'ci:bypass-tpu-v5', 'ci:skip-tpu-v5', 'bypass-tpu-v5', 'skip-tpu-v5',
-              'ci:replace-tpu-v5', 'replace-tpu-v5', 'ci:replace-tpu-v5-rbe',
-              'replace-tpu-v5-with-rbe'
-          }
-          has_bypass_label = any(l in bypass_labels for l in labels)
-
-          tag_pattern = r'\[(skip|bypass)[-_]tpu[-_]?v?5\]'
-          has_tag = bool(re.search(tag_pattern, pr_title, re.I) or re.search(tag_pattern, pr_body, re.I))
-
-          bypass_v5 = input_bypass or has_bypass_label or has_tag
-
-          cpu_job = {
-              'name': 'CPU',
-              'runner': 'linux-x86-n4-16',
-              'config': 'ci_cpu_presubmit',
-              'extra_flags': ''
-          }
-          v5_job = {
-              'runner': 'linux-x86-ct5lp-224-8tpu',
-              'config': 'ci_tpu_v5_presubmit',
-              'extra_flags': '--run_under=\"$(pwd)/ci/tools/parallel_accelerator_execute.sh\"'
-          }
-          v7_job = {
-              'runner': 'linux-x86-tpu7x-224-4tpu',
-              'config': 'ci_tpu_v7_presubmit',
-              'extra_flags': '--run_under=\"$(pwd)/ci/tools/parallel_accelerator_execute.sh\"'
-          }
-
-          matrix = [cpu_job, v7_job] if bypass_v5 else [cpu_job, v5_job, v7_job]
-
-          output_path = os.environ.get('GITHUB_OUTPUT', '')
-          if output_path:
-              with open(output_path, 'a') as f:
-                  f.write(f'job_matrix={json.dumps(matrix)}\n')
-                  f.write(f'tpu_v5_bypassed={\"true\" if bypass_v5 else \"false\"}\n')
-                  f.write(f'should_run={\"true\" if should_run else \"false\"}\n')
-          "
+          {
+            echo "job_matrix=$(ci/tools/presubmit_job_matrix.sh)"
+            echo "tpu_v5_bypassed=${BYPASS_TPU_V5}"
+          } >> "$GITHUB_OUTPUT"
 
   tpu_v5_bypass_notice:
+    # Reports the required check under the runner's own name so branch
+    # protection stays satisfied while the real runner sits this one out.
     name: "Presubmit on linux-x86-ct5lp-224-8tpu"
     needs: setup
-    if: needs.setup.outputs.should_run != 'false' && needs.setup.outputs.tpu_v5_bypassed == 'true'
+    if: needs.setup.outputs.tpu_v5_bypassed == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Report TPU v5 Bypass Notice
         run: |
-          echo "========================================================================"
-          echo "NOTICE: TPU v5 (linux-x86-ct5lp-224-8tpu) Presubmit Bypassed"
-          echo "========================================================================"
-          echo "Self-hosted runner 'linux-x86-ct5lp-224-8tpu' presubmits have been"
-          echo "bypassed for this run."
-          echo ""
-          echo "Active Bypass Indicators:"
-          echo "  - Bypass Flag / Label / Title Tag: Detected"
-          echo ""
-          echo "If testing with RBE, check the 'RBE Hardware TPU Tests' workflow status."
-          echo "========================================================================"
+          cat <<'NOTICE'
+          ========================================================================
+          NOTICE: TPU v5 (linux-x86-ct5lp-224-8tpu) presubmit was skipped
+          ========================================================================
+          A bypass label or workflow input took the self-hosted TPU v5 runner out
+          of this run's job matrix.
+
+          If the PR carries `ci:replace-tpu-v5`, TPU v5 coverage moved to the
+          'RBE Hardware TPU Tests' workflow, which gates this PR instead. Check
+          that workflow's result before merging.
+
+          See docs/CI_PRESUBMIT_AND_RBE_GUIDE.md.
+          ========================================================================
+          NOTICE
 
   run_tests:
     needs: setup
-    if: needs.setup.outputs.should_run != 'false'
     name: "Presubmit on ${{ matrix.job_info.name || matrix.job_info.runner }}"
     # Available self-hosted runners.
     strategy:

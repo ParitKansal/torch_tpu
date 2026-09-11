@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 # scripts/run_presubmit_v5_relay.sh
 # Presubmit execution pipeline on physical Cloud TPU v5e via SSH relay.
 set -euo pipefail
@@ -7,7 +20,9 @@ set -m
 readonly ALLOWED_PROJECT="rbe-tpu-oss"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-readonly SESSION_ENV_FILE="/tmp/tpu_active_session.env"
+# Honors TPU_SESSION_ENV so several relays can share a host, each pinned to its
+# own TPU VM. relay_test_runner.sh reads the same variable.
+readonly SESSION_ENV_FILE="${TPU_SESSION_ENV:-/tmp/tpu_active_session.env}"
 if [[ -n "${SPOT_TPU_MANAGER_BIN:-}" ]]; then
   SPOT_MANAGER="${SPOT_TPU_MANAGER_BIN}"
 elif command -v spot_tpu_manager.sh >/dev/null 2>&1 && [[ "$(command -v spot_tpu_manager.sh)" != "${SCRIPT_DIR}/spot_tpu_manager.sh" ]]; then
@@ -17,17 +32,24 @@ else
 fi
 readonly SPOT_MANAGER
 
-readonly RELAY_RUNNER="%workspace%/ci/tools/relay_test_runner.sh"
+readonly RELAY_RUNNER="${REPO_ROOT}/ci/tools/relay_test_runner.sh"
 readonly REPORTER="${GENERATE_PRESUBMIT_REPORT_BIN:-${SCRIPT_DIR}/generate_presubmit_report.py}"
+readonly RELAY_STAGER="${STAGE_RELAY_BASE_BIN:-${REPO_ROOT}/ci/tools/stage_relay_base.sh}"
 
 # Default configuration values
 CLI_ZONE="europe-west4-b"
-CLI_FILTER="presubmit-v5,-fails-on-tpu-v5,-nopresubmit,-notest,-nobuild"
+# The relay leases one v5litepod-1 VM per test action, so a test that asks for
+# more than one chip can never pass here. Those targets carry a chip count in
+# their tag (requires-tpu-v5lite:8); the plain tag means a single chip. Left in,
+# they burn a full timeout each and then report as ordinary failures.
+CLI_FILTER="presubmit-v5,-fails-on-tpu-v5,-nopresubmit,-notest,-nobuild,-requires-tpu-v5lite:8"
 CLI_TARGETS=""
 CLI_DRY_RUN=false
 CLI_OUTPUT_DIR=""
 CLI_TEST_TIMEOUT="900s"
 CLI_KEEP_VM_ON_FAILURE=false
+CLI_SESSION_POOL=""
+CLI_JOBS=""
 CLI_PROJECT="$ALLOWED_PROJECT"
 
 # Process supervision state
@@ -54,6 +76,10 @@ Options:
                            (default: presubmit_reports/run_<timestamp>)
   --test-timeout=SEC       Per-test timeout duration (default: 900s)
   --keep-vm-on-failure     Do not delete TPU VM on test failure or error (for debugging)
+  --session-pool=DIR       Run against a fleet built by scripts/spot_tpu_fleet.sh instead
+                           of provisioning a single VM. Each test leases one VM from DIR.
+  --jobs=N                 Tests to run at once (default: 1, or the pool size with
+                           --session-pool). Never set this above the number of VMs.
   --project=PROJECT        GCP project (strictly restricted to rbe-tpu-oss)
   -h, --help               Show this help message and exit
 EOF
@@ -110,6 +136,16 @@ parse_args() {
         CLI_TEST_TIMEOUT="${1#*=}"; shift ;;
       --keep-vm-on-failure)
         CLI_KEEP_VM_ON_FAILURE=true; shift ;;
+      --session-pool)
+        [[ $# -lt 2 ]] && { echo "ERROR [run_presubmit]: --session-pool requires an argument." >&2; exit 1; }
+        CLI_SESSION_POOL="$2"; shift 2 ;;
+      --session-pool=*)
+        CLI_SESSION_POOL="${1#*=}"; shift ;;
+      --jobs)
+        [[ $# -lt 2 ]] && { echo "ERROR [run_presubmit]: --jobs requires an argument." >&2; exit 1; }
+        CLI_JOBS="$2"; shift 2 ;;
+      --jobs=*)
+        CLI_JOBS="${1#*=}"; shift ;;
       --project)
         [[ $# -lt 2 ]] && { echo "ERROR [run_presubmit]: --project requires an argument." >&2; exit 1; }
         CLI_PROJECT="$2"; shift 2 ;;
@@ -125,6 +161,12 @@ parse_args() {
   done
 
   enforce_project_boundary "$CLI_PROJECT"
+
+  # Bazel's --test_timeout only takes a bare integer, but "900s" reads more
+  # clearly on the command line and TEST_TIMEOUT accepts both.
+  CLI_TEST_TIMEOUT="${CLI_TEST_TIMEOUT%[sS]}"
+  [[ "$CLI_TEST_TIMEOUT" =~ ^[0-9]+$ ]] \
+    || { echo "ERROR [run_presubmit]: --test-timeout must be seconds, got '$CLI_TEST_TIMEOUT'." >&2; exit 1; }
 }
 
 # 3. Session health inspection
@@ -195,8 +237,9 @@ cleanup_orchestrator() {
     _BAZEL_PID=""
   fi
 
-  # Conditional VM preservation or deletion
-  if [[ "$CLI_DRY_RUN" == "false" ]]; then
+  # Only tear down a VM this script provisioned. A fleet belongs to whoever
+  # built it, so leave it for `spot_tpu_fleet.sh down`.
+  if [[ "$CLI_DRY_RUN" == "false" && -z "$CLI_SESSION_POOL" ]]; then
     if [[ "$sig" == "EXIT" && "$CLI_KEEP_VM_ON_FAILURE" == "true" && "$_PRESUBMIT_FAILED" -eq 1 ]]; then
       local tpu_vm="unknown" tpu_z="unknown" tpu_ip="unknown"
       if [[ -f "$SESSION_ENV_FILE" ]]; then
@@ -302,6 +345,24 @@ resolve_targets() {
   printf "%s\n" "${targets[@]}"
 }
 
+# The flag list for the test invocation, in one place. --dry-run prints what
+# main() is about to run rather than a hand-copied echo of it, which had already
+# drifted once.
+bazel_test_flags() {
+  local jobs="$1"
+  printf '%s\n' \
+    "--run_under=${RELAY_RUNNER}" \
+    "--modify_execution_info=TestRunner=+no-remote-exec" \
+    "--strategy=TestRunner=local" \
+    "--local_test_jobs=${jobs}" \
+    "--keep_going" \
+    "--nocache_test_results" \
+    "--test_output=errors" \
+    "--test_summary=detailed" \
+    "--test_tag_filters=${CLI_FILTER}" \
+    "--test_timeout=${CLI_TEST_TIMEOUT}"
+}
+
 # 6. Main execution flow
 main() {
   parse_args "$@"
@@ -340,7 +401,7 @@ main() {
   echo "Output Directory:    $CLI_OUTPUT_DIR"
   echo "Test Timeout:        $CLI_TEST_TIMEOUT"
   echo "Keep VM on Failure:  $CLI_KEEP_VM_ON_FAILURE"
-  echo "Sequential Mode:     --local_test_jobs=1 (zero PCIe collision)"
+  echo "Concurrency:         ${CLI_JOBS:-1 test at a time (one chip per VM)}"
   echo "========================================================================"
 
   # Handle dry-run execution
@@ -351,17 +412,10 @@ main() {
     done
     echo -e "\n[DRY RUN] Planned Bazel invocation:"
     echo "bazel test \\"
-    echo "  --run_under=\"$RELAY_RUNNER\" \\"
-    echo "  --modify_execution_info=TestRunner=+no-remote-exec \\"
-    echo "  --strategy=TestRunner=local \\"
-    echo "  --local_test_jobs=1 \\"
-    echo "  --keep_going \\"
-    echo "  --nocache_test_results \\"
-    echo "  --test_output=errors \\"
-    echo "  --test_summary=detailed \\"
-    echo "  --test_tag_filters=\"$CLI_FILTER\" \\"
-    echo "  --test_timeout=\"$CLI_TEST_TIMEOUT\" \\"
-    echo "  --spawn_strategy=standalone,local \\"
+    local flag
+    while IFS= read -r flag; do
+      echo "  ${flag} \\"
+    done < <(bazel_test_flags "${CLI_JOBS:-1}")
     for t in "${target_list[@]}"; do
       echo "  $t \\"
     done
@@ -377,38 +431,82 @@ main() {
     return 0
   fi
 
-  # Session management: reuse active instance or provision a new one
-  if is_tpu_session_healthy; then
-    echo "Found active and healthy Spot TPU session. Reusing existing instance."
-    "$SPOT_MANAGER" status --project="$ALLOWED_PROJECT"
+  # A pool is provisioned ahead of time by scripts/spot_tpu_fleet.sh, and each
+  # test action leases one VM out of it. Otherwise fall back to a single VM,
+  # which means one test at a time because it only has one chip.
+  # Scopes the VM-side payload cache to this run. Every target is built before
+  # any test starts, so within one run a target's runfiles tree is fixed and a
+  # shard can safely reuse the tree an earlier shard unpacked.
+  local run_started_at
+  run_started_at="$(date +%s)"
+  local run_id="r${run_started_at}p$$"
+  local relay_env=(
+    --test_env=TPU_SESSION_ENV="$SESSION_ENV_FILE"
+    --test_env=TORCH_TPU_RELAY_RUN_ID="$run_id"
+  )
+  local jobs=1
+
+  if [[ -n "$CLI_SESSION_POOL" ]]; then
+    local pool_size
+    pool_size=$(find "$CLI_SESSION_POOL" -maxdepth 1 -name '*.env' 2>/dev/null | wc -l)
+    [[ "$pool_size" -gt 0 ]] || {
+      echo "ERROR [run_presubmit]: No session files in $CLI_SESSION_POOL." >&2
+      echo "Build a fleet first: scripts/spot_tpu_fleet.sh up --size N" >&2
+      return 1
+    }
+    relay_env=(
+      --test_env=TPU_SESSION_POOL="$CLI_SESSION_POOL"
+      --test_env=TORCH_TPU_RELAY_RUN_ID="$run_id"
+    )
+    jobs="${CLI_JOBS:-$pool_size}"
+    echo "Running against a fleet of ${pool_size} TPU VMs, ${jobs} tests at a time."
   else
-    echo "No healthy active TPU session found. Initializing new Spot TPU in '$CLI_ZONE'..."
-    if [[ -f "$SESSION_ENV_FILE" ]]; then
-      "$SPOT_MANAGER" down --project="$ALLOWED_PROJECT" 2>/dev/null || true
+    jobs="${CLI_JOBS:-1}"
+    if is_tpu_session_healthy; then
+      echo "Found active and healthy Spot TPU session. Reusing existing instance."
+      "$SPOT_MANAGER" status --project="$ALLOWED_PROJECT"
+    else
+      echo "No healthy active TPU session found. Initializing new Spot TPU in '$CLI_ZONE'..."
+      if [[ -f "$SESSION_ENV_FILE" ]]; then
+        "$SPOT_MANAGER" down --project="$ALLOWED_PROJECT" 2>/dev/null || true
+      fi
+      "$SPOT_MANAGER" up --zone="$CLI_ZONE" --project="$ALLOWED_PROJECT"
     fi
-    "$SPOT_MANAGER" up --zone="$CLI_ZONE" --project="$ALLOWED_PROJECT"
   fi
 
-  # Execute Bazel test suite sequentially with job control
-  echo -e "\nStarting sequential test execution through relay runner..."
+  # stage_relay_base.sh reads the runfiles trees bazel leaves in bazel-bin, so
+  # anything not built yet is invisible to it and its dependencies never reach
+  # the VMs. Build first, then stage, then test. Skipping this shows up as a
+  # bare ModuleNotFoundError from a test that is otherwise fine.
+  echo -e "\nBuilding test targets so the base cache can see every dependency..."
+  if ! bazel build \
+    --test_tag_filters="$CLI_FILTER" \
+    "${target_list[@]}" > >(tee "${CLI_OUTPUT_DIR}/bazel_build.log") 2>&1; then
+    echo "ERROR [run_presubmit]: build failed; see ${CLI_OUTPUT_DIR}/bazel_build.log" >&2
+    return 1
+  fi
+
+  local stage_args=(--session "$SESSION_ENV_FILE")
+  [[ -z "$CLI_SESSION_POOL" ]] || stage_args=(--pool "$CLI_SESSION_POOL")
+  echo -e "\nStaging the shared base cache..."
+  "$RELAY_STAGER" "${stage_args[@]}" || {
+    echo "ERROR [run_presubmit]: base cache staging failed." >&2
+    return 1
+  }
+
+  echo -e "\nStarting test execution through relay runner..."
   local bazel_log="${CLI_OUTPUT_DIR}/bazel_presubmit.log"
   local start_time
   start_time=$(date +%s)
 
+  local test_flags=()
+  mapfile -t test_flags < <(bazel_test_flags "$jobs")
+
   set +e
   set -m
   bazel test \
-    --run_under="$RELAY_RUNNER" \
-    --modify_execution_info=TestRunner=+no-remote-exec \
-    --strategy=TestRunner=local \
-    --local_test_jobs=1 \
-    --keep_going \
-    --nocache_test_results \
-    --test_output=errors \
-    --test_summary=detailed \
-    --test_tag_filters="$CLI_FILTER" \
-    --test_timeout="$CLI_TEST_TIMEOUT" \
-    --spawn_strategy=standalone,local \
+    "${test_flags[@]}" \
+    "${relay_env[@]}" \
     "${target_list[@]}" > >(tee "$bazel_log") 2>&1 &
   _BAZEL_PID=$!
 
@@ -438,7 +536,10 @@ main() {
     --workspace-root="$REPO_ROOT" \
     --targets-file="$targets_file" \
     --duration="$duration" \
-    --bazel-exit-code="$bazel_rc"
+    --bazel-exit-code="$bazel_rc" \
+    --run-started-at="$run_started_at" \
+    --session-env="$SESSION_ENV_FILE" \
+    --session-pool="$CLI_SESSION_POOL"
   local report_rc=$?
   set -e
 

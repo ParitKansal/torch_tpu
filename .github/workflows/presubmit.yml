@@ -97,7 +97,14 @@ jobs:
   tpu_v5_bypass_notice:
     # Reports the required check under the runner's own name so branch
     # protection stays satisfied while the real runner sits this one out.
-    name: "Presubmit on linux-x86-ct5lp-224-8tpu"
+    # GitHub publishes a check run for a skipped job too, so a fixed name here
+    # would put two check runs named after the TPU v5 runner on every run that
+    # is not bypassed. The skipped one reads as a failure to anything gating on
+    # that check. Only claim the name when this job is standing in for it.
+    name: >-
+      ${{ needs.setup.outputs.tpu_v5_bypassed == 'true'
+      && 'Presubmit on linux-x86-ct5lp-224-8tpu'
+      || 'TPU v5 Bypass Notice (inactive)' }}
     needs: setup
     if: needs.setup.outputs.tpu_v5_bypassed == 'true'
     runs-on: ubuntu-latest

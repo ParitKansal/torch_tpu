@@ -204,20 +204,59 @@ class TestPresubmitWorkflow(
         run_tests["strategy"]["matrix"]["job_info"],
     )
 
-  def test_bypass_notice_reports_the_tpu_v5_check_name(self):
-    """The notice job stands in for the required check, so names must match."""
+  def test_bypass_notice_claims_the_check_name_only_when_bypassed(self):
+    """The notice stands in for the required check, so the names must match.
+
+    GitHub publishes a check run for a skipped job too, so naming this job after
+    the TPU v5 runner unconditionally would put two check runs under that name
+    on every run that isn't bypassed, and the skipped one reads as a failure.
+    """
     matrix, _ = run_matrix_script()
     v5_entry = next(e for e in matrix if e["runner"] == TPU_V5_RUNNER)
     expected = self.jobs["run_tests"]["name"].replace(
         "${{ matrix.job_info.name || matrix.job_info.runner }}",
         v5_entry.get("name", v5_entry["runner"]),
     )
-    self.assertEqual(self.jobs["tpu_v5_bypass_notice"]["name"], expected)
+    name = self.jobs["tpu_v5_bypass_notice"]["name"]
+    self.assertIn("needs.setup.outputs.tpu_v5_bypassed == 'true'", name)
+    self.assertIn(f"'{expected}'", name)
+    self.assertNotIn(expected, name.split("||")[-1])
 
   def test_bypass_notice_only_runs_when_v5_is_bypassed(self):
     notice = self.jobs["tpu_v5_bypass_notice"]
     self.assertEqual(notice["needs"], "setup")
     self.assertIn("needs.setup.outputs.tpu_v5_bypassed == 'true'", notice["if"])
+
+  def test_no_job_hardcodes_a_check_name_the_matrix_also_produces(self):
+    """Two jobs sharing a check name make the skipped one look like a failure.
+
+    GitHub publishes a check run for a skipped job, so a second job that always
+    carries a matrix leg's name adds a `skipped` check run under that name on
+    every run. Anything gating on the name then sees a result that never turns
+    green. Take such a name only behind an expression.
+    """
+    matrix, _ = run_matrix_script()
+    template = self.jobs["run_tests"]["name"]
+    matrix_names = {
+        template.replace(
+            "${{ matrix.job_info.name || matrix.job_info.runner }}",
+            entry.get("name", entry["runner"]),
+        )
+        for entry in matrix
+    }
+
+    for job_id, job in self.jobs.items():
+      if job_id == "run_tests":
+        continue
+      name = job.get("name", "")
+      if "${{" in name:
+        continue
+      self.assertNotIn(
+          name,
+          matrix_names,
+          f"Job '{job_id}' always publishes the check name '{name}', which the"
+          " run_tests matrix also produces",
+      )
 
 
 class TestRbeOptInWorkflow(

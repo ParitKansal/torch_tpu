@@ -38,7 +38,9 @@ REMOTE_EXECUTOR = os.path.join(REPO_ROOT, "ci", "tools", "remote_tpu_executor.sh
 SESSION_KEYS = ("TPU_IP", "SSH_USER", "SSH_CONTROL_PATH", "TPU_NAME", "TPU_ZONE")
 
 
-class RelayRunnerTestCase(unittest.TestCase):
+class RelayRunnerTestCase(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """Shared setup: a scratch dir plus a helper that runs the relay runner."""
 
   def setUp(self):
@@ -265,7 +267,9 @@ class TestRelayRunnerPoolLeasing(RelayPoolTestCase):
     self.assertIn("session.env", self.leased_session())
 
 
-class TestRelayScriptsAreWellFormed(unittest.TestCase):
+class TestRelayScriptsAreWellFormed(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """Cheap guards that catch the mistakes these scripts have hit before."""
 
   SCRIPTS = [
@@ -330,7 +334,9 @@ STAGE_SCRIPT = os.path.join(REPO_ROOT, "ci", "tools", "stage_relay_base.sh")
 RELAY_SSH = os.path.join(REPO_ROOT, "ci", "tools", "relay_ssh.sh")
 
 
-class StageRelayBaseTestCase(unittest.TestCase):
+class StageRelayBaseTestCase(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """Builds a throwaway workspace so staging can be exercised without a TPU.
 
   The layout mirrors what bazel leaves behind: a bazel-bin symlink, runfiles
@@ -593,7 +599,9 @@ class TestStageRelayBaseGuards(StageRelayBaseTestCase):
     self.assertIn("staged 0/1", result.stdout)
 
 
-class TestRelaySshHelper(unittest.TestCase):
+class TestRelaySshHelper(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
 
   def source_and_run(self, snippet):
     return subprocess.run(
@@ -634,7 +642,9 @@ class TestRelaySshHelper(unittest.TestCase):
     self.assertIn("ControlPersist=4h", body)
 
 
-class TestProvisioningScriptsSupportOnDemand(unittest.TestCase):
+class TestProvisioningScriptsSupportOnDemand(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """Spot v5e gets preempted within minutes, so on-demand has to be reachable."""
 
   def read(self, relpath):
@@ -660,7 +670,9 @@ class TestProvisioningScriptsSupportOnDemand(unittest.TestCase):
     self.assertNotIn("libtpu==", body)
 
 
-class StreamPayloadTestCase(unittest.TestCase):
+class StreamPayloadTestCase(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """Runs the real stream_payload against a stand-in runfiles tree.
 
   The function is lifted out of relay_test_runner.sh rather than reimplemented,
@@ -818,7 +830,9 @@ class TestStreamPayloadLeavesSharedBuildOutputsOut(StreamPayloadTestCase):
     self.assertIn("repo_torch/site-packages/torch/csrc/api.h", self.names())
 
 
-class TestPayloadKeyIsRunScoped(unittest.TestCase):
+class TestPayloadKeyIsRunScoped(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """The cache key decides whether a stale tree can ever be served.
 
   It is lifted out of relay_test_runner.sh rather than reimplemented, so these
@@ -879,7 +893,9 @@ class TestPayloadKeyIsRunScoped(unittest.TestCase):
     self.assertNotIn("TORCH_TPU_PAYLOAD_KEY", remote_env)
 
 
-class RemoteExecutorCacheTestCase(unittest.TestCase):
+class RemoteExecutorCacheTestCase(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """Runs the real executor against a stand-in payload, no TPU involved.
 
   The test binary is a shell script, so the executor never reaches the
@@ -1103,7 +1119,9 @@ class TestRelayRunnerQuarantine(RelayPoolTestCase):
     )
 
 
-class TestCheckPreemption(unittest.TestCase):
+class TestCheckPreemption(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """Tells "the VM is gone" apart from "I could not ask".
 
   Collapsing the two reported 64 shards as preempted against a VM that was
@@ -1185,7 +1203,9 @@ FLEET_SCRIPT = os.path.join(REPO_ROOT, "scripts", "spot_tpu_fleet.sh")
 SPOT_MANAGER = os.path.join(REPO_ROOT, "scripts", "spot_tpu_manager.sh")
 
 
-class FleetTeardownTestCase(unittest.TestCase):
+class FleetTeardownTestCase(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """Runs spot_tpu_fleet.sh against a fake gcloud that records what it was asked."""
 
   ZONE = "europe-west4-b"
@@ -1310,7 +1330,9 @@ class TestFleetDeadline(FleetTeardownTestCase):
     self.assertIn("--deadline-minutes", proc.stderr)
 
 
-class TestNoGuestSideShutdown(unittest.TestCase):
+class TestNoGuestSideShutdown(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """Nothing may schedule a halt inside the guest.
 
   `shutdown -h` does not release a TPU node. The service restarts the guest, so
@@ -1338,7 +1360,9 @@ class TestNoGuestSideShutdown(unittest.TestCase):
           )
 
 
-class TestResolveOutcome(unittest.TestCase):
+class TestResolveOutcome(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """The mapping from "what came back off the VM" to "what bazel is told".
 
   Every branch has to leave a JUnit report behind. Bazel prints a bare FAILED
@@ -1446,7 +1470,9 @@ FLEET_SCRIPT = os.path.join(REPO_ROOT, "scripts", "spot_tpu_fleet.sh")
 DRIVER_SCRIPT = os.path.join(REPO_ROOT, "scripts", "run_presubmit_v5_relay.sh")
 
 
-class TestDeadlineReaperOutlivesItsParent(unittest.TestCase):
+class TestDeadlineReaperOutlivesItsParent(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """The reaper is the only thing standing between a crash and a billing leak.
 
   It used to launch under plain `nohup`, which blocks SIGHUP and nothing else.
@@ -1593,7 +1619,9 @@ class TestDeadlineReaperOutlivesItsParent(unittest.TestCase):
       pass
 
 
-class TestSandboxDeleteDoesNotHoldTheLease(unittest.TestCase):
+class TestSandboxDeleteDoesNotHoldTheLease(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """Deleting an unpacked runfiles tree takes seconds the next shard could use.
 
   The action still owns the VM lease while the metadata fetch runs, so the
@@ -1631,7 +1659,9 @@ class TestSandboxDeleteDoesNotHoldTheLease(unittest.TestCase):
     self.assertFalse(os.path.exists(f"{sandbox}.trash"))
 
 
-class TestPhaseTimingIsOptIn(unittest.TestCase):
+class TestPhaseTimingIsOptIn(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
   """`TORCH_TPU_RELAY_TIMING=1` has to reach the test action and the VM.
 
   Bazel scrubs the environment, so setting the variable in the driver's own

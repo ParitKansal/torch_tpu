@@ -75,7 +75,9 @@ def control_labels(expression):
   return json.loads(match.group(1))
 
 
-class TestPresubmitJobMatrixScript(unittest.TestCase):
+class TestPresubmitJobMatrixScript(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests workflow config.
+):
   """Runs ci/tools/presubmit_job_matrix.sh and checks what it prints."""
 
   def test_default_matrix_covers_cpu_v5_and_v7(self):
@@ -140,7 +142,9 @@ class TestPresubmitJobMatrixScript(unittest.TestCase):
     self.assertEqual(generated, upstream_matrix)
 
 
-class TestPresubmitWorkflow(unittest.TestCase):
+class TestPresubmitWorkflow(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests workflow config.
+):
   """Checks presubmit.yml wiring that the matrix script can't cover."""
 
   @classmethod
@@ -214,7 +218,9 @@ class TestPresubmitWorkflow(unittest.TestCase):
     self.assertIn("needs.setup.outputs.tpu_v5_bypassed == 'true'", notice["if"])
 
 
-class TestRbeOptInWorkflow(unittest.TestCase):
+class TestRbeOptInWorkflow(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests workflow config.
+):
   """Checks the trigger, gating, and auth wiring in test_rbe_opt_in.yml."""
 
   @classmethod
@@ -283,7 +289,9 @@ class TestRbeOptInWorkflow(unittest.TestCase):
         self.assertTrue(target.startswith("-//"))
 
 
-class TestTpuConfigsPinOnlyTestActions(unittest.TestCase):
+class TestTpuConfigsPinOnlyTestActions(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests workflow config.
+):
   """TPU CI must send compilation to RBE and keep only tests on the runner.
 
   `--spawn_strategy` sets the default for every spawn, so
@@ -350,7 +358,9 @@ class TestTpuConfigsPinOnlyTestActions(unittest.TestCase):
     self.assertIn("--spawn_strategy=standalone,local", self.flags_for("bench"))
 
 
-class TestWorkflowsOnlyNameConfigsThatExist(unittest.TestCase):
+class TestWorkflowsOnlyNameConfigsThatExist(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests workflow config.
+):
   """Bazel exits immediately on an undefined --config, before running anything.
 
   test_rbe_opt_in.yml shipped naming `ci_cpu_presubmit_rbe` and
@@ -391,7 +401,9 @@ class TestWorkflowsOnlyNameConfigsThatExist(unittest.TestCase):
           )
 
 
-class TestOssShardCountsStaySized(unittest.TestCase):
+class TestOssShardCountsStaySized(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests workflow config.
+):
   """Guards the OSS shard counts on the heavy ops test targets.
 
   OSS caps samples per op/dtype, so these shards finish in seconds while each

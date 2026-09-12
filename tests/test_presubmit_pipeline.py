@@ -42,7 +42,9 @@ from generate_presubmit_report import (
 )
 
 
-class PresubmitPipelineReporterTest(unittest.TestCase):
+class PresubmitPipelineReporterTest(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests report generation.
+):
 
   def setUp(self):
     self.td = tempfile.TemporaryDirectory()
@@ -737,7 +739,9 @@ INFO: Build completed.
     self.assertEqual(proc.returncode, 0, f"Expected clean exit 0, got {proc.returncode}: {proc.stderr}")
 
 
-class PresubmitPipelineEndToEndTest(unittest.TestCase):
+class PresubmitPipelineEndToEndTest(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests report generation.
+):
 
   def setUp(self):
     self.td = tempfile.TemporaryDirectory()
@@ -890,7 +894,9 @@ exit 3
     self.assertEqual(data["failed_targets"], 1)
 
 
-class BazelStatusParsingTest(unittest.TestCase):
+class BazelStatusParsingTest(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests report generation.
+):
   """Bazel's own summary is the only record of what ran in this invocation."""
 
   def setUp(self):
@@ -942,7 +948,9 @@ class BazelStatusParsingTest(unittest.TestCase):
     self.assertEqual(parse_bazel_statuses("/nonexistent/bazel.log"), {})
 
 
-class ShardedReportCollectionTest(unittest.TestCase):
+class ShardedReportCollectionTest(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests report generation.
+):
   """A sharded target writes shard_N_of_M/test.xml and nothing at the top.
 
   Looking only for test.xml found nothing for every sharded target, and the
@@ -1009,7 +1017,9 @@ class ShardedReportCollectionTest(unittest.TestCase):
     self.assertEqual(totals["failures"], 3)
 
 
-class DiagnosticsOrderingTest(unittest.TestCase):
+class DiagnosticsOrderingTest(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests report generation.
+):
   """An infra fault explains the traceback under it, so report it instead."""
 
   def setUp(self):
@@ -1048,7 +1058,9 @@ if __name__ == "__main__":
   unittest.main(verbosity=2)
 
 
-class PoolSessionSummaryTest(unittest.TestCase):
+class PoolSessionSummaryTest(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests report generation.
+):
   """A fleet run has no single session file.
 
   Every pool report used to say the VM was "unknown", which is precisely the

@@ -155,7 +155,9 @@ class OpTestingTest(op_testing.OpInfoTestBase):
     )
 
 
-class GoldenGpuDataLazyDecodeTest(absltest.TestCase):
+class GoldenGpuDataLazyDecodeTest(
+    absltest.TestCase  # ABSLTEST_OK=No RNG; tests golden-file decoding.
+):
   """Tests that golden samples decode on first read, not at merge time."""
 
   def _make_sample(

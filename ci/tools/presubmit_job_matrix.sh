@@ -34,36 +34,24 @@ readonly TPU_V5_RUNNER="linux-x86-ct5lp-224-8tpu"
 
 # Accelerator runners hand each test to a wrapper that leases it a single chip
 # and reaps leftover workers, so concurrent tests don't fight over one device.
-# Single quotes keep $(pwd) intact for the runner to expand.
-readonly ACCELERATOR_RUN_UNDER='--run_under="$(pwd)/ci/tools/parallel_accelerator_execute.sh"'
+# Backslash-escaped because it is pasted straight into the JSON below; the inner
+# quotes and $(pwd) survive for the runner to expand.
+readonly ACCELERATOR_RUN_UNDER='--run_under=\"$(pwd)/ci/tools/parallel_accelerator_execute.sh\"'
+
+# Written out as JSON text rather than built with jq. ci/tools/list_ci_tests.py
+# runs this script from a Bazel test to recover the matrix that used to live in
+# presubmit.yml, and that sandbox has no jq.
+readonly CPU_ENTRY='{"name":"CPU","runner":"linux-x86-n4-16","config":"ci_cpu_presubmit","extra_flags":""}'
+readonly TPU_V5_ENTRY="{\"runner\":\"${TPU_V5_RUNNER}\",\"config\":\"ci_tpu_v5_presubmit\",\"extra_flags\":\"${ACCELERATOR_RUN_UNDER}\"}"
+readonly TPU_V7_ENTRY="{\"runner\":\"linux-x86-tpu7x-224-4tpu\",\"config\":\"ci_tpu_v7_presubmit\",\"extra_flags\":\"${ACCELERATOR_RUN_UNDER}\"}"
 
 # TODO(gunhyun): Re-enable the v6 runner once we have more quota.
-#   {runner: "linux-x86-ct6e-180-8tpu", config: "ci_tpu_v6_presubmit",
-#    extra_flags: $accelerator_run_under}
-matrix=$(jq -cn \
-  --arg accelerator_run_under "$ACCELERATOR_RUN_UNDER" \
-  --arg tpu_v5_runner "$TPU_V5_RUNNER" '[
-  {
-    name: "CPU",
-    runner: "linux-x86-n4-16",
-    config: "ci_cpu_presubmit",
-    extra_flags: ""
-  },
-  {
-    runner: $tpu_v5_runner,
-    config: "ci_tpu_v5_presubmit",
-    extra_flags: $accelerator_run_under
-  },
-  {
-    runner: "linux-x86-tpu7x-224-4tpu",
-    config: "ci_tpu_v7_presubmit",
-    extra_flags: $accelerator_run_under
-  }
-]')
-
-if [[ "${BYPASS_TPU_V5:-false}" == "true" ]]; then
-  matrix=$(jq -c --arg runner "$TPU_V5_RUNNER" \
-    'map(select(.runner != $runner))' <<<"$matrix")
+#   {"runner": "linux-x86-ct6e-180-8tpu", "config": "ci_tpu_v6_presubmit",
+#    "extra_flags": accelerator_run_under}
+entries=("${CPU_ENTRY}")
+if [[ "${BYPASS_TPU_V5:-false}" != "true" ]]; then
+  entries+=("${TPU_V5_ENTRY}")
 fi
+entries+=("${TPU_V7_ENTRY}")
 
-printf '%s\n' "$matrix"
+printf '[%s]\n' "$(IFS=,; printf '%s' "${entries[*]}")"

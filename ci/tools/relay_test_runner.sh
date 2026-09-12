@@ -54,6 +54,21 @@ rsh() {
   ssh -S "$SSH_CONTROL_PATH" "${SSH_OPTS[@]}" "${SSH_USER}@${TPU_IP}" "$@"
 }
 
+# Phase timing, off unless TORCH_TPU_RELAY_TIMING is set. Each mark reports
+# seconds since this action started and seconds since the previous mark, so a
+# run tells you which phase to go after rather than just how long it all took.
+RELAY_T0="${EPOCHREALTIME/,/.}"
+RELAY_TPREV="$RELAY_T0"
+mark() {
+  [[ -n "${TORCH_TPU_RELAY_TIMING:-}" ]] || return 0
+  local now="${EPOCHREALTIME/,/.}"
+  printf '[relay-timing] %-18s +%6.2fs  total %6.2fs\n' \
+    "$1" \
+    "$(awk -v a="$now" -v b="$RELAY_TPREV" 'BEGIN{printf "%.2f", a-b}')" \
+    "$(awk -v a="$now" -v b="$RELAY_T0" 'BEGIN{printf "%.2f", a-b}')" >&2
+  RELAY_TPREV="$now"
+}
+
 # Writes a single-case JUnit report when the remote run left none behind. With
 # no arguments the case passes; with a message it fails.
 write_stub_xml() {
@@ -179,6 +194,7 @@ if [[ -n "${TPU_SESSION_POOL:-}" ]]; then
     exit 1
   fi
 fi
+mark leased
 readonly SESSION_ENV
 
 if [[ ! -f "$SESSION_ENV" ]]; then
@@ -248,6 +264,7 @@ if ! check_ssh_socket; then
     exit 255
   fi
 fi
+mark ssh_ready
 
 # A TPU VM that reboots comes back with /tmp emptied, so the base cache that
 # ci/tools/stage_relay_base.sh put there is gone. SSH still works and the node
@@ -261,6 +278,7 @@ if ! rsh "test -d '${REMOTE_BASE_CACHE}'" >/dev/null 2>&1; then
     "${REMOTE_BASE_CACHE} is gone on ${TPU_NAME:-the VM}. Re-run ci/tools/stage_relay_base.sh for this session."
   exit 1
 fi
+mark base_probe
 
 # 3. Synchronize remote_tpu_executor.sh to remote TPU VM
 ensure_remote_executor() {
@@ -281,6 +299,7 @@ ensure_remote_executor() {
     < "$local_executor" 2>/dev/null || true
 }
 ensure_remote_executor
+mark executor_sync
 
 # 4. Resolve runfiles root directory
 RUNFILES_ROOT="${TEST_SRCDIR:-}"
@@ -323,6 +342,9 @@ fi
 # before any test starts. Within one run a tree cannot change underneath us, and
 # a key from a previous run is never reused, so a stale tree cannot be served.
 # No run id means no caching, which is the safe default for a bare bazel run.
+# The VM half of the timing prints nothing unless it sees this too.
+[[ -z "${TORCH_TPU_RELAY_TIMING:-}" ]] || remote_env+="TORCH_TPU_RELAY_TIMING=1 "
+
 payload_key=""
 if [[ -n "${TORCH_TPU_RELAY_RUN_ID:-}" ]]; then
   payload_key="${TORCH_TPU_RELAY_RUN_ID}_$(printf '%s' "$RUNFILES_ROOT" | sha256sum | cut -c1-16)"
@@ -407,19 +429,23 @@ if [[ -n "$payload_key" ]] &&
    rsh "test -d '${REMOTE_PAYLOAD_CACHE}/${payload_key}'" >/dev/null 2>&1; then
   payload_cached=1
 fi
+mark payload_probe
 
 if [[ "$payload_cached" -eq 1 ]]; then
   run_remote < /dev/null
   ssh_rc=$?
+  mark "run_cache_hit"
 else
   stream_payload | run_remote
   pipestatus=("${PIPESTATUS[@]}")
   ssh_rc="${pipestatus[1]:-0}"
+  mark "run_cache_miss"
 fi
 
 # 6. Fetch remote test metadata (exitcode and test.xml) and clean remote sandbox
-remote_meta=$(rsh "cat '${REMOTE_SANDBOX}/test.exitcode' 2>/dev/null || true; echo '---TORCH_TPU_SPLIT---'; cat '${REMOTE_SANDBOX}/test.xml' 2>/dev/null || true; rm -rf '${REMOTE_SANDBOX}'" 2>/dev/null)
+remote_meta=$(rsh "cat '${REMOTE_SANDBOX}/test.exitcode' 2>/dev/null || true; echo '---TORCH_TPU_SPLIT---'; cat '${REMOTE_SANDBOX}/test.xml' 2>/dev/null || true; mv '${REMOTE_SANDBOX}' '${REMOTE_SANDBOX}.trash' 2>/dev/null && { setsid rm -rf '${REMOTE_SANDBOX}.trash' </dev/null >/dev/null 2>&1 & }" 2>/dev/null)
 meta_rc=$?
+mark fetch_and_release
 
 remote_exitcode=$(echo "$remote_meta" | awk '/---TORCH_TPU_SPLIT---/{exit} {print}' | tr -d ' \r\n')
 remote_xml=$(echo "$remote_meta" | awk 'f{print} /---TORCH_TPU_SPLIT---/{f=1}')

@@ -38,7 +38,7 @@ import sys
 import time
 import traceback
 import typing
-from typing import Any, Final, IO, TypeGuard
+from typing import Any, Final, TypeGuard
 import unittest
 
 from absl import flags
@@ -4338,12 +4338,15 @@ def _load_golden_files() -> None:
         f" {golden_file}",
         flush=True,
     )
+    # Decompress in one shot. The binary plist parser reads a few bytes at a
+    # time and seeks backwards constantly, and a gzip stream has to re-inflate
+    # to answer a backwards seek, so parsing straight off the file costs ~18s
+    # per golden and ~0.7s from memory.
     with gzip.open(golden_file, "rb") as f:
-      # TODO(pganssle): Figure out why this is required
-      f = typing.cast(IO[bytes], f)
-      plist_ptree = plistlib.load(
-          f, fmt=typing.cast(plistlib.PlistFormat, plistlib.FMT_BINARY)
-      )
+      raw = f.read()
+    plist_ptree = plistlib.loads(
+        raw, fmt=typing.cast(plistlib.PlistFormat, plistlib.FMT_BINARY)
+    )
     _GOLDEN_GPU_DATA.merge_plistlib_pytree(plist_ptree)
 
 

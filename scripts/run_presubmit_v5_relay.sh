@@ -446,6 +446,11 @@ main() {
   )
   local jobs=1
 
+  # Opt-in phase timing. Bazel scrubs the environment, so it only reaches the
+  # relay if it is forwarded explicitly.
+  [[ -z "${TORCH_TPU_RELAY_TIMING:-}" ]] \
+    || relay_env+=(--test_env=TORCH_TPU_RELAY_TIMING=1)
+
   if [[ -n "$CLI_SESSION_POOL" ]]; then
     local pool_size
     pool_size=$(find "$CLI_SESSION_POOL" -maxdepth 1 -name '*.env' 2>/dev/null | wc -l)
@@ -458,6 +463,8 @@ main() {
       --test_env=TPU_SESSION_POOL="$CLI_SESSION_POOL"
       --test_env=TORCH_TPU_RELAY_RUN_ID="$run_id"
     )
+    [[ -z "${TORCH_TPU_RELAY_TIMING:-}" ]] \
+      || relay_env+=(--test_env=TORCH_TPU_RELAY_TIMING=1)
     jobs="${CLI_JOBS:-$pool_size}"
     echo "Running against a fleet of ${pool_size} TPU VMs, ${jobs} tests at a time."
   else

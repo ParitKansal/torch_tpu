@@ -1440,3 +1440,153 @@ class TestResolveOutcome(unittest.TestCase):
     self.assertEqual(rc, 1)
     self.assertEqual(report["failures"], 1)
     self.assertIsNone(report["message"])
+
+
+FLEET_SCRIPT = os.path.join(REPO_ROOT, "scripts", "spot_tpu_fleet.sh")
+DRIVER_SCRIPT = os.path.join(REPO_ROOT, "scripts", "run_presubmit_v5_relay.sh")
+
+
+class TestDeadlineReaperOutlivesItsParent(unittest.TestCase):
+  """The reaper is the only thing standing between a crash and a billing leak.
+
+  It used to launch under plain `nohup`, which blocks SIGHUP and nothing else.
+  A process-group kill of the orchestrator took the reaper with it and eight
+  VMs billed for 21 hours before anyone noticed.
+  """
+
+  def setUp(self):
+    self.pool = tempfile.mkdtemp(prefix="reaper_test_")
+    self.addCleanup(shutil.rmtree, self.pool, ignore_errors=True)
+    self.pid_file = os.path.join(self.pool, "reaper.pid")
+
+  def test_the_reaper_records_its_own_pid_not_its_launchers(self):
+    """`arm_deadline` cannot use `$!`, because with setsid that is the launcher.
+
+    The pid file has to name the process that actually sleeps, otherwise
+    `cancel_deadline` kills a pid that has already exited and the real reaper
+    survives to delete somebody else's fleet.
+    """
+    proc = subprocess.Popen(
+        ["bash", FLEET_SCRIPT, "deadline",
+         "--pool", self.pool, "--deadline-minutes", "9999"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    self.addCleanup(proc.wait)
+    self.addCleanup(proc.kill)
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+      if os.path.exists(self.pid_file) and os.path.getsize(self.pid_file):
+        break
+      time.sleep(0.05)
+
+    self.assertTrue(os.path.exists(self.pid_file), "reaper wrote no pid file")
+    with open(self.pid_file, "r", encoding="utf-8") as f:
+      self.assertEqual(int(f.read().strip()), proc.pid)
+
+  def test_the_reaper_lands_outside_its_launchers_process_group(self):
+    """This is the bug that leaked eight VMs, reproduced as a test.
+
+    `up` skips any slot that already has a session file, so a pool with one
+    pre-made session arms the deadline without calling gcloud at all. The
+    reaper has to end up in its own process group, because the thing that
+    killed it was a group kill aimed at the orchestrator.
+    """
+    with open(os.path.join(self.pool, "vm_0.env"), "w", encoding="utf-8") as f:
+      f.write("TPU_NAME=already-up\n")
+
+    launcher = subprocess.Popen(
+        ["bash", FLEET_SCRIPT, "up", "--size", "1", "--pool", self.pool,
+         "--deadline-minutes", "9999"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    self.assertEqual(launcher.wait(timeout=60), 0)
+
+    with open(self.pid_file, "r", encoding="utf-8") as f:
+      reaper_pid = int(f.read().strip())
+    self.addCleanup(self._kill, reaper_pid)
+
+    os.kill(reaper_pid, 0)
+    self.assertEqual(os.getpgid(reaper_pid), reaper_pid)
+    self.assertNotEqual(os.getpgid(reaper_pid), os.getpgid(0))
+
+  @staticmethod
+  def _kill(pid):
+    try:
+      os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+      pass
+
+
+class TestSandboxDeleteDoesNotHoldTheLease(unittest.TestCase):
+  """Deleting an unpacked runfiles tree takes seconds the next shard could use.
+
+  The action still owns the VM lease while the metadata fetch runs, so the
+  delete is renamed out of the way and detached instead of waited on.
+  """
+
+  def test_the_fetch_renames_the_sandbox_and_detaches_the_delete(self):
+    with open(RELAY_RUNNER, "r", encoding="utf-8") as f:
+      body = f.read()
+    fetch = next(line for line in body.splitlines()
+                 if "test.exitcode" in line and "remote_meta" in line)
+    self.assertIn(".trash", fetch)
+    self.assertIn("setsid rm -rf", fetch)
+    self.assertNotRegex(fetch, r"rm -rf '\$\{REMOTE_SANDBOX\}'")
+
+  def test_the_detached_delete_idiom_actually_removes_the_tree(self):
+    root = tempfile.mkdtemp(prefix="sandbox_test_")
+    self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+    sandbox = os.path.join(root, "sandbox")
+    os.makedirs(os.path.join(sandbox, "nested"))
+    with open(os.path.join(sandbox, "nested", "f"), "w", encoding="utf-8") as f:
+      f.write("x" * 1024)
+
+    subprocess.run(
+        ["bash", "-c",
+         f"mv '{sandbox}' '{sandbox}.trash' 2>/dev/null && "
+         f"{{ setsid rm -rf '{sandbox}.trash' </dev/null >/dev/null 2>&1 & }}"],
+        check=True,
+    )
+    self.assertFalse(os.path.exists(sandbox), "rename did not happen")
+
+    deadline = time.time() + 10
+    while os.path.exists(f"{sandbox}.trash") and time.time() < deadline:
+      time.sleep(0.05)
+    self.assertFalse(os.path.exists(f"{sandbox}.trash"))
+
+
+class TestPhaseTimingIsOptIn(unittest.TestCase):
+  """`TORCH_TPU_RELAY_TIMING=1` has to reach the test action and the VM.
+
+  Bazel scrubs the environment, so setting the variable in the driver's own
+  shell does nothing; it has to be forwarded explicitly at both hops. Two
+  earlier probe runs produced no timing at all because of exactly this.
+  """
+
+  def test_the_driver_forwards_timing_on_every_path(self):
+    with open(DRIVER_SCRIPT, "r", encoding="utf-8") as f:
+      body = f.read()
+    forwards = re.findall(r"--test_env=TORCH_TPU_RELAY_TIMING=1", body)
+    self.assertEqual(
+        len(forwards), 2,
+        "both the single-VM and the pool branch rebuild relay_env from scratch",
+    )
+
+  def test_the_relay_forwards_timing_to_the_vm(self):
+    with open(RELAY_RUNNER, "r", encoding="utf-8") as f:
+      body = f.read()
+    self.assertRegex(body, r'remote_env\+="TORCH_TPU_RELAY_TIMING=1 "')
+
+  def test_marks_print_nothing_unless_timing_is_on(self):
+    for script, marker, label in (
+        (RELAY_RUNNER, "mark", "relay-timing"),
+        (REMOTE_EXECUTOR, "vmark", "vm-timing"),
+    ):
+      with self.subTest(script=os.path.basename(script)):
+        with open(script, "r", encoding="utf-8") as f:
+          body = f.read()
+        start = body.index(f"{marker}() {{")
+        fn = body[start:body.index("\n}\n", start)]
+        self.assertIn("TORCH_TPU_RELAY_TIMING", fn)
+        self.assertIn(label, fn)

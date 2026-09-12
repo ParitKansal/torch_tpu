@@ -391,5 +391,67 @@ class TestWorkflowsOnlyNameConfigsThatExist(unittest.TestCase):
           )
 
 
+class TestOssShardCountsStaySized(unittest.TestCase):
+  """Guards the OSS shard counts on the heavy ops test targets.
+
+  OSS caps samples per op/dtype, so these shards finish in seconds while each
+  one still pays a fixed startup: about 79s for the ops_test.py targets that
+  load golden data, 14-31s for the rest. Sharding past that point only adds
+  machine time to the presubmit without testing anything extra, and the counts
+  below were sized from per-action timings measured on v5e.
+  """
+
+  BUILD_FILE = os.path.join(REPO_ROOT, "tests", "BUILD")
+
+  # target -> most OSS shards that still earn their startup cost
+  SHARD_CEILINGS = {
+      "ops_test": 16,
+      "ops_test_compiled": 16,
+      "foreach_ops_test": 20,
+      "ops_unit_test": 16,
+      "ops_unit_test_tier3_cache": 16,
+      "ops_unit_test_tier3_cache_no_backup": 16,
+      "ops_test_grad_vs_cpu": 20,
+      "ops_test_dynamic_vs_cpu": 12,
+  }
+
+  def shard_counts(self):
+    """Maps target name to the raw shard_count expression in tests/BUILD."""
+    counts = {}
+    name = None
+    with open(self.BUILD_FILE, encoding="utf-8") as build_file:
+      for line in build_file:
+        match = re.match(r'\s+name = "([^"]+)"', line)
+        if match:
+          name = match.group(1)
+        match = re.match(r"\s+shard_count = (.+),\s*$", line)
+        if match and name is not None:
+          counts[name] = match.group(1)
+    return counts
+
+  def test_heavy_targets_split_oss_and_internal_shard_counts(self):
+    counts = self.shard_counts()
+    for target in self.SHARD_CEILINGS:
+      with self.subTest(target=target):
+        self.assertIn(target, counts, f"{target} has no shard_count")
+        self.assertRegex(
+            counts[target],
+            r"^if_oss\(\d+, \d+\)$",
+            f"{target} should set OSS and internal shard counts separately",
+        )
+
+  def test_oss_shard_counts_stay_under_their_ceilings(self):
+    counts = self.shard_counts()
+    for target, ceiling in self.SHARD_CEILINGS.items():
+      with self.subTest(target=target):
+        match = re.match(r"^if_oss\((\d+), \d+\)$", counts[target])
+        self.assertIsNotNone(match, f"{target} does not use if_oss")
+        self.assertLessEqual(
+            int(match.group(1)),
+            ceiling,
+            f"each extra {target} shard repeats its startup cost",
+        )
+
+
 if __name__ == "__main__":
   unittest.main()

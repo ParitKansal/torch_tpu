@@ -181,14 +181,35 @@ arm_deadline() {
     args+=(--zone "$zone")
   done
 
-  nohup "${BASH_SOURCE[0]}" "${args[@]}" >>"${POOL_DIR}/reaper.log" 2>&1 &
-  local reaper_pid="$!"
-  disown "$reaper_pid" 2>/dev/null || true
-  echo "$reaper_pid" > "${REAPER_PID_FILE}"
-  log "Deadline armed: fleet self-deletes in ${DEADLINE_MINUTES}m (pid ${reaper_pid})"
+  # setsid, not just nohup. nohup only blocks SIGHUP, so a process-group kill
+  # of the orchestrator still takes the reaper with it. That happened: the
+  # reaper died with its parent and eight VMs billed for 21 hours. A new
+  # session leader has no controlling terminal and no shared process group.
+  local launcher=()
+  command -v setsid >/dev/null 2>&1 && launcher=(setsid)
+
+  rm -f "$REAPER_PID_FILE"
+  nohup "${launcher[@]}" "${BASH_SOURCE[0]}" "${args[@]}" \
+    >>"${POOL_DIR}/reaper.log" 2>&1 &
+  disown %% 2>/dev/null || true
+
+  # cmd_deadline writes REAPER_PID_FILE itself, because with setsid the pid
+  # here belongs to the launcher rather than to the process that sleeps.
+  local waited=0
+  while [[ ! -s "$REAPER_PID_FILE" && "$waited" -lt 50 ]]; do
+    sleep 0.1
+    waited=$(( waited + 1 ))
+  done
+
+  if [[ -s "$REAPER_PID_FILE" ]]; then
+    log "Deadline armed: fleet self-deletes in ${DEADLINE_MINUTES}m (pid $(cat "$REAPER_PID_FILE"))"
+  else
+    log "WARNING: could not arm the deadline; tear the fleet down by hand"
+  fi
 }
 
 cmd_deadline() {
+  echo "$$" > "$REAPER_PID_FILE"
   log "Deadline armed for ${DEADLINE_MINUTES}m (pid $$)"
   sleep $(( DEADLINE_MINUTES * 60 ))
   log "Deadline reached, tearing the fleet down"

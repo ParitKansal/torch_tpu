@@ -57,6 +57,20 @@ declare -a TEST_ARGS=("$@")
 
 mkdir -p "$SANDBOX_DIR"
 
+# Phase timing, off unless TORCH_TPU_RELAY_TIMING is set. This is the VM half
+# of the same instrumentation relay_test_runner.sh prints on the host.
+EXEC_T0="${EPOCHREALTIME/,/.}"
+EXEC_TPREV="$EXEC_T0"
+vmark() {
+  [[ -n "${TORCH_TPU_RELAY_TIMING:-}" ]] || return 0
+  local now="${EPOCHREALTIME/,/.}"
+  printf '[vm-timing] %-16s +%6.2fs  total %6.2fs\n' \
+    "$1" \
+    "$(awk -v a="$now" -v b="$EXEC_TPREV" 'BEGIN{printf "%.2f", a-b}')" \
+    "$(awk -v a="$now" -v b="$EXEC_T0" 'BEGIN{printf "%.2f", a-b}')" >&2
+  EXEC_TPREV="$now"
+}
+
 BASE_CACHE="${TORCH_TPU_BASE_CACHE:-/tmp/torch_tpu_relay/base}"
 PAYLOAD_CACHE="${TORCH_TPU_PAYLOAD_CACHE:-/tmp/torch_tpu_relay/payloads}"
 PAYLOAD_KEY="${TORCH_TPU_PAYLOAD_KEY:-}"
@@ -80,6 +94,7 @@ if [[ -n "$PAYLOAD_KEY" && -d "$CACHED_TREE" ]]; then
     exit 1
   }
   WORKSPACE_ROOT="$(workspace_root_for "$SANDBOX_DIR")"
+  vmark tree_cache_hit
 else
   if [[ ! -t 0 ]]; then
     # -i because relay_test_runner.sh sends several archives back to back.
@@ -90,6 +105,7 @@ else
   fi
 
   WORKSPACE_ROOT="$(workspace_root_for "$SANDBOX_DIR")"
+  vmark tree_unpacked
 
   # 2. Wire in the shared runfiles that ci/tools/stage_relay_base.sh pushed. The
   # payload leaves these out because they are the same couple of gigabytes for
@@ -126,6 +142,7 @@ else
     repaired=$(( repaired + 1 ))
   done < <(find "$SANDBOX_DIR" -xtype l 2>/dev/null)
   [[ "$repaired" -eq 0 ]] || echo "[remote_tpu_executor] Repointed ${repaired} venv link(s) at the base cache." >&2
+  vmark links_repaired
 
   # Publish before the test runs, so nothing the test writes lands in the cache.
   if [[ -n "$PAYLOAD_KEY" ]]; then
@@ -145,6 +162,7 @@ else
         *) rm -rf "$old" ;;
       esac
     done
+    vmark payload_published
   fi
 fi
 
@@ -334,6 +352,8 @@ declare -a EXEC_CMD=()
 [[ -x "$TEST_PATH" && "$TEST_PATH" != *.py ]] || EXEC_CMD=("$PYTHON_BIN")
 EXEC_CMD+=("$TEST_PATH" ${TEST_ARGS[@]+"${TEST_ARGS[@]}"})
 
+vmark launching_test
+
 # 7. Execute test binary under job control (set -m) in dedicated process group ($PGID)
 (
   cd "$WORKSPACE_ROOT"
@@ -345,5 +365,6 @@ TEST_PGID=$!
 wait "$TEST_PID" 2>/dev/null
 TEST_EXIT_CODE=$?
 TEST_PID=""
+vmark test_process_done
 
 exit "$TEST_EXIT_CODE"

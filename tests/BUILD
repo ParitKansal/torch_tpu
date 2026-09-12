@@ -601,7 +601,7 @@ torch_tpu_py_test(
         "requires-tpu-v6e",
         "requires-tpu-v5lite",
     ],
-    shard_count = if_oss(8, 50),
+    shard_count = if_oss(12, 50),
     tags = [
         "noasan",  # This test times out in asan mode.
         "nomsan",  # This test times out in msan mode.
@@ -645,7 +645,7 @@ torch_tpu_py_test(
         "requires-tpu-v6e",
         "requires-tpu-v5lite",
     ],
-    shard_count = if_oss(12, 50),
+    shard_count = if_oss(20, 50),
     tags = [
         "noasan",  # This test times out in asan mode.
         "nomsan",  # This test times out in msan mode.
@@ -729,6 +729,9 @@ torch_tpu_py_test(
         "requires-tpu-v6e",
         "requires-tpu-v5lite",
     ],
+    # Sharding does not help here. Bazel splits by test method, and one method
+    # holds nearly all the work: at 4 shards one of them ran 221.2s against
+    # 223.3s unsharded, so the other three only paid relay overhead.
     shard_count = 1,
     tags = [
         "noasan",  # This test times out in asan mode.

@@ -1510,6 +1510,81 @@ class TestDeadlineReaperOutlivesItsParent(unittest.TestCase):
     self.assertEqual(os.getpgid(reaper_pid), reaper_pid)
     self.assertNotEqual(os.getpgid(reaper_pid), os.getpgid(0))
 
+  def test_arming_a_second_deadline_kills_the_first_reaper(self):
+    """Two live reapers means the fleet dies at the earlier of two deadlines.
+
+    `arm_deadline` used to `rm -f` the pid file and spawn. That forgets the old
+    reaper's pid without stopping it, so it keeps sleeping and tears down
+    whatever fleet is up when its own deadline lands. Seen in production with
+    two reapers armed 38 minutes apart.
+    """
+    with open(os.path.join(self.pool, "vm_0.env"), "w", encoding="utf-8") as f:
+      f.write("TPU_NAME=already-up\n")
+
+    first_pid = self._arm_via_up()
+    second_pid = self._arm_via_up()
+
+    self.assertNotEqual(first_pid, second_pid)
+    self._assert_dead(first_pid, "the first reaper outlived the second arm")
+    os.kill(second_pid, 0)
+
+  def test_running_deadline_by_hand_retires_the_previous_reaper(self):
+    """Operators run `deadline` directly, so the reaper enforces this itself."""
+    first = self._spawn_deadline()
+    first_pid = self._await_pid_file()
+    self.assertEqual(first_pid, first.pid)
+
+    second = self._spawn_deadline()
+    self.addCleanup(second.wait)
+    self.addCleanup(second.kill)
+
+    self.assertEqual(first.wait(timeout=30), -signal.SIGTERM)
+    self.assertEqual(self._await_pid_file(expected=second.pid), second.pid)
+
+  def _spawn_deadline(self):
+    proc = subprocess.Popen(
+        ["bash", FLEET_SCRIPT, "deadline",
+         "--pool", self.pool, "--deadline-minutes", "9999"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    self.addCleanup(self._kill, proc.pid)
+    return proc
+
+  def _arm_via_up(self):
+    launcher = subprocess.Popen(
+        ["bash", FLEET_SCRIPT, "up", "--size", "1", "--pool", self.pool,
+         "--deadline-minutes", "9999"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    self.assertEqual(launcher.wait(timeout=60), 0)
+    pid = self._await_pid_file()
+    self.addCleanup(self._kill, pid)
+    return pid
+
+  def _await_pid_file(self, expected=None):
+    deadline = time.time() + 15
+    last = None
+    while time.time() < deadline:
+      try:
+        with open(self.pid_file, "r", encoding="utf-8") as f:
+          last = int(f.read().strip())
+      except (OSError, ValueError):
+        last = None
+      if last is not None and (expected is None or last == expected):
+        return last
+      time.sleep(0.05)
+    self.fail(f"pid file never settled (last saw {last}, wanted {expected})")
+
+  def _assert_dead(self, pid, message):
+    deadline = time.time() + 15
+    while time.time() < deadline:
+      try:
+        os.kill(pid, 0)
+      except ProcessLookupError:
+        return
+      time.sleep(0.05)
+    self.fail(message)
+
   @staticmethod
   def _kill(pid):
     try:

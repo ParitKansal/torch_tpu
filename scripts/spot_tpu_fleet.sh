@@ -188,7 +188,10 @@ arm_deadline() {
   local launcher=()
   command -v setsid >/dev/null 2>&1 && launcher=(setsid)
 
-  rm -f "$REAPER_PID_FILE"
+  # Kill any reaper already armed rather than just forgetting its pid. Dropping
+  # the pid file leaves the old process sleeping with nothing pointing at it,
+  # and it tears down whatever fleet is up when its own deadline lands.
+  cancel_deadline
   nohup "${launcher[@]}" "${BASH_SOURCE[0]}" "${args[@]}" \
     >>"${POOL_DIR}/reaper.log" 2>&1 &
   disown %% 2>/dev/null || true
@@ -209,6 +212,10 @@ arm_deadline() {
 }
 
 cmd_deadline() {
+  # Claim the pid file only after retiring whoever held it. `arm_deadline`
+  # already does this, but `deadline` also gets run by hand, and two live
+  # reapers means the fleet disappears at the earlier of the two deadlines.
+  cancel_deadline
   echo "$$" > "$REAPER_PID_FILE"
   log "Deadline armed for ${DEADLINE_MINUTES}m (pid $$)"
   sleep $(( DEADLINE_MINUTES * 60 ))

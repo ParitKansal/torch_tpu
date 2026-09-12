@@ -28,7 +28,9 @@ import tempfile
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REPORTER_SCRIPT = os.path.join(REPO_ROOT, "scripts", "generate_presubmit_report.py")
+REPORTER_SCRIPT = os.path.join(
+    REPO_ROOT, "scripts", "generate_presubmit_report.py"
+)
 RUNNER_SCRIPT = os.path.join(REPO_ROOT, "scripts", "run_presubmit_v5_relay.sh")
 
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
@@ -328,7 +330,10 @@ GCP instance state: PREEMPTED
     with open(self.targets_file, "w") as f:
       f.write("\n".join(targets))
 
-    ansi_log = "\x1b[31mTraceback (most recent call last):\x1b[0m\n  \x1b[33mFile 'test.py', line 1\x1b[0m\n\x1b[31mAssertionError: colored\x1b[0m"
+    ansi_log = (
+        "\x1b[31mTraceback (most recent call last):\x1b[0m\n  \x1b[33mFile"
+        " 'test.py', line 1\x1b[0m\n\x1b[31mAssertionError: colored\x1b[0m"
+    )
     self._create_mock_testlog(
         "//tests:color_test",
         passes=False,
@@ -579,7 +584,11 @@ INFO: Build completed.
         f"--output-dir={self.output_dir}",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    self.assertEqual(proc.returncode, 0, f"Expected clean exit 0, got {proc.returncode}: {proc.stderr}")
+    self.assertEqual(
+        proc.returncode,
+        0,
+        f"Expected clean exit 0, got {proc.returncode}: {proc.stderr}",
+    )
 
     summary_file = os.path.join(self.output_dir, "presubmit_summary.json")
     self.assertTrue(os.path.isfile(summary_file))
@@ -630,7 +639,11 @@ INFO: Build completed.
         f"--output-dir={self.output_dir}",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    self.assertEqual(proc.returncode, 0, f"Expected clean exit 0, got {proc.returncode}: {proc.stderr}")
+    self.assertEqual(
+        proc.returncode,
+        0,
+        f"Expected clean exit 0, got {proc.returncode}: {proc.stderr}",
+    )
 
     summary_file = os.path.join(self.output_dir, "presubmit_summary.json")
     with open(summary_file, "r") as f:
@@ -736,7 +749,11 @@ INFO: Build completed.
         f"--output-dir={self.output_dir}",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    self.assertEqual(proc.returncode, 0, f"Expected clean exit 0, got {proc.returncode}: {proc.stderr}")
+    self.assertEqual(
+        proc.returncode,
+        0,
+        f"Expected clean exit 0, got {proc.returncode}: {proc.stderr}",
+    )
 
 
 class PresubmitPipelineEndToEndTest(
@@ -759,7 +776,9 @@ class PresubmitPipelineEndToEndTest(
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
     self.assertEqual(proc.returncode, 0, proc.stderr)
-    self.assertIn("torch_tpu Presubmit-v5 Relay Execution Pipeline", proc.stdout)
+    self.assertIn(
+        "torch_tpu Presubmit-v5 Relay Execution Pipeline", proc.stdout
+    )
     self.assertIn("--local_test_jobs=1", proc.stdout)
 
     summary_file = os.path.join(self.output_dir, "presubmit_summary.json")
@@ -811,7 +830,9 @@ class PresubmitPipelineEndToEndTest(
     self._write_exe(os.path.join(mock_bin, "bazel"), bazel_body)
 
     mock_mgr = os.path.join(mock_bin, "spot_tpu_manager.sh")
-    self._write_exe(mock_mgr, f"""
+    self._write_exe(
+        mock_mgr,
+        f"""
 case "${{1:-}}" in
   up)
     cat << 'SESSION_EOF' > "{session_env}"
@@ -827,10 +848,13 @@ SESSION_EOF
   status) exit 1 ;;
 esac
 exit 0
-""")
+""",
+    )
 
     mock_stager = os.path.join(mock_bin, "stage_relay_base.sh")
-    self._write_exe(mock_stager, 'echo "[stage_relay_base] mock: up to date"\nexit 0\n')
+    self._write_exe(
+        mock_stager, 'echo "[stage_relay_base] mock: up to date"\nexit 0\n'
+    )
 
     env = os.environ.copy()
     env["PATH"] = f"{mock_bin}:{env.get('PATH', '')}"
@@ -840,21 +864,26 @@ exit 0
     return env
 
   def test_pipeline_mock_execution_pass(self):
-    env = self._mock_env("mock_bin", """
+    env = self._mock_env(
+        "mock_bin",
+        """
 if [[ "$1" == "query" ]]; then
   echo "//tests:empty_test"
   exit 0
 fi
 echo "//tests:empty_test PASSED in 0.4s"
 exit 0
-""")
+""",
+    )
 
     cmd = [
         RUNNER_SCRIPT,
         f"--output-dir={self.output_dir}",
         "--targets=//tests:empty_test",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT, env=env)
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, cwd=REPO_ROOT, env=env
+    )
     self.assertEqual(proc.returncode, 0, proc.stderr)
 
     summary_file = os.path.join(self.output_dir, "presubmit_summary.json")
@@ -865,7 +894,9 @@ exit 0
     self.assertEqual(data["passed_targets"], 1)
 
   def test_pipeline_mock_execution_fail(self):
-    env = self._mock_env("mock_bin_fail", """
+    env = self._mock_env(
+        "mock_bin_fail",
+        """
 if [[ "$1" == "query" ]]; then
   echo "//tests:broken_test"
   exit 0
@@ -875,7 +906,8 @@ if [[ "$1" == "build" ]]; then
 fi
 echo "//tests:broken_test FAILED in 0.5s" >&2
 exit 3
-""")
+""",
+    )
 
     fail_out_dir = os.path.join(self.tmp_dir, "e2e_fail_reports")
     cmd = [
@@ -883,7 +915,9 @@ exit 3
         f"--output-dir={fail_out_dir}",
         "--targets=//tests:broken_test",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT, env=env)
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, cwd=REPO_ROOT, env=env
+    )
     self.assertEqual(proc.returncode, 3)
 
     summary_file = os.path.join(fail_out_dir, "presubmit_summary.json")
@@ -924,7 +958,9 @@ class BazelStatusParsingTest(
     log = self.write_log(
         "//tests:errors_test_tpu     FAILED in 3 out of 4 in 32.9s\n"
     )
-    self.assertEqual(parse_bazel_statuses(log), {"//tests:errors_test_tpu": "FAILED"})
+    self.assertEqual(
+        parse_bazel_statuses(log), {"//tests:errors_test_tpu": "FAILED"}
+    )
 
   def test_reads_cached_and_timed_out_and_statusless_targets(self):
     log = self.write_log(
@@ -934,7 +970,11 @@ class BazelStatusParsingTest(
     )
     self.assertEqual(
         parse_bazel_statuses(log),
-        {"//tests:a": "PASSED", "//tests:b": "TIMEOUT", "//tests:c": "NO STATUS"},
+        {
+            "//tests:a": "PASSED",
+            "//tests:b": "TIMEOUT",
+            "//tests:c": "NO STATUS",
+        },
     )
 
   def test_ignores_progress_lines_that_mention_a_target(self):
@@ -970,7 +1010,11 @@ class ShardedReportCollectionTest(
     self.logs = os.path.join(self.td.name, "bazel-testlogs")
 
   def write_shard(self, target_dir, shard, tests=2, failures=0, age=0.0):
-    path = os.path.join(self.logs, target_dir, shard) if shard else os.path.join(self.logs, target_dir)
+    path = (
+        os.path.join(self.logs, target_dir, shard)
+        if shard
+        else os.path.join(self.logs, target_dir)
+    )
     os.makedirs(path, exist_ok=True)
     xml = os.path.join(path, "test.xml")
     cases = "".join(
@@ -1000,7 +1044,9 @@ class ShardedReportCollectionTest(
     """bazel-testlogs survives across runs; last week's green is not today's."""
     self.write_shard("tests/gru_test", "shard_1_of_2", age=1000)
     self.write_shard("tests/gru_test", "shard_2_of_2")
-    paths, stale = collect_xml_paths(self.logs, "//tests:gru_test", min_mtime=5000)
+    paths, stale = collect_xml_paths(
+        self.logs, "//tests:gru_test", min_mtime=5000
+    )
     self.assertEqual(len(paths), 1)
     self.assertEqual(stale, 1)
 
@@ -1010,7 +1056,9 @@ class ShardedReportCollectionTest(
 
   def test_shard_counts_are_summed(self):
     for i in range(1, 4):
-      self.write_shard("tests/ops_test", f"shard_{i}_of_3", tests=10, failures=1)
+      self.write_shard(
+          "tests/ops_test", f"shard_{i}_of_3", tests=10, failures=1
+      )
     paths, _ = collect_xml_paths(self.logs, "//tests:ops_test")
     totals = parse_target_reports(paths)
     self.assertEqual(totals["tests"], 30)
@@ -1121,14 +1169,17 @@ class PoolSessionSummaryTest(
 
     subprocess.run(
         [
-            sys.executable, REPORTER_SCRIPT,
+            sys.executable,
+            REPORTER_SCRIPT,
             f"--testlogs-dir={os.path.join(self.td.name, 'logs')}",
             f"--targets-file={targets_file}",
             f"--session-pool={self.pool}",
             f"--output-dir={out_dir}",
             "--dry-run",
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
 
     with open(os.path.join(out_dir, "presubmit_summary.json")) as f:

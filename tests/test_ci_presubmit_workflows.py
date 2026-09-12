@@ -31,7 +31,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKFLOW_DIR = os.path.join(REPO_ROOT, ".github", "workflows")
 PRESUBMIT_YML = os.path.join(WORKFLOW_DIR, "presubmit.yml")
 TEST_RBE_YML = os.path.join(WORKFLOW_DIR, "test_rbe_opt_in.yml")
-MATRIX_SCRIPT = os.path.join(REPO_ROOT, "ci", "tools", "presubmit_job_matrix.sh")
+MATRIX_SCRIPT = os.path.join(
+    REPO_ROOT, "ci", "tools", "presubmit_job_matrix.sh"
+)
 BAZELRC = os.path.join(REPO_ROOT, ".bazelrc")
 
 TPU_V5_RUNNER = "linux-x86-ct5lp-224-8tpu"
@@ -269,16 +271,19 @@ class TestRbeOptInWorkflow(
   def test_steps_needing_credentials_are_skipped_without_them(self):
     for name in ["Authenticate to GCP RBE", "Set up Bazel", "Run Test Suite"]:
       with self.subTest(step=name):
-        self.assertIn("steps.creds.outputs.configured == 'true'",
-                      self.steps[name]["if"])
+        self.assertIn(
+            "steps.creds.outputs.configured == 'true'", self.steps[name]["if"]
+        )
 
   def test_test_suite_input_selects_a_matrix_leg(self):
     suites = {
-        entry["suite"]
-        for entry in self.job["strategy"]["matrix"]["job_info"]
+        entry["suite"] for entry in self.job["strategy"]["matrix"]["job_info"]
     }
-    options = set(self.workflow["on"]["workflow_dispatch"]["inputs"]
-                  ["test_suite"]["options"])
+    options = set(
+        self.workflow["on"]["workflow_dispatch"]["inputs"]["test_suite"][
+            "options"
+        ]
+    )
     self.assertEqual(options, suites | {"all"})
 
   def test_excluded_targets_are_negated_bazel_patterns(self):
@@ -340,7 +345,11 @@ class TestTpuConfigsPinOnlyTestActions(
   def test_no_tpu_config_sets_a_default_spawn_strategy(self):
     for config in self.TPU_CONFIGS:
       with self.subTest(config=config):
-        pins = [f for f in self.flags_for(config) if f.startswith("--spawn_strategy")]
+        pins = [
+            f
+            for f in self.flags_for(config)
+            if f.startswith("--spawn_strategy")
+        ]
         self.assertEqual(pins, [], f"{config} pins every spawn locally: {pins}")
 
   def test_tpu_configs_still_reach_remote_execution(self):
@@ -386,7 +395,9 @@ class TestWorkflowsOnlyNameConfigsThatExist(
 
     names = set(re.findall(r"--config=([A-Za-z0-9_]+)", text))
     for job in yaml.safe_load(text).get("jobs", {}).values():
-      for entry in job.get("strategy", {}).get("matrix", {}).get("job_info", []):
+      for entry in (
+          job.get("strategy", {}).get("matrix", {}).get("job_info", [])
+      ):
         if isinstance(entry, dict) and entry.get("config"):
           names.add(entry["config"])
     return names
@@ -396,9 +407,7 @@ class TestWorkflowsOnlyNameConfigsThatExist(
     for path in (PRESUBMIT_YML, TEST_RBE_YML):
       for config in sorted(self.referenced_configs(path)):
         with self.subTest(workflow=os.path.basename(path), config=config):
-          self.assertIn(
-              config, defined, f"{config} is not defined in .bazelrc"
-          )
+          self.assertIn(config, defined, f"{config} is not defined in .bazelrc")
 
 
 class TestOssShardCountsStaySized(

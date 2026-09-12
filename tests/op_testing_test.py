@@ -255,9 +255,7 @@ class GoldenGpuDataLazyDecodeTest(
     )
 
     later = op_testing.GoldenGpuData()
-    later.add(
-        "case_a", op_testing.OpVariant.BASE, torch.float32, *second
-    )
+    later.add("case_a", op_testing.OpVariant.BASE, torch.float32, *second)
     data.merge_plistlib_pytree(later.to_plistlib_pytree())
 
     self._assert_samples_equal(
@@ -284,14 +282,12 @@ class GoldenGpuDataLazyDecodeTest(
     self.assertEqual(decode.call_count, 1)
 
   def test_reading_an_absent_key_returns_nothing(self):
-    data = self._merged(
-        [(
-            "case_a",
-            op_testing.OpVariant.BASE,
-            torch.float32,
-            self._make_sample("s0"),
-        )]
-    )
+    data = self._merged([(
+        "case_a",
+        op_testing.OpVariant.BASE,
+        torch.float32,
+        self._make_sample("s0"),
+    )])
 
     self.assertEmpty(
         data.get_samples("case_z", op_testing.OpVariant.BASE, torch.float32)
@@ -304,14 +300,12 @@ class GoldenGpuDataLazyDecodeTest(
     )
 
   def test_clear_drops_samples_that_were_never_read(self):
-    data = self._merged(
-        [(
-            "case_a",
-            op_testing.OpVariant.BASE,
-            torch.float32,
-            self._make_sample("s0"),
-        )]
-    )
+    data = self._merged([(
+        "case_a",
+        op_testing.OpVariant.BASE,
+        torch.float32,
+        self._make_sample("s0"),
+    )])
 
     data.clear()
 

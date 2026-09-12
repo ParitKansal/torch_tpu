@@ -455,7 +455,8 @@ def discover_targets_from_bazel_log(bazel_log_path: str) -> list[str]:
     return targets
 
   target_regex = re.compile(
-      r"^\s*(//[a-zA-Z0-9_\-./]+:[a-zA-Z0-9_\-.]+)\s+(PASSED|FAILED|FLAKY|TIMEOUT|TIMED OUT)"
+      r"^\s*(//[a-zA-Z0-9_\-./]+:[a-zA-Z0-9_\-.]+)\s+(PASSED|FAILED|FLAKY|TIMEOUT|TIMED"
+      r" OUT)"
   )
   try:
     with open(bazel_log_path, "r", errors="replace") as f:
@@ -477,7 +478,9 @@ def parse_args():
   parser.add_argument(
       "--output-dir",
       required=True,
-      help="Directory to deposit presubmit_summary.json and presubmit_report.md",
+      help=(
+          "Directory to deposit presubmit_summary.json and presubmit_report.md"
+      ),
   )
   parser.add_argument(
       "--bazel-log",
@@ -494,7 +497,10 @@ def parse_args():
   parser.add_argument(
       "--testlogs-dir",
       default="",
-      help="Path to bazel-testlogs directory (default: <workspace-root>/bazel-testlogs)",
+      help=(
+          "Path to bazel-testlogs directory (default:"
+          " <workspace-root>/bazel-testlogs)"
+      ),
   )
   parser.add_argument(
       "--targets-file",
@@ -646,7 +652,7 @@ def main():
 
     if not err_msg and status == "NO_STATUS":
       err_msg = (
-          f"No result for this target in this run "
+          "No result for this target in this run "
           f"({stale_count} report(s) on disk from an earlier run)"
           if stale_count
           else "No result for this target in this run"
@@ -688,9 +694,7 @@ def main():
   elif failed_targets > 0 or args.bazel_exit_code != 0:
     overall_status = "FAILED"
 
-  iso_timestamp = (
-      datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-  )
+  iso_timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
   summary = {
       "schema_version": "1.0.0",
@@ -768,7 +772,9 @@ def main():
       if rec["status"] in ["PASSED", "DRY_RUN"]:
         continue
       md_lines.append(f"### ❌ `{rec['target']}`")
-      md_lines.append(f"- **Status**: {rec['status']} (exit code {rec['exit_code']})")
+      md_lines.append(
+          f"- **Status**: {rec['status']} (exit code {rec['exit_code']})"
+      )
       md_lines.append(f"- **Duration**: {rec['duration_seconds']:.1f}s")
       if rec["error_message"]:
         md_lines.append(f"- **Error Summary**: `{rec['error_message']}`")

@@ -33,9 +33,17 @@ import xml.etree.ElementTree as ET
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RELAY_RUNNER = os.path.join(REPO_ROOT, "ci", "tools", "relay_test_runner.sh")
-REMOTE_EXECUTOR = os.path.join(REPO_ROOT, "ci", "tools", "remote_tpu_executor.sh")
+REMOTE_EXECUTOR = os.path.join(
+    REPO_ROOT, "ci", "tools", "remote_tpu_executor.sh"
+)
 
-SESSION_KEYS = ("TPU_IP", "SSH_USER", "SSH_CONTROL_PATH", "TPU_NAME", "TPU_ZONE")
+SESSION_KEYS = (
+    "TPU_IP",
+    "SSH_USER",
+    "SSH_CONTROL_PATH",
+    "TPU_NAME",
+    "TPU_ZONE",
+)
 
 
 class RelayRunnerTestCase(
@@ -62,7 +70,9 @@ class RelayRunnerTestCase(
         "HOME": self.tmp.name,
         "XML_OUTPUT_FILE": self.xml_path,
         "TEST_TARGET": "//tests:relay_smoke_test",
-        "TPU_SESSION_ENV": session_env or os.path.join(self.tmp.name, "absent.env"),
+        "TPU_SESSION_ENV": (
+            session_env or os.path.join(self.tmp.name, "absent.env")
+        ),
     }
     env.update(env_overrides)
     return subprocess.run(
@@ -74,7 +84,9 @@ class RelayRunnerTestCase(
     )
 
   def read_xml(self):
-    self.assertTrue(os.path.exists(self.xml_path), "No JUnit report was written")
+    self.assertTrue(
+        os.path.exists(self.xml_path), "No JUnit report was written"
+    )
     return ET.parse(self.xml_path).getroot().find("testsuite")
 
 
@@ -121,8 +133,10 @@ class TestRelayRunnerFailureReports(RelayRunnerTestCase):
     self.assertEqual(
         len(ET.parse(self.xml_path).getroot().findall("testsuite")), 1
     )
-    self.assertNotIn("interrupted by signal", self.read_xml().find(
-        "testcase/failure").get("message"))
+    self.assertNotIn(
+        "interrupted by signal",
+        self.read_xml().find("testcase/failure").get("message"),
+    )
 
   def test_runs_without_an_xml_output_file(self):
     """Bazel only sets XML_OUTPUT_FILE for test actions, not for `bazel run`."""
@@ -199,6 +213,7 @@ class RelayPoolTestCase(RelayRunnerTestCase):
     holder = subprocess.Popen(
         ["flock", f"{session_path}.lock", "-c", "sleep 30"],
     )
+
     def stop_holder():
       holder.kill()
       holder.wait()
@@ -303,8 +318,11 @@ class TestRelayScriptsAreWellFormed(
     The image shipped 3.10 while these scripts assumed a 3.12 venv, which broke
     every remote run.
     """
-    for script in [RELAY_RUNNER, REMOTE_EXECUTOR,
-                   os.path.join(REPO_ROOT, "scripts", "spot_tpu_manager.sh")]:
+    for script in [
+        RELAY_RUNNER,
+        REMOTE_EXECUTOR,
+        os.path.join(REPO_ROOT, "scripts", "spot_tpu_manager.sh"),
+    ]:
       with self.subTest(script=os.path.basename(script)):
         with open(script, "r", encoding="utf-8") as f:
           body = f.read()
@@ -326,7 +344,8 @@ class TestRelayScriptsAreWellFormed(
               self.assertEqual(
                   match.group(1),
                   "rbe-tpu-oss",
-                  f"{script}:{lineno} hardcodes a project this relay doesn't own",
+                  f"{script}:{lineno} hardcodes a project this relay"
+                  " doesn't own",
               )
 
 
@@ -393,7 +412,9 @@ class StageRelayBaseTestCase(
   def session_file(self, name="vm_0.env"):
     """A session missing TPU_IP, so staging stops before any SSH hop."""
     path = os.path.join(self.root, name)
-    self._write(path, 'export TPU_NAME="fake-vm"\nexport TPU_ZONE="europe-west4-b"\n')
+    self._write(
+        path, 'export TPU_NAME="fake-vm"\nexport TPU_ZONE="europe-west4-b"\n'
+    )
     return path
 
   def run_stage(self, *args, env=None):
@@ -412,13 +433,19 @@ class StageRelayBaseTestCase(
 
   @staticmethod
   def stamp_for(layer, output):
-    match = re.search(rf"^\[stage_relay_base\] {layer} stamp (\w+)$", output, re.M)
+    match = re.search(
+        rf"^\[stage_relay_base\] {layer} stamp (\w+)$", output, re.M
+    )
     return match.group(1) if match else None
 
   def layer_members(self, layer, stamp):
     """The log carries a 12-character prefix; the file name carries the rest."""
-    matches = [f for f in os.listdir(self.tarballs) if f.startswith(f"{layer}_{stamp}")]
-    self.assertEqual(len(matches), 1, f"expected one {layer} tarball, got {matches}")
+    matches = [
+        f for f in os.listdir(self.tarballs) if f.startswith(f"{layer}_{stamp}")
+    ]
+    self.assertEqual(
+        len(matches), 1, f"expected one {layer} tarball, got {matches}"
+    )
     with tarfile.open(os.path.join(self.tarballs, matches[0])) as tf:
       return sorted(tf.getnames())
 
@@ -446,8 +473,12 @@ class TestStageRelayBaseDiscovery(StageRelayBaseTestCase):
     )
 
   def test_unions_repositories_across_trees(self):
-    self.add_runfiles_tree("a", deps=["rules_python++pip+torch_tpu_pypi_312_torch"])
-    self.add_runfiles_tree("b", deps=["rules_python++pip+torch_tpu_pypi_312_numpy"])
+    self.add_runfiles_tree(
+        "a", deps=["rules_python++pip+torch_tpu_pypi_312_torch"]
+    )
+    self.add_runfiles_tree(
+        "b", deps=["rules_python++pip+torch_tpu_pypi_312_numpy"]
+    )
     result = self.run_stage("--session", self.session_file())
     self.assertIn("found 2 dependency repositories", result.stdout)
 
@@ -513,23 +544,38 @@ class TestStageRelayBaseStamps(StageRelayBaseTestCase):
 
   def test_a_code_change_moves_only_the_solib_stamp(self):
     lib = os.path.join(
-        self.out, "tests", "a.runfiles", "_main", "_solib_x86_64", "_U_libtorch", "lib.so"
+        self.out,
+        "tests",
+        "a.runfiles",
+        "_main",
+        "_solib_x86_64",
+        "_U_libtorch",
+        "lib.so",
     )
     self._write(lib, "binary-rebuilt-and-longer")
     result = self.run_stage("--session", self.session)
     self.assertEqual(self.deps_stamp, self.stamp_for("deps", result.stdout))
-    self.assertNotEqual(self.solib_stamp, self.stamp_for("solib", result.stdout))
+    self.assertNotEqual(
+        self.solib_stamp, self.stamp_for("solib", result.stdout)
+    )
 
   def test_a_rebuilt_extension_module_moves_the_solib_stamp(self):
     """Otherwise the VMs keep serving an old .so out of the base cache."""
     lib = os.path.join(
-        self.out, "tests", "a.runfiles", "_main", "csrc", "common",
+        self.out,
+        "tests",
+        "a.runfiles",
+        "_main",
+        "csrc",
+        "common",
         "libpywrap_torch_tpu_common.so",
     )
     self._write(lib, "binary-rebuilt-and-longer")
     result = self.run_stage("--session", self.session)
     self.assertEqual(self.deps_stamp, self.stamp_for("deps", result.stdout))
-    self.assertNotEqual(self.solib_stamp, self.stamp_for("solib", result.stdout))
+    self.assertNotEqual(
+        self.solib_stamp, self.stamp_for("solib", result.stdout)
+    )
 
   def test_a_lockfile_change_moves_only_the_deps_stamp(self):
     self._write(self.lock, "lockfile v2")
@@ -538,21 +584,30 @@ class TestStageRelayBaseStamps(StageRelayBaseTestCase):
     self.assertEqual(self.solib_stamp, self.stamp_for("solib", result.stdout))
 
   def test_a_new_dependency_moves_the_deps_stamp(self):
-    self.add_runfiles_tree("b", deps=["rules_python++pip+torch_tpu_pypi_312_numpy"])
+    self.add_runfiles_tree(
+        "b", deps=["rules_python++pip+torch_tpu_pypi_312_numpy"]
+    )
     result = self.run_stage("--session", self.session)
     self.assertNotEqual(self.deps_stamp, self.stamp_for("deps", result.stdout))
 
   def test_rebuilding_an_extension_module_moves_the_solib_stamp(self):
     """Otherwise a code change gets served out of a stale base cache."""
     lib = os.path.join(
-        self.out, "tests", "a.runfiles", "_main", "csrc", "common", "libpywrap.so"
+        self.out,
+        "tests",
+        "a.runfiles",
+        "_main",
+        "csrc",
+        "common",
+        "libpywrap.so",
     )
     self._write(lib, "binary")
     first = self.run_stage("--session", self.session)
     self._write(lib, "binary-rebuilt-and-longer")
     second = self.run_stage("--session", self.session)
     self.assertNotEqual(
-        self.stamp_for("solib", first.stdout), self.stamp_for("solib", second.stdout)
+        self.stamp_for("solib", first.stdout),
+        self.stamp_for("solib", second.stdout),
     )
 
   def test_an_unchanged_workspace_reuses_both_tarballs(self):
@@ -581,9 +636,13 @@ class TestStageRelayBaseGuards(StageRelayBaseTestCase):
     self.assertIn("--jobs must be a positive integer", result.stderr)
 
   def test_refuses_to_leave_the_allowed_project(self):
-    self.add_runfiles_tree("a", deps=["rules_python++pip+torch_tpu_pypi_312_torch"])
+    self.add_runfiles_tree(
+        "a", deps=["rules_python++pip+torch_tpu_pypi_312_torch"]
+    )
     result = self.run_stage(
-        "--session", self.session_file(), env={"CLOUDSDK_CORE_PROJECT": "some-other-project"}
+        "--session",
+        self.session_file(),
+        env={"CLOUDSDK_CORE_PROJECT": "some-other-project"},
     )
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("rbe-tpu-oss", result.stderr)
@@ -613,7 +672,8 @@ class TestRelaySshHelper(
 
   def test_defines_the_functions_both_callers_rely_on(self):
     result = self.source_and_run(
-        "declare -F relay_ssh_ensure_master relay_ssh_master_alive relay_ssh_identity"
+        "declare -F relay_ssh_ensure_master relay_ssh_master_alive"
+        " relay_ssh_identity"
     )
     self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -624,13 +684,18 @@ class TestRelaySshHelper(
 
   def test_identity_defaults_to_the_gce_key_and_honours_an_override(self):
     default = self.source_and_run("relay_ssh_identity")
-    self.assertTrue(default.stdout.strip().endswith("/.ssh/google_compute_engine"))
-    override = self.source_and_run('SSH_IDENTITY=/tmp/other-key relay_ssh_identity')
+    self.assertTrue(
+        default.stdout.strip().endswith("/.ssh/google_compute_engine")
+    )
+    override = self.source_and_run(
+        "SSH_IDENTITY=/tmp/other-key relay_ssh_identity"
+    )
     self.assertEqual(override.stdout.strip(), "/tmp/other-key")
 
   def test_reports_a_missing_master_socket_as_dead(self):
     result = self.source_and_run(
-        'relay_ssh_master_alive /tmp/definitely-not-a-socket-12345 user@203.0.113.1; echo "rc=$?"'
+        "relay_ssh_master_alive /tmp/definitely-not-a-socket-12345"
+        ' user@203.0.113.1; echo "rc=$?"'
     )
     self.assertIn("rc=1", result.stdout)
 
@@ -653,15 +718,19 @@ class TestProvisioningScriptsSupportOnDemand(
 
   def test_manager_only_passes_spot_when_not_on_demand(self):
     body = self.read("scripts/spot_tpu_manager.sh")
-    self.assertIn('[[ "$CLI_ON_DEMAND" == "true" ]] || create_args+=(--spot)', body)
+    self.assertIn(
+        '[[ "$CLI_ON_DEMAND" == "true" ]] || create_args+=(--spot)', body
+    )
 
   def test_manager_accepts_the_on_demand_flag(self):
     body = self.read("scripts/spot_tpu_manager.sh")
-    self.assertEqual(body.count("--on-demand)"), 2, "both subcommands should accept it")
+    self.assertEqual(
+        body.count("--on-demand)"), 2, "both subcommands should accept it"
+    )
 
   def test_fleet_forwards_the_on_demand_flag(self):
     body = self.read("scripts/spot_tpu_fleet.sh")
-    self.assertIn('up_args+=(--on-demand)', body)
+    self.assertIn("up_args+=(--on-demand)", body)
 
   def test_manager_no_longer_installs_its_own_python(self):
     """The image ships 3.10; bazel builds against a hermetic 3.12."""
@@ -693,20 +762,35 @@ class StreamPayloadTestCase(
     # Bazel points these at the local output base. Their bytes are real and
     # only exist here, so the payload has to dereference them.
     self._write(os.path.join(self.host_only, "pyvenv.cfg"), "")
-    self._write(os.path.join(self.host_only, "bazel.pth"), "import _bazel_site_init\n")
+    self._write(
+        os.path.join(self.host_only, "bazel.pth"), "import _bazel_site_init\n"
+    )
 
-    self._write(os.path.join(self.runfiles, "_main/src/torch_tpu/__init__.py"), "x = 1\n")
-    self._write(os.path.join(self.runfiles, "repo_torch/site-packages/torch/__init__.py"), "y = 2\n")
+    self._write(
+        os.path.join(self.runfiles, "_main/src/torch_tpu/__init__.py"),
+        "x = 1\n",
+    )
+    self._write(
+        os.path.join(
+            self.runfiles, "repo_torch/site-packages/torch/__init__.py"
+        ),
+        "y = 2\n",
+    )
 
     self._link("/pyvenv.cfg", self.VENV_REL + "/pyvenv.cfg", host_only=True)
     self._link("/bazel.pth", self.SITE_REL + "/bazel.pth", host_only=True)
 
     # Resolves against the base cache once the executor links it in.
-    self._link("../../../../../../repo_torch/site-packages/torch", self.SITE_REL + "/torch")
+    self._link(
+        "../../../../../../repo_torch/site-packages/torch",
+        self.SITE_REL + "/torch",
+    )
     # Names a repository the executor repoints; must stay a link or the
     # payload balloons to gigabytes.
     self._link(
-        os.path.join(self.root, "output_base/external/repo_torch/site-packages/extra.py"),
+        os.path.join(
+            self.root, "output_base/external/repo_torch/site-packages/extra.py"
+        ),
         self.SITE_REL + "/extra.py",
     )
 
@@ -725,14 +809,20 @@ class StreamPayloadTestCase(
     with open(RELAY_RUNNER) as fh:
       lines = fh.read().splitlines()
 
-    start = next(i for i, l in enumerate(lines) if l.startswith("readonly PAYLOAD_EXCLUDES=("))
-    body_start = next(i for i, l in enumerate(lines) if l.startswith("stream_payload() {"))
+    start = next(
+        i
+        for i, l in enumerate(lines)
+        if l.startswith("readonly PAYLOAD_EXCLUDES=(")
+    )
+    body_start = next(
+        i for i, l in enumerate(lines) if l.startswith("stream_payload() {")
+    )
     end = next(i for i in range(body_start, len(lines)) if lines[i] == "}")
 
     script = os.path.join(self.root, "harness.sh")
     with open(script, "w") as fh:
-      fh.write("#!/usr/bin/env bash\nset -uo pipefail\nRUNFILES_ROOT=\"$1\"\n")
-      fh.write("\n".join(lines[start:end + 1]))
+      fh.write('#!/usr/bin/env bash\nset -uo pipefail\nRUNFILES_ROOT="$1"\n')
+      fh.write("\n".join(lines[start : end + 1]))
       fh.write("\nstream_payload\n")
     os.chmod(script, 0o755)
     return script
@@ -757,7 +847,9 @@ class StreamPayloadTestCase(
 
   def kind_of(self, members, relpath):
     matches = [kind for name, kind in members if name == relpath]
-    self.assertEqual(len(matches), 1, f"{relpath} should appear exactly once, got {matches}")
+    self.assertEqual(
+        len(matches), 1, f"{relpath} should appear exactly once, got {matches}"
+    )
     return matches[0]
 
 
@@ -772,7 +864,11 @@ class TestStreamPayloadArchivesAreDisjoint(StreamPayloadTestCase):
     members = self.listing()
     names = [name for name, _ in members if name]
     duplicates = sorted({n for n in names if names.count(n) > 1})
-    self.assertEqual(duplicates, [], f"payload writes these names more than once: {duplicates}")
+    self.assertEqual(
+        duplicates,
+        [],
+        f"payload writes these names more than once: {duplicates}",
+    )
 
   def test_host_only_venv_links_arrive_as_real_files(self):
     """pyvenv.cfg and bazel.pth decide whether the venv activates at all."""
@@ -788,7 +884,9 @@ class TestStreamPayloadArchivesAreDisjoint(StreamPayloadTestCase):
 
   def test_tree_outside_the_venv_is_dereferenced(self):
     members = self.listing()
-    self.assertEqual(self.kind_of(members, "_main/src/torch_tpu/__init__.py"), "-")
+    self.assertEqual(
+        self.kind_of(members, "_main/src/torch_tpu/__init__.py"), "-"
+    )
 
 
 class TestStreamPayloadLeavesSharedBuildOutputsOut(StreamPayloadTestCase):
@@ -802,7 +900,9 @@ class TestStreamPayloadLeavesSharedBuildOutputsOut(StreamPayloadTestCase):
   def setUp(self):
     super().setUp()
     self._write(
-        os.path.join(self.runfiles, "_main/csrc/common/libpywrap_torch_tpu_common.so"),
+        os.path.join(
+            self.runfiles, "_main/csrc/common/libpywrap_torch_tpu_common.so"
+        ),
         "a very large binary",
     )
     self._write(
@@ -811,7 +911,9 @@ class TestStreamPayloadLeavesSharedBuildOutputsOut(StreamPayloadTestCase):
     )
     # Not ours and not in the base cache: only _main/csrc is excluded.
     self._write(
-        os.path.join(self.runfiles, "repo_torch/site-packages/torch/csrc/api.h"),
+        os.path.join(
+            self.runfiles, "repo_torch/site-packages/torch/csrc/api.h"
+        ),
         "#pragma once\n",
     )
 
@@ -850,8 +952,11 @@ class TestPayloadKeyIsRunScoped(
 
     self.script = os.path.join(self._tmp.name, "payload_key.sh")
     with open(self.script, "w", encoding="utf-8") as fh:
-      fh.write('#!/usr/bin/env bash\nset -uo pipefail\nRUNFILES_ROOT="$1"\nremote_env=""\n')
-      fh.write("\n".join(lines[start:end + 1]))
+      fh.write(
+          "#!/usr/bin/env bash\nset -uo"
+          ' pipefail\nRUNFILES_ROOT="$1"\nremote_env=""\n'
+      )
+      fh.write("\n".join(lines[start : end + 1]))
       fh.write('\nprintf "key=%s\\nenv=%s\\n" "$payload_key" "$remote_env"\n')
 
   def derive(self, runfiles_root, run_id=None):
@@ -860,7 +965,11 @@ class TestPayloadKeyIsRunScoped(
       env["TORCH_TPU_RELAY_RUN_ID"] = run_id
     out = subprocess.run(
         ["bash", self.script, runfiles_root],
-        env=env, capture_output=True, text=True, check=True, timeout=60,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
     ).stdout
     fields = dict(line.split("=", 1) for line in out.splitlines())
     return fields["key"], fields["env"]
@@ -937,7 +1046,9 @@ class RemoteExecutorCacheTestCase(
 
   def run_executor(self, key=None, payload=None, sandbox=None):
     """Runs one action. Passing no payload is what a cache hit looks like."""
-    sandbox = sandbox or os.path.join(self.root, f"sandbox_{time.monotonic_ns()}")
+    sandbox = sandbox or os.path.join(
+        self.root, f"sandbox_{time.monotonic_ns()}"
+    )
     env = {
         "PATH": os.environ["PATH"],
         "HOME": self.root,
@@ -973,7 +1084,9 @@ class TestRemoteExecutorPayloadCache(RemoteExecutorCacheTestCase):
     self.assertTrue(os.path.exists(os.path.join(sandbox, "ran")))
     self.assertEqual(self.cached_trees(), [key])
     self.assertTrue(
-        os.path.exists(os.path.join(self.payload_cache, key, "_main/tests/fake_test.sh"))
+        os.path.exists(
+            os.path.join(self.payload_cache, key, "_main/tests/fake_test.sh")
+        )
     )
 
   def test_the_cache_holds_no_test_output(self):
@@ -991,7 +1104,9 @@ class TestRemoteExecutorPayloadCache(RemoteExecutorCacheTestCase):
     sandbox, result = self.run_executor(key=key)
     self.assertEqual(result.returncode, 0, result.stderr.decode())
     self.assertTrue(os.path.exists(os.path.join(sandbox, "ran")))
-    self.assertTrue(os.path.exists(os.path.join(sandbox, "_main/tests/fake_test.sh")))
+    self.assertTrue(
+        os.path.exists(os.path.join(sandbox, "_main/tests/fake_test.sh"))
+    )
 
   def test_only_a_miss_repairs_links(self):
     """The whole-tree link walk is the slow part a hit is meant to skip."""
@@ -1008,7 +1123,8 @@ class TestRemoteExecutorPayloadCache(RemoteExecutorCacheTestCase):
 
     cached_link = os.path.join(self.payload_cache, key, "_main/tests/dep.py")
     self.assertEqual(
-        os.readlink(cached_link), os.path.join(self.base_cache, "repo_fake/dep.py")
+        os.readlink(cached_link),
+        os.path.join(self.base_cache, "repo_fake/dep.py"),
     )
 
     sandbox, _ = self.run_executor(key=key)
@@ -1041,12 +1157,16 @@ class TestRemoteExecutorBaseCacheLinks(RemoteExecutorCacheTestCase):
 
   def setUp(self):
     super().setUp()
-    self.csrc_lib = os.path.join(self.base_cache, "csrc", "common", "libpywrap.so")
+    self.csrc_lib = os.path.join(
+        self.base_cache, "csrc", "common", "libpywrap.so"
+    )
     os.makedirs(os.path.dirname(self.csrc_lib))
     with open(self.csrc_lib, "w") as fh:
       fh.write("extension module\n")
 
-    self.solib = os.path.join(self.base_cache, "_solib_x86_64", "_U_libtorch", "lib.so")
+    self.solib = os.path.join(
+        self.base_cache, "_solib_x86_64", "_U_libtorch", "lib.so"
+    )
     os.makedirs(os.path.dirname(self.solib))
     with open(self.solib, "w") as fh:
       fh.write("shared library\n")
@@ -1054,7 +1174,10 @@ class TestRemoteExecutorBaseCacheLinks(RemoteExecutorCacheTestCase):
   def test_a_miss_links_both_into_the_workspace_root(self):
     sandbox, result = self.run_executor(key=self.key(), payload=self.payload)
     self.assertEqual(result.returncode, 0, result.stderr.decode())
-    for name, expected in (("csrc", self.csrc_lib), ("_solib_x86_64", self.solib)):
+    for name, expected in (
+        ("csrc", self.csrc_lib),
+        ("_solib_x86_64", self.solib),
+    ):
       link = os.path.join(sandbox, "_main", name)
       self.assertTrue(os.path.islink(link), f"{name} should be a symlink")
       self.assertEqual(os.readlink(link), os.path.join(self.base_cache, name))
@@ -1139,33 +1262,41 @@ class TestCheckPreemption(
 
     with open(RELAY_RUNNER, encoding="utf-8") as fh:
       lines = fh.read().splitlines()
-    start = next(i for i, l in enumerate(lines) if l.startswith("check_preemption() {"))
+    start = next(
+        i for i, l in enumerate(lines) if l.startswith("check_preemption() {")
+    )
     end = next(i for i in range(start, len(lines)) if lines[i] == "}")
 
     self.script = os.path.join(self.root, "check_preemption.sh")
     with open(self.script, "w", encoding="utf-8") as fh:
       fh.write(
-          "#!/usr/bin/env bash\nset -uo pipefail\n"
-          'ALLOWED_PROJECT="rbe-tpu-oss"\n'
-          'TPU_NAME="vm-under-test"\nTPU_ZONE="europe-west4-b"\nTPU_IP="10.0.0.1"\n'
-          'write_stub_xml() { printf "STUB:%s\\n" "$1"; }\n'
+          "#!/usr/bin/env bash\nset -uo"
+          ' pipefail\nALLOWED_PROJECT="rbe-tpu-oss"\nTPU_NAME="vm-under-test"\nTPU_ZONE="europe-west4-b"\nTPU_IP="10.0.0.1"\nwrite_stub_xml()'
+          ' { printf "STUB:%s\\n" "$1"; }\n'
       )
-      fh.write("\n".join(lines[start:end + 1]))
+      fh.write("\n".join(lines[start : end + 1]))
       fh.write("\ncheck_preemption\nprintf 'rc=%s\\n' \"$?\"\n")
 
   def fake_gcloud(self, stdout="", exit_code=0):
     path = os.path.join(self.bin_dir, "gcloud")
     with open(path, "w", encoding="utf-8") as fh:
-      fh.write(f'#!/usr/bin/env bash\nprintf "%s" "{stdout}"\nexit {exit_code}\n')
+      fh.write(
+          f'#!/usr/bin/env bash\nprintf "%s" "{stdout}"\nexit {exit_code}\n'
+      )
     os.chmod(path, 0o755)
 
   def verdict(self):
     out = subprocess.run(
         ["bash", self.script],
         env={"PATH": f"{self.bin_dir}:{os.environ['PATH']}"},
-        capture_output=True, text=True, timeout=60, check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
     ).stdout
-    stub = next((l[5:] for l in out.splitlines() if l.startswith("STUB:")), None)
+    stub = next(
+        (l[5:] for l in out.splitlines() if l.startswith("STUB:")), None
+    )
     rc = next((l[3:] for l in out.splitlines() if l.startswith("rc=")), None)
     return stub, rc
 
@@ -1198,6 +1329,7 @@ class TestCheckPreemption(
     stub, rc = self.verdict()
     self.assertEqual(stub, "SSH Connection Failed")
     self.assertEqual(rc, "1")
+
 
 FLEET_SCRIPT = os.path.join(REPO_ROOT, "scripts", "spot_tpu_fleet.sh")
 SPOT_MANAGER = os.path.join(REPO_ROOT, "scripts", "spot_tpu_manager.sh")
@@ -1241,7 +1373,10 @@ exit 0
     return subprocess.run(
         ["bash", FLEET_SCRIPT, *args],
         env={"PATH": f"{self.bin_dir}:{os.environ['PATH']}", "HOME": self.root},
-        capture_output=True, text=True, timeout=120, check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
     )
 
   def gcloud_calls(self):
@@ -1294,12 +1429,20 @@ class TestFleetOrphanSweep(FleetTeardownTestCase):
 
 class TestFleetDeadline(FleetTeardownTestCase):
   """The deadline is the only thing standing between a killed orchestrator and
-  a fleet that bills until someone notices."""
+
+  a fleet that bills until someone notices.
+  """
 
   def test_the_deadline_tears_the_fleet_down_when_it_lands(self):
     self.fake_gcloud(["spot-tpu-v5e-333-3"])
     proc = self.run_fleet(
-        "deadline", "--pool", self.pool, "--zone", self.ZONE, "--deadline-minutes", "0"
+        "deadline",
+        "--pool",
+        self.pool,
+        "--zone",
+        self.ZONE,
+        "--deadline-minutes",
+        "0",
     )
     self.assertEqual(proc.returncode, 0, proc.stderr)
     self.assertEqual(len(self.delete_calls()), 1, self.gcloud_calls())
@@ -1325,7 +1468,9 @@ class TestFleetDeadline(FleetTeardownTestCase):
 
   def test_a_non_numeric_deadline_is_rejected(self):
     self.fake_gcloud([])
-    proc = self.run_fleet("down", "--pool", self.pool, "--deadline-minutes", "2h")
+    proc = self.run_fleet(
+        "down", "--pool", self.pool, "--deadline-minutes", "2h"
+    )
     self.assertNotEqual(proc.returncode, 0)
     self.assertIn("--deadline-minutes", proc.stderr)
 
@@ -1355,8 +1500,10 @@ class TestNoGuestSideShutdown(
           continue
         for banned in self.BANNED:
           self.assertNotIn(
-              banned, line,
-              f"{os.path.basename(script)}:{number} runs '{banned}': {line.strip()}",
+              banned,
+              line,
+              f"{os.path.basename(script)}:{number} runs '{banned}':"
+              f" {line.strip()}",
           )
 
 
@@ -1370,7 +1517,10 @@ class TestResolveOutcome(
   problem ends up looking like a broken test.
   """
 
-  PASSING_XML = '<?xml version="1.0"?><testsuites><testsuite name="t" tests="1" failures="0"><testcase name="c"/></testsuite></testsuites>'
+  PASSING_XML = (
+      '<?xml version="1.0"?><testsuites><testsuite name="t" tests="1"'
+      ' failures="0"><testcase name="c"/></testsuite></testsuites>'
+  )
 
   def setUp(self):
     self._tmp = tempfile.TemporaryDirectory()
@@ -1381,9 +1531,11 @@ class TestResolveOutcome(
     with open(RELAY_RUNNER, encoding="utf-8") as fh:
       lines = fh.read().splitlines()
     for name in ("write_stub_xml", "resolve_outcome"):
-      start = next(i for i, l in enumerate(lines) if l.startswith(f"{name}() {{"))
+      start = next(
+          i for i, l in enumerate(lines) if l.startswith(f"{name}() {{")
+      )
       end = next(i for i in range(start, len(lines)) if lines[i] == "}")
-      setattr(self, f"_{name}_src", "\n".join(lines[start:end + 1]))
+      setattr(self, f"_{name}_src", "\n".join(lines[start : end + 1]))
 
   def resolve(self, ssh_rc, meta_rc=0, remote_exitcode="0", remote_xml=""):
     script = os.path.join(self.root, "resolve.sh")
@@ -1391,18 +1543,24 @@ class TestResolveOutcome(
       fh.write(
           "#!/usr/bin/env bash\nset -uo pipefail\n"
           f'CLEAN_TARGET="tests_relay_smoke_test"\nTIMEOUT_SEC=900\nTPU_NAME="vm-under-test"\n'
-          f'ssh_rc={ssh_rc}\nmeta_rc={meta_rc}\n'
+          f"ssh_rc={ssh_rc}\nmeta_rc={meta_rc}\n"
           f'remote_exitcode="{remote_exitcode}"\nremote_xml={shlex.quote(remote_xml)}\n'
-          'check_preemption() { write_stub_xml "Spot TPU Preempted" "stub"; return 0; }\n'
+          'check_preemption() { write_stub_xml "Spot TPU Preempted" "stub";'
+          " return 0; }\n"
           f"{self._write_stub_xml_src}\n{self._resolve_outcome_src}\n"
           "resolve_outcome\nprintf 'rc=%s\\n' \"$?\"\n"
       )
     proc = subprocess.run(
         ["bash", script],
         env={"PATH": os.environ["PATH"], "XML_OUTPUT_FILE": self.xml_path},
-        capture_output=True, text=True, timeout=60, check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
     )
-    rc = next(int(l[3:]) for l in proc.stdout.splitlines() if l.startswith("rc="))
+    rc = next(
+        int(l[3:]) for l in proc.stdout.splitlines() if l.startswith("rc=")
+    )
     return rc, self.read_report()
 
   def read_report(self):
@@ -1493,9 +1651,17 @@ class TestDeadlineReaperOutlivesItsParent(
     survives to delete somebody else's fleet.
     """
     proc = subprocess.Popen(
-        ["bash", FLEET_SCRIPT, "deadline",
-         "--pool", self.pool, "--deadline-minutes", "9999"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [
+            "bash",
+            FLEET_SCRIPT,
+            "deadline",
+            "--pool",
+            self.pool,
+            "--deadline-minutes",
+            "9999",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     self.addCleanup(proc.wait)
     self.addCleanup(proc.kill)
@@ -1522,9 +1688,19 @@ class TestDeadlineReaperOutlivesItsParent(
       f.write("TPU_NAME=already-up\n")
 
     launcher = subprocess.Popen(
-        ["bash", FLEET_SCRIPT, "up", "--size", "1", "--pool", self.pool,
-         "--deadline-minutes", "9999"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [
+            "bash",
+            FLEET_SCRIPT,
+            "up",
+            "--size",
+            "1",
+            "--pool",
+            self.pool,
+            "--deadline-minutes",
+            "9999",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     self.assertEqual(launcher.wait(timeout=60), 0)
 
@@ -1569,18 +1745,36 @@ class TestDeadlineReaperOutlivesItsParent(
 
   def _spawn_deadline(self):
     proc = subprocess.Popen(
-        ["bash", FLEET_SCRIPT, "deadline",
-         "--pool", self.pool, "--deadline-minutes", "9999"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [
+            "bash",
+            FLEET_SCRIPT,
+            "deadline",
+            "--pool",
+            self.pool,
+            "--deadline-minutes",
+            "9999",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     self.addCleanup(self._kill, proc.pid)
     return proc
 
   def _arm_via_up(self):
     launcher = subprocess.Popen(
-        ["bash", FLEET_SCRIPT, "up", "--size", "1", "--pool", self.pool,
-         "--deadline-minutes", "9999"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [
+            "bash",
+            FLEET_SCRIPT,
+            "up",
+            "--size",
+            "1",
+            "--pool",
+            self.pool,
+            "--deadline-minutes",
+            "9999",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     self.assertEqual(launcher.wait(timeout=60), 0)
     pid = self._await_pid_file()
@@ -1631,8 +1825,11 @@ class TestSandboxDeleteDoesNotHoldTheLease(
   def test_the_fetch_renames_the_sandbox_and_detaches_the_delete(self):
     with open(RELAY_RUNNER, "r", encoding="utf-8") as f:
       body = f.read()
-    fetch = next(line for line in body.splitlines()
-                 if "test.exitcode" in line and "remote_meta" in line)
+    fetch = next(
+        line
+        for line in body.splitlines()
+        if "test.exitcode" in line and "remote_meta" in line
+    )
     self.assertIn(".trash", fetch)
     self.assertIn("setsid rm -rf", fetch)
     self.assertNotRegex(fetch, r"rm -rf '\$\{REMOTE_SANDBOX\}'")
@@ -1646,9 +1843,14 @@ class TestSandboxDeleteDoesNotHoldTheLease(
       f.write("x" * 1024)
 
     subprocess.run(
-        ["bash", "-c",
-         f"mv '{sandbox}' '{sandbox}.trash' 2>/dev/null && "
-         f"{{ setsid rm -rf '{sandbox}.trash' </dev/null >/dev/null 2>&1 & }}"],
+        [
+            "bash",
+            "-c",
+            (
+                f"mv '{sandbox}' '{sandbox}.trash' 2>/dev/null && {{ setsid rm"
+                f" -rf '{sandbox}.trash' </dev/null >/dev/null 2>&1 & }}"
+            ),
+        ],
         check=True,
     )
     self.assertFalse(os.path.exists(sandbox), "rename did not happen")
@@ -1674,7 +1876,8 @@ class TestPhaseTimingIsOptIn(
       body = f.read()
     forwards = re.findall(r"--test_env=TORCH_TPU_RELAY_TIMING=1", body)
     self.assertEqual(
-        len(forwards), 2,
+        len(forwards),
+        2,
         "both the single-VM and the pool branch rebuild relay_env from scratch",
     )
 
@@ -1692,6 +1895,6 @@ class TestPhaseTimingIsOptIn(
         with open(script, "r", encoding="utf-8") as f:
           body = f.read()
         start = body.index(f"{marker}() {{")
-        fn = body[start:body.index("\n}\n", start)]
+        fn = body[start : body.index("\n}\n", start)]
         self.assertIn("TORCH_TPU_RELAY_TIMING", fn)
         self.assertIn(label, fn)

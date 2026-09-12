@@ -101,6 +101,9 @@ jobs:
             suite: "cpu_only"
             extra_flags: ""
           - name: "TPU v5e Tests (Full RBE)"
+            # `runs-on` is ubuntu-latest because Bazel ships the test actions
+            # out to RBE, so state the hardware the tests land on explicitly.
+            machine_type: "TPU v5e (RBE)"
             config: "ci_tpu_v5_full_rbe"
             suite: "tpu_v5e_only"
             extra_flags: "--test_tag_filters=presubmit-v5,-fails-on-tpu-v5,-nopresubmit,-notest,-nobuild"

@@ -145,19 +145,51 @@ Check what is running with `scripts/spot_tpu_fleet.sh status --pool /tmp/tpu_poo
 > when the experiment ends, and check for strays with
 > `scripts/spot_tpu_manager.sh reap --dry-run`.
 
-**2. A GitHub OIDC provider in `rbe-tpu-oss`.** Create a workload identity pool
-and a provider for `https://token.actions.githubusercontent.com`, restricted to
-the `google-pytorch/torch_tpu` repository. Put its resource name in
-`GCP_WIF_PROVIDER`.
+**2. A GitHub OIDC provider in `rbe-tpu-oss`.** The pool, the service account
+bindings and both repository variables are already in place. The provider itself
+is **blocked**: `constraints/iam.workloadIdentityPoolProviders` is `denyAll` at
+the google.com org root, so no google.com project may federate an external
+identity provider. Creating it fails with:
 
-**3. IAM on the service account the provider impersonates.** The relay job needs
-to list TPU VMs, read their addresses, and push its public key:
+```
+FAILED_PRECONDITION: Org Policy violated for value:
+  'https://token.actions.githubusercontent.com'
+```
+
+Clearing that needs an exemption through http://gustfront for project
+`rbe-tpu-oss`, naming the constraint and the GitHub issuer. See go/cute-3pid for
+the policy and what a request has to contain. Approved precedents for the same
+pattern: b/444962666, b/491798501, b/508563563.
+
+Once the exemption lands, one command finishes the job:
+
+```bash
+gcloud iam workload-identity-pools providers create-oidc torch-tpu \
+  --project=rbe-tpu-oss --location=global --workload-identity-pool=github \
+  --issuer-uri="https://token.actions.githubusercontent.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.ref=assertion.ref,attribute.event_name=assertion.event_name" \
+  --attribute-condition="assertion.repository in ['google-pytorch/torch_tpu','jonathan1920/torch_tpu']"
+```
+
+The attribute condition is the security boundary. Without it, any GitHub
+repository could mint credentials into the project.
+
+**3. IAM on the service account the provider impersonates.**
+`torch-tpu-ci-sa@rbe-tpu-oss.iam.gserviceaccount.com`, already configured:
 
 | Role | Why |
 | :--- | :--- |
-| `roles/tpu.viewer` | `attach` lists READY VMs and reads their external IPs |
-| `roles/tpu.admin` | `gcloud compute tpus tpu-vm ssh` uploads the run's public key |
-| `roles/remotebuildexecution.actionCacheWriter` | the build phase writes to the RBE cache |
+| `projects/rbe-tpu-oss/roles/torchTpuCiRelay` | Custom. `tpu.nodes.get/list/update` plus the location and operation readers. `attach` lists READY VMs, reads their addresses, and pushes the run's public key |
+| `roles/remotebuildexecution.actionCacheWriter` | The build phase writes to the RBE cache |
+
+`gcloud compute tpus tpu-vm ssh` writes the public key into the **TPU node's own
+metadata**, not project metadata, which is why `tpu.nodes.update` is enough. The
+custom role leaves out `tpu.nodes.create` and `tpu.nodes.delete` on purpose, so
+"CI borrows, never owns" holds in IAM and not just by convention.
+
+`roles/iam.workloadIdentityUser` is granted **on the service account**, once per
+repository via `principalSet://.../attribute.repository/<repo>`. Never grant it
+across the whole pool, and never at project level.
 
 **4. Network path.** The runner SSHes to the VMs' external IPs on port 22. The
 default network's `default-allow-ssh` rule already permits this. If that rule is

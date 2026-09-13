@@ -122,8 +122,8 @@ def test_ci_tools(session: nox.Session) -> None:
       "python",
       "-m",
       "unittest",
-      "ci/tools/test_resolve_base_sha.py",
-      "ci/tools/test_check_directory_layout.py",
+      "ci/tools/resolve_base_sha_test.py",
+      "ci/tools/check_directory_layout_test.py",
       "ci/tools/list_ci_tests_test.py",
   )
 

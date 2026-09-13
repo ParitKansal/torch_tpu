@@ -46,6 +46,7 @@ torch_tpu_py_test(
 
 torch_tpu_py_test(
     name = "llama3_2_1b_hf_pipe_example",
+    timeout = "long",
     srcs = ["llama3_2_1b_hf_pipe_example.py"],
     nonightly_oss = "Disabled during switch from opt-in to opt-out",
     nopresubmit = "slow example",

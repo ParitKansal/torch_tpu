@@ -12483,6 +12483,147 @@ class MaskedSoftmaxErrorTest(et.ErrorTestBase):
     ):
       torch.pow(base, exp)
 
+  def test_sparse_dense_matmul_activation_unstack_meta_invalid_dim(self):
+    stacked_1d = torch.empty(64, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected stacked_activations to be a 2D tensor, got a 1D tensor of shape [64]""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_activation_unstack(
+          stacked_1d, [32, 32], [16, 32]
+      )
+
+  def test_sparse_dense_matmul_activation_unstack_meta_invalid_dtype(self):
+    stacked_int = torch.empty(64, 32, device="meta", dtype=torch.int32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected stacked_activations to have float32 dtype, got int32""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_activation_unstack(
+          stacked_int, [32, 32], [16, 32]
+      )
+
+  def test_sparse_dense_matmul_activation_unstack_meta_empty_features(self):
+    stacked_2d = torch.empty(64, 32, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected at least one feature, but per_feature_batch_sizes is empty""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_activation_unstack(stacked_2d, [], [])
+
+  def test_sparse_dense_matmul_activation_unstack_meta_mismatched_feature_dims_size(
+      self,
+  ):
+    stacked_2d = torch.empty(64, 32, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected per_feature_batch_sizes and per_feature_dims to have the same size, got 1 and 2""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_activation_unstack(
+          stacked_2d, [32], [16, 32]
+      )
+
+  def test_sparse_dense_matmul_activation_unstack_meta_nonpositive_batch_size(
+      self,
+  ):
+    stacked_2d = torch.empty(64, 32, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected per_feature_batch_sizes[1] to be positive, got 0""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_activation_unstack(
+          stacked_2d, [64, 0], [16, 32]
+      )
+
+  def test_sparse_dense_matmul_activation_unstack_meta_nonpositive_dim(self):
+    stacked_2d = torch.empty(64, 32, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected per_feature_dims[0] to be positive, got 0""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_activation_unstack(
+          stacked_2d, [32, 32], [0, 32]
+      )
+
+  def test_sparse_dense_matmul_activation_unstack_meta_batch_size_mismatch(
+      self,
+  ):
+    stacked_2d = torch.empty(64, 32, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected stacked_activations dim 0 (64) to match total stacked batch size (48)""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_activation_unstack(
+          stacked_2d, [32, 16], [16, 32]
+      )
+
+  def test_sparse_dense_matmul_activation_unstack_meta_feature_dim_mismatch(
+      self,
+  ):
+    stacked_2d = torch.empty(64, 32, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected stacked_activations dim 1 (32) to match maximum feature dimension (48)""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_activation_unstack(
+          stacked_2d, [32, 32], [16, 48]
+      )
+
+  def test_sparse_dense_matmul_gradient_stack_meta_invalid_dim(self):
+    g_1d = torch.empty(32, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected unstacked_gradients[0] to be a 2D tensor, got a 1D tensor of shape [32]""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_gradient_stack([g_1d], 32, 32)
+
+  def test_sparse_dense_matmul_gradient_stack_meta_invalid_dtype(self):
+    g1 = torch.empty(32, 16, device="meta", dtype=torch.float32)
+    g2_int = torch.empty(32, 32, device="meta", dtype=torch.int32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected unstacked_gradients[1] to have float32 dtype, got int32""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_gradient_stack([g1, g2_int], 64, 32)
+
+  def test_sparse_dense_matmul_gradient_stack_meta_nonpositive_batch_size(self):
+    g1 = torch.empty(32, 16, device="meta", dtype=torch.float32)
+    g2 = torch.empty(32, 32, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected stacked_batch_size to be positive, got 0""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_gradient_stack([g1, g2], 0, 32)
+
+  def test_sparse_dense_matmul_gradient_stack_meta_nonpositive_feature_dim(
+      self,
+  ):
+    g1 = torch.empty(32, 16, device="meta", dtype=torch.float32)
+    g2 = torch.empty(32, 32, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected stacked_feature_dim to be positive, got 0""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_gradient_stack([g1, g2], 64, 0)
+
+  def test_sparse_dense_matmul_gradient_stack_meta_batch_size_mismatch(self):
+    g1 = torch.empty(32, 16, device="meta", dtype=torch.float32)
+    g2 = torch.empty(32, 32, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected sum of unstacked gradient batch sizes (64) to match stacked_batch_size (60)""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_gradient_stack([g1, g2], 60, 32)
+
+  def test_sparse_dense_matmul_gradient_stack_meta_feature_dim_mismatch(self):
+    g1 = torch.empty(32, 16, device="meta", dtype=torch.float32)
+    g2 = torch.empty(32, 32, device="meta", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""expected maximum unstacked gradient feature dimension (32) to match stacked_feature_dim (24)""",
+    ):
+      torch.ops.tpu.sparse_dense_matmul_gradient_stack([g1, g2], 64, 24)
+
 
 if __name__ == "__main__":
   multiprocessing.handle_test_main(absltest.main)

@@ -164,4 +164,62 @@ torch_tpu_cc_library(
     alwayslink = 1,
 )
 
+torch_tpu_cc_library(
+    name = "sparse_dense_matmul_activation_unstack",
+    srcs = ["sparse_dense_matmul_activation_unstack_aten_kernels.cc"],
+    hdrs = ["sparse_dense_matmul_activation_unstack_aten_kernels.h"],
+    deps = [
+        "//csrc/common:dimension_types",
+        "//csrc/common:dtype",
+        "//csrc/common:error_utils",
+        "//csrc/common:to_string",
+        "//csrc/eager:device_buffer",
+        "//csrc/eager:op_dispatcher",
+        "//csrc/eager:tensor_to_buffer",
+        "//csrc/ops:op_builder_utils",
+        "//csrc/ops:op_names",
+        "//csrc/ops/macros:kernel",
+        "//shims/torch:aten_headers",
+        "//shims/torch:torch_headers",
+        "//shims/torch/c10/core:base_headers",
+        "//shims/torch/torch/headeronly:torch_headeronly",
+        "@com_google_absl//absl/base:no_destructor",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@stablehlo//:attr_type_builder_util",
+        "@stablehlo//:mlir_builder",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+torch_tpu_cc_library(
+    name = "sparse_dense_matmul_gradient_stack",
+    srcs = ["sparse_dense_matmul_gradient_stack_aten_kernels.cc"],
+    hdrs = ["sparse_dense_matmul_gradient_stack_aten_kernels.h"],
+    deps = [
+        "//csrc/common:dimension_types",
+        "//csrc/common:dtype",
+        "//csrc/common:error_utils",
+        "//csrc/common:to_string",
+        "//csrc/eager:device_buffer",
+        "//csrc/eager:op_dispatcher",
+        "//csrc/eager:tensor_to_buffer",
+        "//csrc/ops:op_builder_utils",
+        "//csrc/ops:op_names",
+        "//csrc/ops/macros:kernel",
+        "//shims/torch:aten_headers",
+        "//shims/torch/c10/core:base_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
+        "@llvm-project//mlir:IR",
+        "@stablehlo//:attr_type_builder_util",
+        "@stablehlo//:mlir_builder",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
 torch_tpu_package_end()

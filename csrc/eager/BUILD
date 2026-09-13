@@ -735,6 +735,8 @@ torch_tpu_cc_library(
         "//csrc/ops/experimental/sparse_dense_matmul:sparse_dense_matmul_grad_with_adagrad",
         "//csrc/ops/experimental/sparse_dense_matmul:sparse_dense_matmul_grad_with_adam",
         "//csrc/ops/experimental/sparse_dense_matmul:sparse_dense_matmul_grad_with_sgd",
+        "//csrc/ops/experimental/sparse_dense_matmul:sparse_dense_matmul_activation_unstack",
+        "//csrc/ops/experimental/sparse_dense_matmul:sparse_dense_matmul_gradient_stack",
         "//csrc/ops/experimental/sparse_gather",
         "//csrc/ops/experimental/sparse_iota",
         "//csrc/ops/exponential:exponential_aten_kernels",

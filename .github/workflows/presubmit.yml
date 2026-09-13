@@ -114,7 +114,7 @@ jobs:
       ${{ needs.setup.outputs.tpu_v5_bypassed == 'true'
       && needs.setup.outputs.tpu_v5_replaced != 'true'
       && 'Presubmit on linux-x86-ct5lp-224-8tpu'
-      || 'TPU v5 Bypass Notice (inactive)' }}
+      || 'TPU v5 Bypass Notice' }}
     needs: setup
     if: needs.setup.outputs.tpu_v5_bypassed == 'true'
     runs-on: ubuntu-latest

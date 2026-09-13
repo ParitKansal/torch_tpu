@@ -42,7 +42,7 @@ hardware tests should take more than editing a PR description.
 - **What happens**:
   - `presubmit_job_matrix.sh` leaves `linux-x86-ct5lp-224-8tpu` out of the matrix.
   - `presubmit.yml`'s bypass notice job stands down. It publishes under
-    `TPU v5 Bypass Notice (inactive)` instead of claiming the ct5lp check name,
+    `TPU v5 Bypass Notice` instead of claiming the ct5lp check name,
     because an always-green check next to a real one hides a red relay run.
   - `relay_tpu_v5` claims `Presubmit on linux-x86-ct5lp-224-8tpu` and runs with
     `continue-on-error: false`, so a relay failure blocks the PR.

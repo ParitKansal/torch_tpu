@@ -53,6 +53,12 @@
 # --accelerator-type guards the widened search. The relay leases one chip per
 # test action, so attaching a v5p or a multi-chip host would burn a full timeout
 # per test and report as an ordinary failure. It defaults to v5litepod-1.
+#
+# `attach` claims each VM it takes by leaving a marker on it, and walks past VMs
+# somebody else is holding. Without that, two people attaching at the same time
+# both take the whole fleet and run two tests on every chip. `detach` drops the
+# marker; a claim nobody released ages out after --claim-ttl seconds (4h).
+# --force-claim takes a VM anyway, --no-claim turns the whole thing off.
 
 
 set -uo pipefail
@@ -93,6 +99,15 @@ ATTACH_NAME_PREFIX_SET=false
 # The relay hands one chip to one test action, so a multi-chip or non-v5e host
 # cannot pass. This is the guard that makes a widened --name-prefix safe.
 ATTACH_ACCELERATOR_TYPE="v5litepod-1"
+# Two people attaching at the same time would otherwise both take all 28 VMs
+# and run two tests on every chip. `attach` leaves a marker on each VM it takes
+# and walks past VMs somebody else is holding; `detach` removes it.
+ATTACH_CLAIM=true
+ATTACH_CLAIM_FORCE=false
+# A run is ten minutes. Four hours means a crashed run frees its VMs the same
+# day without ever cutting a live one loose.
+ATTACH_CLAIM_TTL=14400
+readonly REMOTE_CLAIM_PATH="${TORCH_TPU_REMOTE_CLAIM_PATH:-/tmp/torch_tpu_relay/claim}"
 
 
 die() {
@@ -146,8 +161,17 @@ parse_args() {
       --accelerator-type|--accelerator-type=*)
         [[ "$1" == *=* ]] && ATTACH_ACCELERATOR_TYPE="${1#*=}" || { ATTACH_ACCELERATOR_TYPE="${2:-}"; shift; }
         shift ;;
+      --no-claim)
+        ATTACH_CLAIM=false
+        shift ;;
+      --force-claim)
+        ATTACH_CLAIM_FORCE=true
+        shift ;;
+      --claim-ttl|--claim-ttl=*)
+        [[ "$1" == *=* ]] && ATTACH_CLAIM_TTL="${1#*=}" || { ATTACH_CLAIM_TTL="${2:-}"; shift; }
+        shift ;;
       -h|--help)
-        sed -n '16,55p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+        sed -n '16,61p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
         exit 0 ;;
       *)
         die "Unknown option '$1'." ;;
@@ -316,6 +340,43 @@ cmd_down() {
   log "Fleet torn down. Verify with: $0 status"
 }
 
+# Who this pool is, as seen from a VM. Two pools belonging to the same person
+# are two different runs and must not share chips, so the pool name is part of
+# the identity and the login name alone is not.
+claim_owner() {
+  printf '%s:%s' "${USER:-$(whoami)}" "$(basename "$POOL_DIR")"
+}
+
+# What attach runs on each VM. Takes the claim and prints the login name, or
+# prints CLAIMED_BY:<owner> and leaves the VM alone. mkdir is the lock: it
+# either creates the directory or it does not, with nothing in between.
+claim_script() {
+  if [[ "$ATTACH_CLAIM" != "true" ]]; then
+    printf 'whoami\n'
+    return 0
+  fi
+  cat <<EOF
+c="${REMOTE_CLAIM_PATH}"
+mkdir -p "\$(dirname "\$c")"
+now=\$(date +%s)
+if [ -d "\$c" ]; then
+  owner=\$(cat "\$c/owner" 2>/dev/null || echo unknown)
+  since=\$(cat "\$c/at" 2>/dev/null || echo 0)
+  if [ "\$owner" != "$(claim_owner)" ] \
+     && [ \$(( now - since )) -lt ${ATTACH_CLAIM_TTL} ] \
+     && [ "${ATTACH_CLAIM_FORCE}" != "true" ]; then
+    echo "CLAIMED_BY:\$owner"
+    exit 0
+  fi
+  rm -rf "\$c"
+fi
+mkdir "\$c" 2>/dev/null || { echo "CLAIMED_BY:someone who got there first"; exit 0; }
+echo "$(claim_owner)" > "\$c/owner"
+echo "\$now" > "\$c/at"
+whoami
+EOF
+}
+
 # Writes one session file for a VM that already exists. Returns non-zero and
 # writes nothing if the VM has no reachable address, so a half-provisioned node
 # cannot end up in the pool looking healthy.
@@ -338,14 +399,24 @@ attach_one() {
   # `gcloud ... ssh` uploads the caller's public key as a side effect, which is
   # the whole reason to call it: the identity attaching is not the identity that
   # created the VM, so nothing has authorised it yet. Its stdout also names the
-  # account the VM actually logs us in as, which OS Login can rewrite.
+  # account the VM actually logs us in as, which OS Login can rewrite, and
+  # carries the verdict on the claim.
   local ssh_user="$ATTACH_SSH_USER"
-  if [[ "$ATTACH_PUSH_KEY" == "true" ]]; then
-    local detected
-    detected=$(gcloud compute tpus tpu-vm ssh "$name" \
+  if [[ "$ATTACH_PUSH_KEY" == "true" || "$ATTACH_CLAIM" == "true" ]]; then
+    local remote_out holder
+    remote_out=$(gcloud compute tpus tpu-vm ssh "$name" \
       --zone="$zone" --project="$ALLOWED_PROJECT" \
-      --command="whoami" 2>>"$log_file" | tr -d '\r\n')
-    [[ -z "$detected" ]] || ssh_user="$detected"
+      --command="$(claim_script)" 2>>"$log_file" | tr -d '\r')
+    holder=$(printf '%s\n' "$remote_out" | sed -n 's/^CLAIMED_BY://p' | head -n 1)
+    if [[ -n "$holder" ]]; then
+      log "${name} is held by ${holder}, skipping"
+      return 1
+    fi
+    if [[ "$ATTACH_PUSH_KEY" == "true" ]]; then
+      local detected
+      detected=$(printf '%s\n' "$remote_out" | tail -n 1)
+      [[ -z "$detected" ]] || ssh_user="$detected"
+    fi
   fi
   [[ -n "$ssh_user" ]] || ssh_user="${USER:-$(whoami)}"
 
@@ -439,11 +510,42 @@ cmd_attach() {
   return 0
 }
 
+# Drops this pool's claim on one VM. Best effort: a VM that has already gone
+# away, or that never let us in, must not stop the rest of the pool from being
+# handed back. The claim ages out on its own anyway.
+release_one() {
+  local session="$1"
+  local TPU_IP="" SSH_USER="" SSH_CONTROL_PATH=""
+  # shellcheck disable=SC1090
+  source "$session"
+  [[ -n "$TPU_IP" && -n "$SSH_USER" ]] || return 0
+  ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 \
+    ${SSH_CONTROL_PATH:+-o "ControlPath=${SSH_CONTROL_PATH}"} \
+    "${SSH_USER}@${TPU_IP}" \
+    "[ \"\$(cat ${REMOTE_CLAIM_PATH}/owner 2>/dev/null)\" = \"$(claim_owner)\" ] \
+       && rm -rf ${REMOTE_CLAIM_PATH}" >/dev/null 2>&1 || true
+}
+
+release_claims() {
+  [[ "$ATTACH_CLAIM" == "true" ]] || return 0
+  local session pids=()
+  for session in "$POOL_DIR"/*.env; do
+    [[ -s "$session" ]] || continue
+    release_one "$session" &
+    pids+=("$!")
+  done
+  local pid
+  for pid in ${pids[@]+"${pids[@]}"}; do
+    wait "$pid" || true
+  done
+}
+
 # The counterpart to `attach`. Forgets the pool without touching the hardware,
 # which is what a CI job has to do at the end of a run: `down` would delete VMs
 # that belong to whoever brought the fleet up.
 cmd_detach() {
   [[ -d "$POOL_DIR" ]] || return 0
+  release_claims
   rm -f "$POOL_DIR"/*.env "$POOL_DIR"/*.env.lock "$POOL_DIR"/*.quarantine
   log "Detached from the fleet. The VMs are still running."
 }

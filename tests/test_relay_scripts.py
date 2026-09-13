@@ -2231,7 +2231,31 @@ class TestFleetAttach(FleetAttachTestCase):
     )
     self.assertEqual(self.read_session("vm_0.env")["SSH_IDENTITY"], key)
 
-  def test_no_key_push_skips_the_ssh_hop_and_takes_the_given_user(self):
+  def test_no_key_push_and_no_claim_skip_the_ssh_hop_entirely(self):
+    self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"], whoami="somebody")
+    self.run_fleet(
+        "attach",
+        "--pool",
+        self.pool,
+        "--zone",
+        self.ZONE,
+        "--ssh-user",
+        "runner",
+        "--no-key-push",
+        "--no-claim",
+    )
+    self.assertEqual(self.read_session("vm_0.env")["SSH_USER"], "runner")
+    self.assertEqual(
+        [c for c in self.gcloud_calls() if " ssh " in f" {c} "], []
+    )
+
+  def test_no_key_push_still_claims_but_keeps_the_given_user(self):
+    """Claiming needs a hop even when the key does not.
+
+    The hop is still worth making: without the claim two people attaching at
+    once both take every VM. What --no-key-push turns off is trusting the
+    remote's answer about who we log in as.
+    """
     self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"], whoami="somebody")
     self.run_fleet(
         "attach",
@@ -2244,9 +2268,7 @@ class TestFleetAttach(FleetAttachTestCase):
         "--no-key-push",
     )
     self.assertEqual(self.read_session("vm_0.env")["SSH_USER"], "runner")
-    self.assertEqual(
-        [c for c in self.gcloud_calls() if " ssh " in f" {c} "], []
-    )
+    self.assertTrue([c for c in self.gcloud_calls() if " ssh " in f" {c} "])
 
   def test_a_vm_with_no_address_never_enters_the_pool(self):
     """A half-provisioned node in the pool loses every test that leases it."""
@@ -3064,3 +3086,235 @@ exit 0
   def test_it_says_which_test_will_suffer(self):
     proc = self.run_staged()
     self.assertIn("tpu_errors_test", proc.stderr)
+
+
+class FleetClaimTestCase(FleetAttachTestCase):
+  """Runs the real claim script against a fake per-VM filesystem.
+
+  The fake gcloud executes whatever `--command=` it is handed, so these
+  exercise the script attach actually sends rather than a paraphrase of it.
+  TORCH_TPU_REMOTE_CLAIM_PATH aims the claim at scratch space, and the stub
+  suffixes it with the VM name so two VMs do not share one claim the way they
+  would if they really shared a disk.
+  """
+
+  VM = "spot-tpu-v5e-111-1"
+
+  def setUp(self):
+    super().setUp()
+    self.claim_root = os.path.join(self.root, "vms", "claim")
+    self.user = "tester"
+
+  def claim_path(self, name=None):
+    return f"{self.claim_root}-{name or self.VM}"
+
+  def fake_gcloud_running_commands(self, listed_names, ip="10.0.0.5"):
+    listing_file = os.path.join(self.root, "listing.txt")
+    with open(listing_file, "w", encoding="utf-8") as fh:
+      fh.write("".join(f"{name}\n" for name in listed_names))
+
+    path = os.path.join(self.bin_dir, "gcloud")
+    with open(path, "w", encoding="utf-8") as fh:
+      fh.write(f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "{self.gcloud_log}"
+case "$4" in
+  list) cat "{listing_file}" ;;
+  describe)
+    [[ "$*" == *"externalIp"* ]] && printf '%s\\n' "{ip}"
+    ;;
+  ssh)
+    vm="$5"
+    for arg in "$@"; do
+      if [[ "$arg" == --command=* ]]; then
+        cmd="${{arg#--command=}}"
+        printf '%s' "$cmd" | sed "s|{self.claim_root}|{self.claim_root}-$vm|g" | bash
+      fi
+    done
+    ;;
+esac
+exit 0
+""")
+    os.chmod(path, 0o755)
+
+  def run_fleet(self, *args, user=None):
+    return subprocess.run(
+        ["bash", FLEET_SCRIPT, *args],
+        env={
+            "PATH": f"{self.bin_dir}:{os.environ['PATH']}",
+            "HOME": self.root,
+            "USER": user or self.user,
+            "TORCH_TPU_REMOTE_CLAIM_PATH": self.claim_root,
+        },
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+  def attach(self, *extra, pool=None, user=None):
+    return self.run_fleet(
+        "attach",
+        "--pool",
+        pool or self.pool,
+        "--zone",
+        self.ZONE,
+        *extra,
+        user=user,
+    )
+
+  def owner_of(self, name=None):
+    with open(
+        os.path.join(self.claim_path(name), "owner"), encoding="utf-8"
+    ) as fh:
+      return fh.read().strip()
+
+  def mine(self):
+    return f"{self.user}:{os.path.basename(self.pool)}"
+
+  def write_claim(self, owner, name=None, age_seconds=0):
+    claim = self.claim_path(name)
+    os.makedirs(claim, exist_ok=True)
+    with open(os.path.join(claim, "owner"), "w") as fh:
+      fh.write(owner + "\n")
+    with open(os.path.join(claim, "at"), "w") as fh:
+      fh.write(str(int(time.time()) - age_seconds) + "\n")
+
+
+class TestFleetClaim(FleetClaimTestCase):
+  """Two people attaching at once must not land on the same chips.
+
+  `attach` takes every READY VM it can see. Without a claim, a second engineer
+  attaching while the first is mid-run gets the same 28 VMs, and every chip
+  then runs two tests that fight over it.
+  """
+
+  def test_attaching_leaves_a_claim_naming_the_pool(self):
+    self.fake_gcloud_running_commands([self.VM])
+    proc = self.attach()
+    self.assertEqual(proc.returncode, 0, proc.stderr)
+    self.assertEqual(self.owner_of(), self.mine())
+
+  def test_a_vm_somebody_else_holds_is_skipped(self):
+    self.fake_gcloud_running_commands([self.VM])
+    self.write_claim("someone-else:their-pool")
+    proc = self.attach()
+    self.assertNotEqual(proc.returncode, 0)
+    self.assertIn("held by someone-else:their-pool", proc.stdout)
+    self.assertEqual(self.sessions(), [])
+
+  def test_the_holder_keeps_the_claim_it_had(self):
+    self.fake_gcloud_running_commands([self.VM])
+    self.write_claim("someone-else:their-pool")
+    self.attach()
+    self.assertEqual(self.owner_of(), "someone-else:their-pool")
+
+  def test_a_held_vm_does_not_stop_the_rest_of_the_fleet(self):
+    """One busy VM is a smaller fleet, not a failed attach."""
+    second = "spot-tpu-v5e-111-2"
+    self.fake_gcloud_running_commands([self.VM, second])
+    self.write_claim("someone-else:their-pool")
+    proc = self.attach()
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    self.assertEqual(len(self.sessions()), 1)
+    self.assertEqual(self.owner_of(second), self.mine())
+
+  def test_re_attaching_the_same_pool_is_allowed(self):
+    """Attach is meant to be safe to repeat; its own claim is not a conflict."""
+    self.fake_gcloud_running_commands([self.VM])
+    self.assertEqual(self.attach().returncode, 0)
+    os.remove(os.path.join(self.pool, "vm_0.env"))
+    proc = self.attach()
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    self.assertEqual(self.sessions(), ["vm_0.env"])
+
+  def test_another_pool_of_the_same_user_is_still_a_conflict(self):
+    """Two runs by one person are two runs. The chips cannot be shared."""
+    self.fake_gcloud_running_commands([self.VM])
+    self.write_claim(f"{self.user}:some-other-pool")
+    self.assertNotEqual(self.attach().returncode, 0)
+
+  def test_a_claim_older_than_the_ttl_is_taken_over(self):
+    """A run that died still holds its claim. Nothing else will ever free it."""
+    self.fake_gcloud_running_commands([self.VM])
+    self.write_claim("ghost:dead-pool", age_seconds=14401)
+    proc = self.attach()
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    self.assertEqual(self.owner_of(), self.mine())
+
+  def test_a_claim_inside_the_ttl_is_left_alone(self):
+    self.fake_gcloud_running_commands([self.VM])
+    self.write_claim("busy:live-pool", age_seconds=14399)
+    self.assertNotEqual(self.attach().returncode, 0)
+
+  def test_the_ttl_is_configurable(self):
+    self.fake_gcloud_running_commands([self.VM])
+    self.write_claim("ghost:dead-pool", age_seconds=120)
+    proc = self.attach("--claim-ttl", "60")
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+  def test_force_claim_takes_a_live_claim(self):
+    self.fake_gcloud_running_commands([self.VM])
+    self.write_claim("busy:live-pool")
+    proc = self.attach("--force-claim")
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    self.assertEqual(self.owner_of(), self.mine())
+
+  def test_no_claim_leaves_no_marker(self):
+    self.fake_gcloud_running_commands([self.VM])
+    proc = self.attach("--no-claim")
+    self.assertEqual(proc.returncode, 0, proc.stderr)
+    self.assertFalse(os.path.exists(self.claim_path()))
+
+
+class TestFleetDetachReleasesTheClaim(FleetClaimTestCase):
+  """A claim nobody releases holds the VM until it ages out four hours later.
+
+  `detach` is the hand-back, so it is where the marker has to come off. It
+  only removes claims this pool owns: a crashed run's leftovers are somebody
+  else's business, and stealing them here would defeat the whole point.
+  """
+
+  def fake_ssh(self, vm=None):
+    """An ssh that runs the command against the fake VM's claim directory."""
+    path = os.path.join(self.bin_dir, "ssh")
+    with open(path, "w", encoding="utf-8") as fh:
+      fh.write(f"""#!/usr/bin/env bash
+cmd="${{@: -1}}"
+printf '%s' "$cmd" \\
+  | sed "s|{self.claim_root}|{self.claim_path(vm)}|g" \\
+  | bash
+""")
+    os.chmod(path, 0o755)
+
+  def test_detach_removes_a_claim_this_pool_owns(self):
+    self.fake_gcloud_running_commands([self.VM])
+    self.assertEqual(self.attach().returncode, 0)
+    self.assertTrue(os.path.exists(self.claim_path()))
+
+    self.fake_ssh()
+    proc = self.run_fleet("detach", "--pool", self.pool)
+    self.assertEqual(proc.returncode, 0, proc.stderr)
+    self.assertFalse(os.path.exists(self.claim_path()))
+
+  def test_detach_leaves_somebody_elses_claim_alone(self):
+    self.fake_gcloud_running_commands([self.VM])
+    self.attach()
+    self.write_claim("someone-else:their-pool")
+
+    self.fake_ssh()
+    self.run_fleet("detach", "--pool", self.pool)
+    self.assertEqual(self.owner_of(), "someone-else:their-pool")
+
+  def test_detach_still_clears_the_pool_when_the_vm_is_unreachable(self):
+    """The VM may be gone. The session files must go regardless."""
+    self.fake_gcloud_running_commands([self.VM])
+    self.attach()
+
+    path = os.path.join(self.bin_dir, "ssh")
+    with open(path, "w", encoding="utf-8") as fh:
+      fh.write("#!/usr/bin/env bash\nexit 255\n")
+    os.chmod(path, 0o755)
+
+    proc = self.run_fleet("detach", "--pool", self.pool)
+    self.assertEqual(proc.returncode, 0, proc.stderr)
+    self.assertEqual(self.sessions(), [])

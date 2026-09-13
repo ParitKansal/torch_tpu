@@ -88,10 +88,12 @@ hardware tests should take more than editing a PR description.
 ```bash
 # Relay, advisory. Check out the PR head first.
 git fetch origin pull/<PR>/head && git checkout FETCH_HEAD
-scripts/relay_presubmit_pr.sh --pr <PR> --mode shadow
+scripts/relay_presubmit_pr.sh --pr <PR> --mode shadow \
+  --zone europe-west4-b --zone us-south1-a --zone us-west1-c --zone us-west4-a
 
 # Relay, gating. --add-label applies ci:replace-tpu-v5 for you.
-scripts/relay_presubmit_pr.sh --pr <PR> --mode replacement --add-label
+scripts/relay_presubmit_pr.sh --pr <PR> --mode replacement --add-label \
+  --zone europe-west4-b --zone us-south1-a --zone us-west1-c --zone us-west4-a
 
 # See the plan without touching hardware.
 scripts/relay_presubmit_pr.sh --pr <PR> --dry-run
@@ -103,6 +105,19 @@ gh workflow run presubmit.yml -f bypass-tpu-v5=true
 gh workflow run test_rbe_opt_in.yml -f hardware_path=full-rbe -f test_suite=tpu_v5e_only
 ```
 
+The fleet spans four zones and the driver only looks in `europe-west4-b` unless
+told otherwise. Naming all four is the difference between 8 VMs and 28, which
+is the difference between 20 minutes and 7.
+
+> [!IMPORTANT]
+> Until this lands on `main`, none of these scripts exist on your branch. Pull
+> them across without moving HEAD, so the verdict still belongs to your code:
+> ```bash
+> git fetch origin pull/<PR>/head && git checkout FETCH_HEAD
+> git fetch origin feat-rbe-presubmit-relay
+> git checkout FETCH_HEAD -- scripts/ ci/tools/ .bazelrc
+> ```
+
 Adding a label by hand, since `gh pr edit --add-label` does not work on this
 repo:
 
@@ -110,6 +125,20 @@ repo:
 gh api repos/google-pytorch/torch_tpu/issues/<PR>/labels \
   -f 'labels[]=ci:relay-tpu-v5'
 ```
+
+### One run at a time, per VM
+
+`attach` takes every READY v5e it can see, so two people starting a run at the
+same time would both take all 28 and put two tests on every chip. Each VM
+therefore carries a claim naming the pool that holds it. A second run walks
+past held VMs and uses what is left; `detach` hands them back.
+
+| Situation | What happens |
+| :--- | :--- |
+| Somebody else is mid-run | Your attach skips their VMs and reports `held by <owner>` |
+| Nothing is left to borrow | The driver stops rather than running on zero VMs |
+| A run crashed and left claims | They age out after 4 hours (`--claim-ttl`) |
+| You know the holder is gone | `--force-claim` takes them anyway |
 
 ---
 

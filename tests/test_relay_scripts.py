@@ -1989,7 +1989,7 @@ exit 0
     path = os.path.join(self.root, name)
     self._write(
         path,
-        f'export TPU_NAME="fake-vm"\nexport TPU_ZONE="europe-west4-b"\n'
+        'export TPU_NAME="fake-vm"\nexport TPU_ZONE="europe-west4-b"\n'
         f'export TPU_IP="{self.REMOTE_IP}"\nexport SSH_USER="ci"\n'
         f'export SSH_CONTROL_PATH="{self.control_path}"\n',
     )
@@ -2090,10 +2090,8 @@ class TestBaseDirectoryReachesTheRemoteExecutor(
   def test_the_relay_honours_the_staged_path(self):
     with open(RELAY_RUNNER, encoding="utf-8") as fh:
       body = fh.read()
-    self.assertRegex(
-        body, r'REMOTE_BASE_CACHE="\$\{TORCH_TPU_RELAY_BASE_DIR:-'
-    )
-    self.assertRegex(body, r'TORCH_TPU_BASE_CACHE=\$\{REMOTE_BASE_CACHE\}')
+    self.assertRegex(body, r'REMOTE_BASE_CACHE="\$\{TORCH_TPU_RELAY_BASE_DIR:-')
+    self.assertRegex(body, r"TORCH_TPU_BASE_CACHE=\$\{REMOTE_BASE_CACHE\}")
 
   def test_the_executor_reads_it_from_the_environment(self):
     with open(REMOTE_EXECUTOR, encoding="utf-8") as fh:
@@ -2104,7 +2102,9 @@ class TestBaseDirectoryReachesTheRemoteExecutor(
 class FleetAttachTestCase(FleetTeardownTestCase):
   """A fake gcloud that can also answer `describe` and `ssh`, which attach needs."""
 
-  def fake_gcloud_with_addresses(self, listed_names, ip="10.0.0.5", whoami="ci"):
+  def fake_gcloud_with_addresses(
+      self, listed_names, ip="10.0.0.5", whoami="ci"
+  ):
     listing_file = os.path.join(self.root, "listing.txt")
     with open(listing_file, "w", encoding="utf-8") as fh:
       fh.write("".join(f"{name}\n" for name in listed_names))
@@ -2147,7 +2147,9 @@ class TestFleetAttach(FleetAttachTestCase):
   """
 
   def test_it_writes_one_session_per_ready_vm(self):
-    self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1", "spot-tpu-v5e-111-2"])
+    self.fake_gcloud_with_addresses(
+        ["spot-tpu-v5e-111-1", "spot-tpu-v5e-111-2"]
+    )
     proc = self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
     self.assertEqual(proc.returncode, 0, proc.stderr)
     self.assertEqual(self.sessions(), ["vm_0.env", "vm_1.env"])
@@ -2157,15 +2159,20 @@ class TestFleetAttach(FleetAttachTestCase):
     self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
 
     session = self.read_session("vm_0.env")
-    for key in ("TPU_NAME", "TPU_ZONE", "TPU_PROJECT", "TPU_IP",
-                "SSH_CONTROL_PATH", "SSH_USER", "SSH_IDENTITY"):
+    for key in (
+        "TPU_NAME",
+        "TPU_ZONE",
+        "TPU_PROJECT",
+        "TPU_IP",
+        "SSH_CONTROL_PATH",
+        "SSH_USER",
+        "SSH_IDENTITY",
+    ):
       self.assertIn(key, session)
     self.assertEqual(session["TPU_IP"], "10.0.0.5")
     self.assertEqual(session["TPU_ZONE"], self.ZONE)
     self.assertEqual(session["TPU_PROJECT"], "rbe-tpu-oss")
-    self.assertEqual(
-        session["SSH_CONTROL_PATH"], "/tmp/tpu_cm_10.0.0.5_22_ci"
-    )
+    self.assertEqual(session["SSH_CONTROL_PATH"], "/tmp/tpu_cm_10.0.0.5_22_ci")
 
   def test_it_creates_and_deletes_nothing(self):
     self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"])
@@ -2208,16 +2215,27 @@ class TestFleetAttach(FleetAttachTestCase):
     self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"])
     key = os.path.join(self.root, "ephemeral_key")
     self.run_fleet(
-        "attach", "--pool", self.pool, "--zone", self.ZONE,
-        "--ssh-identity", key,
+        "attach",
+        "--pool",
+        self.pool,
+        "--zone",
+        self.ZONE,
+        "--ssh-identity",
+        key,
     )
     self.assertEqual(self.read_session("vm_0.env")["SSH_IDENTITY"], key)
 
   def test_no_key_push_skips_the_ssh_hop_and_takes_the_given_user(self):
     self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"], whoami="somebody")
     self.run_fleet(
-        "attach", "--pool", self.pool, "--zone", self.ZONE,
-        "--ssh-user", "runner", "--no-key-push",
+        "attach",
+        "--pool",
+        self.pool,
+        "--zone",
+        self.ZONE,
+        "--ssh-user",
+        "runner",
+        "--no-key-push",
     )
     self.assertEqual(self.read_session("vm_0.env")["SSH_USER"], "runner")
     self.assertEqual(
@@ -2239,8 +2257,9 @@ class TestFleetAttach(FleetAttachTestCase):
 
 
 class TestFleetDetach(FleetAttachTestCase):
-  """`detach` is what CI runs at the end. `down` there would delete somebody
-  else's VMs.
+  """`detach` is what CI runs at the end.
+
+  `down` there would delete somebody else's VMs.
   """
 
   def test_it_clears_the_pool_without_touching_the_hardware(self):
@@ -2329,8 +2348,12 @@ class TestTestRuleEnvReachesTheVm(
   def test_it_covers_every_env_key_the_test_build_files_set(self):
     """The allowlist goes stale the moment somebody adds a new prefix."""
     declared = set()
-    for build in ("tests/BUILD", "tests/pallas/BUILD", "tests/compile/BUILD",
-                  "tests/distributed/BUILD"):
+    for build in (
+        "tests/BUILD",
+        "tests/pallas/BUILD",
+        "tests/compile/BUILD",
+        "tests/distributed/BUILD",
+    ):
       path = os.path.join(REPO_ROOT, build)
       if not os.path.exists(path):
         continue

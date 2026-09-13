@@ -519,7 +519,6 @@ class TestOssShardCountsStaySized(
         )
 
 
-
 class TestRelayJob(
     unittest.TestCase  # UNITTEST_OK=No RNG; tests workflow config.
 ):
@@ -567,9 +566,7 @@ class TestRelayJob(
 
   def test_it_borrows_the_fleet_and_never_deletes_it(self):
     """`down` here would delete VMs belonging to whoever brought them up."""
-    body = " ".join(
-        step.get("run", "") for step in self.job["steps"]
-    )
+    body = " ".join(step.get("run", "") for step in self.job["steps"])
     self.assertIn("spot_tpu_fleet.sh attach", body)
     self.assertIn("spot_tpu_fleet.sh detach", body)
     self.assertNotIn("spot_tpu_fleet.sh down", body)
@@ -596,7 +593,9 @@ class TestRelayJob(
 
   def test_it_uses_a_key_minted_for_this_run(self):
     """A GitHub runner has no developer home directory to read a key from."""
-    self.assertIn("ssh-keygen", self.steps["Mint an SSH key for this run"]["run"])
+    self.assertIn(
+        "ssh-keygen", self.steps["Mint an SSH key for this run"]["run"]
+    )
     self.assertIn(
         "--ssh-identity", self.steps["Attach to the TPU v5e fleet"]["run"]
     )
@@ -624,7 +623,6 @@ class TestRelayJob(
     self.assertEqual(concurrency["group"], "relay-tpu-v5-fleet")
     # Cancelling would throw away the run that already holds the VMs.
     self.assertFalse(concurrency["cancel-in-progress"])
-
 
 
 class TestWorkflowContextScopes(

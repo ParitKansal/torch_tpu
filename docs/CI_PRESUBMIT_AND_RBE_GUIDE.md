@@ -6,92 +6,195 @@ This document explains how to control CI presubmit test executions in `torch_tpu
 
 ## 1. Quick Reference: Which Label Should I Use?
 
-There are two labels. Both require write access to the repo, which is the point:
-skipping hardware tests should take more than editing a PR description.
+Every label needs write access to the repo, which is the point: skipping
+hardware tests should take more than editing a PR description.
 
 | Goal | How to Trigger | What Happens |
 | :--- | :--- | :--- |
 | **Normal presubmits** | Default | Runs CPU, TPU v5 (`linux-x86-ct5lp-224-8tpu`), and TPU v7. |
-| **Shadow run** | Label `run-rbe` | Normal presubmits still run. The RBE suite runs alongside as advisory (`continue-on-error: true`) and never blocks the PR. |
-| **Replacement** | Label `ci:replace-tpu-v5` | Drops TPU v5 from the presubmit matrix and promotes RBE to a gating check (`continue-on-error: false`). CPU and TPU v7 still run. |
+| **Relay shadow run** | Label `ci:relay-tpu-v5` | Normal presubmits still run. The relay runs the same v5 targets on Cloud TPU v5e VMs as advisory (`continue-on-error: true`) and never blocks the PR. |
+| **Relay replacement** | Label `ci:replace-tpu-v5` | Drops TPU v5 from the presubmit matrix and gates the PR on the relay instead. The relay job publishes under the ct5lp check name, so branch protection sees its real verdict. CPU and TPU v7 still run. |
+| **Full-RBE shadow run** | Label `run-rbe` | Advisory run of the CPU and TPU v5e suites through RBE workers. Needs TPU worker pools that do not exist yet, so today this reports a credentials warning and skips. |
 | **Standalone bypass** | Label `ci:bypass-tpu-v5` | Drops TPU v5 and runs nothing in its place. For runner outages, or PRs that don't touch v5 code. |
-| **Manual dispatch** | Actions UI or `gh workflow run` | `bypass-tpu-v5: true` on `presubmit.yml`, or `mode: replacement` on `test_rbe_opt_in.yml`. |
+| **Manual dispatch** | Actions UI or `gh workflow run` | `bypass-tpu-v5: true` on `presubmit.yml`, or `hardware_path` + `mode` on `test_rbe_opt_in.yml`. |
 
 ---
 
 ## 2. Execution Modes Explained
 
-### Mode 1: Shadow run (`run-rbe`)
-- **Use case**: Try the RBE suite on your PR while the normal presubmits stay the
-  source of truth.
+### Mode 1: Relay shadow run (`ci:relay-tpu-v5`)
+- **Use case**: Try the relay on your PR while the ct5lp presubmit stays the
+  source of truth. This is the mode to start with.
 - **What happens**:
   - `presubmit.yml` runs CPU, TPU v5, and TPU v7 as usual.
-  - `test_rbe_opt_in.yml` runs the CPU and TPU v5e suites on RBE workers.
-  - RBE failures are advisory and don't block the merge.
+  - `test_rbe_opt_in.yml`'s `relay_tpu_v5` job attaches to the standing v5e
+    fleet in `rbe-tpu-oss`, runs the `presubmit-v5` single-chip targets, and
+    uploads a markdown report as a run artifact.
+  - Relay failures are advisory and don't block the merge.
+- **What it covers**: the same targets the ct5lp job runs, minus the ones tagged
+  `requires-tpu-v5lite:8`. The relay leases one v5litepod-1 VM per test action,
+  so a multi-chip test can never pass there. That is 57 of the 77
+  `presubmit-v5` targets.
 
-### Mode 2: Replacement (`ci:replace-tpu-v5`)
+### Mode 2: Relay replacement (`ci:replace-tpu-v5`)
 - **Use case**: The self-hosted TPU v5 runners are backed up, or you're
-  validating RBE as the gating path for v5.
+  validating the relay as the gating path for v5.
 - **What happens**:
   - `presubmit_job_matrix.sh` leaves `linux-x86-ct5lp-224-8tpu` out of the matrix.
-  - A stub job named `"Presubmit on linux-x86-ct5lp-224-8tpu"` reports the
-    required check immediately on `ubuntu-latest`, so branch protection stays
-    satisfied without burning runner hours.
-  - `test_rbe_opt_in.yml` runs with `continue-on-error: false`, so an RBE failure
-    blocks the PR.
+  - `presubmit.yml`'s bypass notice job stands down. It publishes under
+    `TPU v5 Bypass Notice (inactive)` instead of claiming the ct5lp check name,
+    because an always-green check next to a real one hides a red relay run.
+  - `relay_tpu_v5` claims `Presubmit on linux-x86-ct5lp-224-8tpu` and runs with
+    `continue-on-error: false`, so a relay failure blocks the PR.
 
 > [!WARNING]
-> If RBE credentials aren't configured, a run in this mode fails instead of
-> reporting green. A gating check that can't reach RBE has verified nothing.
+> If the relay can't reach `rbe-tpu-oss`, a run in this mode fails instead of
+> reporting green. A gating check that never touched hardware has verified
+> nothing.
 
-### Mode 3: Standalone bypass (`ci:bypass-tpu-v5`)
+> [!NOTE]
+> Multi-chip coverage does not move with the label. The 20 targets tagged
+> `requires-tpu-v5lite:8` run on neither path while `ci:replace-tpu-v5` is on.
+> Don't leave the label on a PR that touches collective ops.
+
+### Mode 3: Full-RBE shadow run (`run-rbe`)
+- **Use case**: Exercising the RBE path once TPU-attached worker pools exist.
+- **What happens**: `run_tests` builds and tests through RBE with
+  `--config=ci_tpu_v5_full_rbe`. Advisory only. This label deliberately cannot
+  gate a PR, because `//bazel/platforms:rbe_tpu_v5e` asks for a worker pool
+  nobody has provisioned.
+
+### Mode 4: Standalone bypass (`ci:bypass-tpu-v5`)
 - **Use case**: The PR only touches CPU, TPU v7, or docs, or the v5 runners are
   down.
-- **What happens**: TPU v5 is skipped, RBE is not invoked, CPU and TPU v7 run as
-  usual.
+- **What happens**: TPU v5 is skipped, nothing runs in its place, CPU and TPU v7
+  run as usual. The bypass notice job claims the ct5lp check name so branch
+  protection stays satisfied.
 
 ---
 
 ## 3. Manual Workflow Dispatch via GitHub CLI
 
-You can trigger these workflows from the command line:
-
 ```bash
 # Run presubmits with TPU v5 bypassed
 gh workflow run presubmit.yml -f bypass-tpu-v5=true
 
-# Run RBE suite in replacement mode (strict gating)
-gh workflow run test_rbe_opt_in.yml -f mode=replacement
+# Relay, advisory
+gh workflow run test_rbe_opt_in.yml -f hardware_path=relay -f mode=shadow
 
-# Run only the TPU v5e RBE test suite
-gh workflow run test_rbe_opt_in.yml -f mode=replacement -f test_suite=tpu_v5e_only
+# Relay, gating
+gh workflow run test_rbe_opt_in.yml -f hardware_path=relay -f mode=replacement
+
+# Full RBE instead of the relay
+gh workflow run test_rbe_opt_in.yml -f hardware_path=full-rbe -f test_suite=tpu_v5e_only
+```
+
+Adding a label from the command line, since `gh pr edit --add-label` does not
+work on this repo:
+
+```bash
+gh api repos/google-pytorch/torch_tpu/issues/<PR>/labels \
+  -f 'labels[]=ci:relay-tpu-v5'
 ```
 
 ---
 
 ## 4. RBE credentials (one-time repo setup)
 
-The RBE workflow authenticates with Workload Identity Federation. It does not
-use a service account key, and can't: `rbe-tpu-oss` carries
+Both paths authenticate with Workload Identity Federation. Neither uses a
+service account key, and neither can: `rbe-tpu-oss` carries
 `constraints/iam.disableServiceAccountKeyCreation`, so no exportable key exists
 to put in a secret.
 
-Set two **repository variables** (not secrets — neither value is sensitive):
+Set these **repository variables** (not secrets — none of the values are
+sensitive):
 
-| Variable | Value |
-| :--- | :--- |
-| `GCP_WIF_PROVIDER` | Full provider resource name, `projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>` |
-| `GCP_RBE_SERVICE_ACCOUNT` | Service account email the provider is allowed to impersonate |
+| Variable | Value | Needed by |
+| :--- | :--- | :--- |
+| `GCP_WIF_PROVIDER` | Full provider resource name, `projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>` | both paths |
+| `GCP_RBE_SERVICE_ACCOUNT` | Service account email the provider is allowed to impersonate | both paths |
+| `RELAY_TPU_ZONES` | Space-separated zones to look for fleet VMs in. Defaults to `europe-west4-b` | relay only |
 
 Until these are set:
 
 - **Shadow runs** log a warning and skip. They were never going to block anything.
-- **Replacement runs fail.** They gate the PR on RBE, so reporting green without
-  reaching RBE would be a lie.
+- **Replacement runs fail.** They gate the PR on hardware, so reporting green
+  without reaching it would be a lie.
 
 ---
 
-## 5. Running the suite on Spot TPUs locally
+## 5. Turning the relay on for the repo (one-time setup)
+
+Everything below is infrastructure work, done once. After that, contributors
+only need to add a label.
+
+**1. A standing v5e fleet.** The relay attaches to VMs that already exist; it
+never creates them. Bring the fleet up from a workstation or a long-lived job:
+
+```bash
+scripts/spot_tpu_fleet.sh up --size 8 --on-demand \
+  --zone europe-west4-b --pool /tmp/tpu_pool \
+  --deadline-minutes 0     # 0 disables the auto-teardown deadline
+```
+
+Check what is running with `scripts/spot_tpu_fleet.sh status --pool /tmp/tpu_pool`.
+
+> [!CAUTION]
+> These VMs bill until deleted. A standing fleet is a standing cost. Tear it
+> down with `scripts/spot_tpu_fleet.sh down --pool /tmp/tpu_pool --zone <zone>`
+> when the experiment ends, and check for strays with
+> `scripts/spot_tpu_manager.sh reap --dry-run`.
+
+**2. A GitHub OIDC provider in `rbe-tpu-oss`.** Create a workload identity pool
+and a provider for `https://token.actions.githubusercontent.com`, restricted to
+the `google-pytorch/torch_tpu` repository. Put its resource name in
+`GCP_WIF_PROVIDER`.
+
+**3. IAM on the service account the provider impersonates.** The relay job needs
+to list TPU VMs, read their addresses, and push its public key:
+
+| Role | Why |
+| :--- | :--- |
+| `roles/tpu.viewer` | `attach` lists READY VMs and reads their external IPs |
+| `roles/tpu.admin` | `gcloud compute tpus tpu-vm ssh` uploads the run's public key |
+| `roles/remotebuildexecution.actionCacheWriter` | the build phase writes to the RBE cache |
+
+**4. Network path.** The runner SSHes to the VMs' external IPs on port 22. The
+default network's `default-allow-ssh` rule already permits this. If that rule is
+tightened, the relay stops working from GitHub-hosted runners and needs a
+self-hosted runner inside the VPC instead.
+
+**5. Branch protection, only if you want replacement to gate.** Nothing to
+change: the relay job publishes under the existing
+`Presubmit on linux-x86-ct5lp-224-8tpu` check name when `ci:replace-tpu-v5` is
+on, so the required check you already have keeps working and now carries the
+relay's verdict.
+
+**6. The labels.** Create `ci:relay-tpu-v5` if it does not exist:
+
+```bash
+gh label create ci:relay-tpu-v5 --repo google-pytorch/torch_tpu \
+  --description "Run the TPU v5e SSH relay as an advisory shadow check"
+```
+
+### How the CI job borrows the fleet
+
+`relay_tpu_v5` mints an ed25519 key for the run, calls
+`spot_tpu_fleet.sh attach`, and always calls `detach` at the end.
+
+- `attach` lists `state:READY` VMs whose names start with `spot-tpu-v5e-`,
+  uploads the run's public key to each, and writes one session file per VM. It
+  issues no `create` and no `delete`.
+- `detach` deletes the session files and leaves the hardware alone. CI must
+  never call `down`: that would delete VMs belonging to whoever brought the
+  fleet up.
+
+A job-level concurrency group (`relay-tpu-v5-fleet`, `cancel-in-progress:
+false`) keeps two relay runs from each trying to lease the whole fleet.
+
+---
+
+## 6. Running the suite on Spot TPUs locally
 
 `presubmit.yml` and `test_rbe_opt_in.yml` are the CI paths. To run the same test
 targets against real Spot TPU v5e VMs from a workstation, use the relay:
@@ -104,14 +207,26 @@ scripts/run_presubmit_v5_relay.sh
 scripts/run_presubmit_v5_relay.sh --dry-run
 
 # Spread the suite over a fleet. Each test leases one VM for its lifetime.
-scripts/spot_tpu_fleet.sh up --size 8
-scripts/run_presubmit_v5_relay.sh --session-pool=/tmp/torch_tpu_relay/pool
-scripts/spot_tpu_fleet.sh down
+scripts/spot_tpu_fleet.sh up --size 8 --pool /tmp/tpu_pool
+scripts/run_presubmit_v5_relay.sh --session-pool=/tmp/tpu_pool --jobs 8
+scripts/spot_tpu_fleet.sh down --pool /tmp/tpu_pool --zone europe-west4-b
+
+# Borrow a fleet somebody else brought up, then hand it back.
+scripts/spot_tpu_fleet.sh attach --pool /tmp/my_pool --zone europe-west4-b
+scripts/run_presubmit_v5_relay.sh --session-pool=/tmp/my_pool --jobs 8
+scripts/spot_tpu_fleet.sh detach --pool /tmp/my_pool
 ```
 
+On a machine with a cold Bazel output base, add `--bazel-config ci_tpu_v5_relay`
+so the compile actions go out to RBE. Plain `--config=ci` will not do: it sets
+`--remote_download_minimal`, and `stage_relay_base.sh` builds the base cache by
+reading the runfiles trees off `bazel-bin`, which minimal downloads never
+materialise.
+
 > [!CAUTION]
-> `spot_tpu_fleet.sh down` is not optional. Spot VMs bill until deleted. Check
-> for strays with `scripts/spot_tpu_manager.sh reap --dry-run`.
+> `spot_tpu_fleet.sh down` is not optional if you brought the fleet up yourself.
+> Spot VMs bill until deleted. Check for strays with
+> `scripts/spot_tpu_manager.sh reap --dry-run`.
 
 > [!NOTE]
 > Spot capacity is the real limit, not quota. As of this writing only

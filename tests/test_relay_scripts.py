@@ -2265,3 +2265,111 @@ class TestFleetDetach(FleetAttachTestCase):
         "detach", "--pool", os.path.join(self.root, "never-existed")
     )
     self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+class TestTestRuleEnvReachesTheVm(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
+  """A test rule's `env = {...}` has to survive the SSH hop.
+
+  It did not, and three targets that are green on the upstream ct5lp runner
+  went red in the relay: errors_test_tpu stopped seeing
+  TORCH_TPU_INTERNAL_ENABLE_DEBUG_CHECKS=1 and its error cases stopped raising,
+  and pallas_test stopped seeing TPU_PREMAPPED_BUFFER_SIZE=0.
+  """
+
+  def setUp(self):
+    self._tmp = tempfile.TemporaryDirectory()
+    self.addCleanup(self._tmp.cleanup)
+    self.script = self._harness()
+
+  def _harness(self):
+    """Lifts the forwarding block out of the runner instead of copying it."""
+    with open(RELAY_RUNNER, encoding="utf-8") as fh:
+      lines = fh.read().splitlines()
+
+    start = next(
+        i
+        for i, l in enumerate(lines)
+        if l.startswith("readonly FORWARDED_ENV_PREFIXES=(")
+    )
+    end = next(
+        i for i in range(start, len(lines)) if lines[i] == "done < <(env -0)"
+    )
+
+    path = os.path.join(self._tmp.name, "harness.sh")
+    with open(path, "w", encoding="utf-8") as fh:
+      fh.write('#!/usr/bin/env bash\nset -uo pipefail\nremote_env=""\n')
+      fh.write("\n".join(lines[start : end + 1]))
+      fh.write('\nprintf "%s" "$remote_env"\n')
+    os.chmod(path, 0o755)
+    return path
+
+  def forwarded(self, **env):
+    out = subprocess.run(
+        ["bash", self.script],
+        env={"PATH": os.environ["PATH"], **env},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    ).stdout
+    return dict(pair.split("=", 1) for pair in shlex.split(out))
+
+  def test_it_forwards_the_variables_those_three_targets_need(self):
+    forwarded = self.forwarded(
+        TORCH_TPU_INTERNAL_ENABLE_DEBUG_CHECKS="1",
+        TPU_PREMAPPED_BUFFER_SIZE="0",
+        IS_OSS="1",
+    )
+    self.assertEqual(forwarded["TORCH_TPU_INTERNAL_ENABLE_DEBUG_CHECKS"], "1")
+    self.assertEqual(forwarded["TPU_PREMAPPED_BUFFER_SIZE"], "0")
+    self.assertEqual(forwarded["IS_OSS"], "1")
+
+  def test_it_covers_every_env_key_the_test_build_files_set(self):
+    """The allowlist goes stale the moment somebody adds a new prefix."""
+    declared = set()
+    for build in ("tests/BUILD", "tests/pallas/BUILD", "tests/compile/BUILD",
+                  "tests/distributed/BUILD"):
+      path = os.path.join(REPO_ROOT, build)
+      if not os.path.exists(path):
+        continue
+      with open(path, encoding="utf-8") as fh:
+        body = fh.read()
+      for block in re.findall(r"env\s*=\s*\{(.*?)\}", body, re.S):
+        declared.update(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:', block))
+    self.assertTrue(declared, "no env attributes found; the scrape is broken")
+
+    forwarded = self.forwarded(**{name: "probe" for name in sorted(declared)})
+    missing = sorted(declared - set(forwarded))
+    self.assertEqual(missing, [], f"these never reach the VM: {missing}")
+
+  def test_the_host_side_of_the_hop_stays_on_the_host(self):
+    """TPU_NAME means something to libtpu, and the session file's value is the
+
+    name of the VM as gcloud sees it, not anything the runtime should act on.
+    """
+    forwarded = self.forwarded(
+        TPU_NAME="spot-tpu-v5e-1",
+        TPU_ZONE="europe-west4-b",
+        TPU_IP="10.0.0.1",
+        TPU_PROJECT="rbe-tpu-oss",
+    )
+    self.assertEqual(forwarded, {})
+
+  def test_the_relay_does_not_forward_its_own_bookkeeping(self):
+    forwarded = self.forwarded(
+        TORCH_TPU_RELAY_RUN_ID="r1p2",
+        TORCH_TPU_RELAY_BASE_DIR="/tmp/torch_tpu_relay/base-deadbeef",
+        TORCH_TPU_BASE_CACHE="/tmp/torch_tpu_relay/base",
+        TORCH_TPU_PAYLOAD_KEY="r1p2_abc",
+    )
+    self.assertEqual(forwarded, {})
+
+  def test_unrelated_shell_variables_do_not_ride_along(self):
+    forwarded = self.forwarded(EDITOR="vim", GOPATH="/home/x/go")
+    self.assertEqual(forwarded, {})
+
+  def test_a_value_with_shell_metacharacters_survives_intact(self):
+    forwarded = self.forwarded(TORCH_LOGS_FORMAT="%(message)s; rm -rf /")
+    self.assertEqual(forwarded["TORCH_LOGS_FORMAT"], "%(message)s; rm -rf /")

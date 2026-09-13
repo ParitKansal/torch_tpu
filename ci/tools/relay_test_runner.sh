@@ -337,6 +337,48 @@ if [[ -n "${TEST_TOTAL_SHARDS:-}" ]]; then
   [[ -z "${TEST_SHARD_STATUS_FILE:-}" ]] || : > "$TEST_SHARD_STATUS_FILE"
 fi
 
+# A test rule's `env = {...}` attribute lands in the test action's environment,
+# which this wrapper inherits. The test itself runs on the VM, so whatever is
+# not forwarded here is simply absent there. That cost real coverage:
+# errors_test_tpu lost TORCH_TPU_INTERNAL_ENABLE_DEBUG_CHECKS=1, so XLA deferred
+# the errors the test asserts on and three cases stopped raising; pallas_test
+# lost TPU_PREMAPPED_BUFFER_SIZE=0 and stopped tracking buffer donation. All of
+# it passes on the upstream ct5lp runner, where the test and the environment
+# stay on one machine.
+#
+# Bazel does not say which variables came from the attribute, so forward by
+# prefix. These cover every `env` key under tests/**/BUILD.
+readonly FORWARDED_ENV_PREFIXES=(
+  TORCH_ TPU_ XLA_ JAX_ PJRT_ LIBTPU_ CUDA_ IS_OSS
+)
+
+# Names that describe the host side of the hop or belong to the relay itself.
+# TPU_NAME matters to libtpu on the VM and the session file's value is the wrong
+# thing to hand it; the rest are set explicitly below.
+relay_owns_var() {
+  case "$1" in
+    TPU_NAME|TPU_ZONE|TPU_IP|TPU_PROJECT) return 0 ;;
+    TORCH_TPU_RELAY_*|TORCH_TPU_BASE_CACHE|TORCH_TPU_PAYLOAD_KEY) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+while IFS='=' read -r -d '' _env_name _env_value; do
+  relay_owns_var "$_env_name" && continue
+  for _prefix in "${FORWARDED_ENV_PREFIXES[@]}"; do
+    if [[ "$_env_name" == "$_prefix"* ]]; then
+      remote_env+="${_env_name}=$(printf '%q' "$_env_value") "
+      break
+    fi
+  done
+done < <(env -0)
+unset _env_name _env_value _prefix
+
+# Set after the loop so the relay's own values win if a name collides.
+[[ -z "${TORCH_TPU_RELAY_TIMING:-}" ]] || remote_env+="TORCH_TPU_RELAY_TIMING=1 "
+
+remote_env+="TORCH_TPU_BASE_CACHE=${REMOTE_BASE_CACHE} "
+
 # Every shard of a target ships the same runfiles tree, and the big ops targets
 # have 30-50 shards each. Name the tree so the VM can keep a prepared copy and
 # hardlink it for the later shards instead of unpacking it again.
@@ -345,11 +387,6 @@ fi
 # before any test starts. Within one run a tree cannot change underneath us, and
 # a key from a previous run is never reused, so a stale tree cannot be served.
 # No run id means no caching, which is the safe default for a bare bazel run.
-# The VM half of the timing prints nothing unless it sees this too.
-[[ -z "${TORCH_TPU_RELAY_TIMING:-}" ]] || remote_env+="TORCH_TPU_RELAY_TIMING=1 "
-
-remote_env+="TORCH_TPU_BASE_CACHE=${REMOTE_BASE_CACHE} "
-
 payload_key=""
 if [[ -n "${TORCH_TPU_RELAY_RUN_ID:-}" ]]; then
   payload_key="${TORCH_TPU_RELAY_RUN_ID}_$(printf '%s' "$RUNFILES_ROOT" | sha256sum | cut -c1-16)"

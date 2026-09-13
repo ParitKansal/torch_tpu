@@ -75,15 +75,18 @@ jobs:
     outputs:
       job_matrix: ${{ steps.set-matrix.outputs.job_matrix }}
       tpu_v5_bypassed: ${{ steps.set-matrix.outputs.tpu_v5_bypassed }}
+      tpu_v5_replaced: ${{ steps.set-matrix.outputs.tpu_v5_replaced }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - id: set-matrix
         env:
           # Both labels take TPU v5 out of the matrix. `ci:replace-tpu-v5` also
-          # promotes the RBE run in test_rbe_opt_in.yml to a gating check, so
-          # the hardware still gets covered; `ci:bypass-tpu-v5` skips it
+          # promotes the SSH relay run in test_rbe_opt_in.yml to a gating check,
+          # so the hardware still gets covered; `ci:bypass-tpu-v5` skips it
           # outright and is meant for runner outages.
+          REPLACE_TPU_V5: >-
+            ${{ contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5') }}
           BYPASS_TPU_V5: >-
             ${{ inputs.bypass-tpu-v5
             || contains(github.event.pull_request.labels.*.name, 'ci:bypass-tpu-v5')
@@ -92,6 +95,7 @@ jobs:
           {
             echo "job_matrix=$(ci/tools/presubmit_job_matrix.sh)"
             echo "tpu_v5_bypassed=${BYPASS_TPU_V5}"
+            echo "tpu_v5_replaced=${REPLACE_TPU_V5}"
           } >> "$GITHUB_OUTPUT"
 
   tpu_v5_bypass_notice:
@@ -101,8 +105,14 @@ jobs:
     # would put two check runs named after the TPU v5 runner on every run that
     # is not bypassed. The skipped one reads as a failure to anything gating on
     # that check. Only claim the name when this job is standing in for it.
+    #
+    # `ci:replace-tpu-v5` is the one case where it must not: there the relay job
+    # in test_rbe_opt_in.yml publishes under that name and carries a real
+    # verdict. Claiming it here too would put an always-green check next to it
+    # and hide a red relay run.
     name: >-
       ${{ needs.setup.outputs.tpu_v5_bypassed == 'true'
+      && needs.setup.outputs.tpu_v5_replaced != 'true'
       && 'Presubmit on linux-x86-ct5lp-224-8tpu'
       || 'TPU v5 Bypass Notice (inactive)' }}
     needs: setup
@@ -119,8 +129,8 @@ jobs:
           of this run's job matrix.
 
           If the PR carries `ci:replace-tpu-v5`, TPU v5 coverage moved to the
-          'RBE Hardware TPU Tests' workflow, which gates this PR instead. Check
-          that workflow's result before merging.
+          'RBE Hardware TPU Tests' workflow, which publishes its result under
+          this runner's check name and gates this PR.
 
           See docs/CI_PRESUBMIT_AND_RBE_GUIDE.md.
           ========================================================================

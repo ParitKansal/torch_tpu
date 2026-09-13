@@ -51,6 +51,10 @@ CLI_KEEP_VM_ON_FAILURE=false
 CLI_SESSION_POOL=""
 CLI_JOBS=""
 CLI_PROJECT="$ALLOWED_PROJECT"
+# Empty means a plain local build, which is what a developer wants on a warm
+# output base. CI has a cold one and needs --bazel-config=ci_tpu_v5_relay to
+# send the compile actions to RBE.
+CLI_BAZEL_CONFIG=""
 
 # Process supervision state
 _BAZEL_PID=""
@@ -81,6 +85,10 @@ Options:
   --jobs=N                 Tests to run at once (default: 1, or the pool size with
                            --session-pool). Never set this above the number of VMs.
   --project=PROJECT        GCP project (strictly restricted to rbe-tpu-oss)
+  --bazel-config=NAME      Extra --config=NAME for the build and test invocations.
+                           Use ci_tpu_v5_relay on a cold machine: it sends the
+                           compile actions to RBE and still downloads the
+                           runfiles trees the base cache is built from.
   -h, --help               Show this help message and exit
 EOF
 }
@@ -151,6 +159,11 @@ parse_args() {
         CLI_PROJECT="$2"; shift 2 ;;
       --project=*)
         CLI_PROJECT="${1#*=}"; shift ;;
+      --bazel-config)
+        [[ $# -lt 2 ]] && { echo "ERROR [run_presubmit]: --bazel-config requires an argument." >&2; exit 1; }
+        CLI_BAZEL_CONFIG="$2"; shift 2 ;;
+      --bazel-config=*)
+        CLI_BAZEL_CONFIG="${1#*=}"; shift ;;
       -h|--help)
         show_help; exit 0 ;;
       *)
@@ -350,6 +363,9 @@ resolve_targets() {
 # drifted once.
 bazel_test_flags() {
   local jobs="$1"
+  # --config goes first: a flag repeated on the command line takes the last
+  # value, and everything below is what this script actually needs.
+  [[ -z "$CLI_BAZEL_CONFIG" ]] || printf '%s\n' "--config=${CLI_BAZEL_CONFIG}"
   printf '%s\n' \
     "--run_under=${RELAY_RUNNER}" \
     "--modify_execution_info=TestRunner=+no-remote-exec" \
@@ -486,7 +502,10 @@ main() {
   # the VMs. Build first, then stage, then test. Skipping this shows up as a
   # bare ModuleNotFoundError from a test that is otherwise fine.
   echo -e "\nBuilding test targets so the base cache can see every dependency..."
+  local build_flags=()
+  [[ -z "$CLI_BAZEL_CONFIG" ]] || build_flags+=("--config=${CLI_BAZEL_CONFIG}")
   if ! bazel build \
+    ${build_flags[@]+"${build_flags[@]}"} \
     --test_tag_filters="$CLI_FILTER" \
     "${target_list[@]}" > >(tee "${CLI_OUTPUT_DIR}/bazel_build.log") 2>&1; then
     echo "ERROR [run_presubmit]: build failed; see ${CLI_OUTPUT_DIR}/bazel_build.log" >&2

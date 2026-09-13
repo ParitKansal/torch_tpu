@@ -273,13 +273,19 @@ class TestRbeOptInWorkflow(
   def test_runs_only_when_opted_in(self):
     condition = self.job["if"]
     self.assertIn("'run-rbe'", condition)
-    self.assertIn("'ci:replace-tpu-v5'", condition)
     self.assertIn("github.event_name == 'workflow_dispatch'", condition)
 
-  def test_replacement_mode_gates_the_pr(self):
-    """continue-on-error must be false exactly when RBE stands in for TPU v5."""
+  def test_the_full_rbe_path_never_gates_a_pull_request(self):
+    """It needs TPU worker pools that do not exist, so a gating run on this
+
+    path would block every PR that asked for it. `ci:replace-tpu-v5` drives the
+    relay job instead.
+    """
+    self.assertNotIn("ci:replace-tpu-v5", self.job["if"])
+    self.assertNotIn("ci:replace-tpu-v5", self.job["continue-on-error"])
+
+  def test_a_dispatched_replacement_run_still_gates(self):
     expression = self.job["continue-on-error"]
-    self.assertIn("'ci:replace-tpu-v5'", expression)
     self.assertIn("inputs.mode == 'replacement'", expression)
     # The whole opt-in test is negated, so anything else stays advisory.
     self.assertTrue(expression.lstrip().startswith("${{ !("))
@@ -511,6 +517,113 @@ class TestOssShardCountsStaySized(
             ceiling,
             f"each extra {target} shard repeats its startup cost",
         )
+
+
+
+class TestRelayJob(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests workflow config.
+):
+  """The relay job is what ci:replace-tpu-v5 actually gates on."""
+
+  @classmethod
+  def setUpClass(cls):
+    cls.workflow = load_workflow(TEST_RBE_YML)
+    cls.job = cls.workflow["jobs"]["relay_tpu_v5"]
+    cls.steps = {step["name"]: step for step in cls.job["steps"]}
+    cls.presubmit = load_workflow(PRESUBMIT_YML)
+
+  def test_both_the_shadow_and_the_replacement_label_start_it(self):
+    condition = self.job["if"]
+    self.assertIn("'ci:relay-tpu-v5'", condition)
+    self.assertIn("'ci:replace-tpu-v5'", condition)
+
+  def test_only_the_replacement_label_makes_it_gate(self):
+    expression = self.job["continue-on-error"]
+    self.assertIn("'ci:replace-tpu-v5'", expression)
+    self.assertIn("inputs.mode == 'replacement'", expression)
+    self.assertNotIn("ci:relay-tpu-v5", expression)
+    self.assertTrue(expression.lstrip().startswith("${{ !("))
+
+  def test_replacing_puts_the_relay_behind_the_required_check_name(self):
+    self.assertIn(TPU_V5_RUNNER, self.job["name"])
+    self.assertIn("ci:replace-tpu-v5", self.job["name"])
+
+  def test_the_bypass_notice_stands_down_when_the_relay_takes_the_name(self):
+    """Two check runs under one name, one of them always green, hides a red
+
+    relay. The notice job only claims the name for a plain bypass.
+    """
+    notice = self.presubmit["jobs"]["tpu_v5_bypass_notice"]
+    self.assertIn("tpu_v5_replaced != 'true'", notice["name"])
+
+  def test_every_control_label_is_in_the_concurrency_group(self):
+    """A label this workflow reacts to must not park the run in the
+
+    ignored-label group, or the run it triggers gets cancelled immediately.
+    """
+    group = self.workflow["concurrency"]["group"]
+    for label in ("run-rbe", "ci:relay-tpu-v5", "ci:replace-tpu-v5"):
+      self.assertIn(f'"{label}"', group)
+
+  def test_it_borrows_the_fleet_and_never_deletes_it(self):
+    """`down` here would delete VMs belonging to whoever brought them up."""
+    body = " ".join(
+        step.get("run", "") for step in self.job["steps"]
+    )
+    self.assertIn("spot_tpu_fleet.sh attach", body)
+    self.assertIn("spot_tpu_fleet.sh detach", body)
+    self.assertNotIn("spot_tpu_fleet.sh down", body)
+    self.assertNotIn("tpus tpu-vm delete", body)
+
+  def test_it_always_detaches(self):
+    """A run that dies holding every session file starves the next one."""
+    detach = self.steps["Detach from the fleet"]
+    self.assertIn("always()", detach["if"])
+
+  def test_it_builds_with_the_config_that_keeps_runfiles_on_disk(self):
+    """--config=ci alone sets --remote_download_minimal, and the base cache is
+
+    built by reading the runfiles trees off bazel-bin.
+    """
+    run = self.steps["Run the presubmit suite on TPU v5e"]["run"]
+    self.assertIn("--bazel-config ci_tpu_v5_relay", run)
+
+    with open(BAZELRC, "r", encoding="utf-8") as f:
+      bazelrc = f.read()
+    self.assertIn(
+        "common:ci_tpu_v5_relay --remote_download_outputs=all", bazelrc
+    )
+
+  def test_it_uses_a_key_minted_for_this_run(self):
+    """A GitHub runner has no developer home directory to read a key from."""
+    self.assertIn("ssh-keygen", self.steps["Mint an SSH key for this run"]["run"])
+    self.assertIn(
+        "--ssh-identity", self.steps["Attach to the TPU v5e fleet"]["run"]
+    )
+
+  def test_auth_uses_workload_identity_not_a_service_account_key(self):
+    auth = self.steps["Authenticate to GCP"]
+    self.assertIn("workload_identity_provider", auth["with"])
+    self.assertNotIn("credentials_json", auth["with"])
+
+  def test_a_gating_run_without_credentials_fails_instead_of_going_green(self):
+    run = self.steps["Check relay credentials are configured"]["run"]
+    self.assertIn("IS_GATING", run)
+    self.assertIn("::error::", run)
+    self.assertIn("exit 1", run)
+
+  def test_third_party_actions_are_pinned_to_a_commit(self):
+    for name, step in self.steps.items():
+      if "uses" not in step:
+        continue
+      with self.subTest(step=name):
+        self.assertRegex(step["uses"], r"@[0-9a-f]{40}$")
+
+  def test_only_one_relay_run_touches_the_fleet_at_a_time(self):
+    concurrency = self.job["concurrency"]
+    self.assertEqual(concurrency["group"], "relay-tpu-v5-fleet")
+    # Cancelling would throw away the run that already holds the VMs.
+    self.assertFalse(concurrency["cancel-in-progress"])
 
 
 if __name__ == "__main__":

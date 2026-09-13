@@ -35,8 +35,12 @@ MATRIX_SCRIPT = os.path.join(
     REPO_ROOT, "ci", "tools", "presubmit_job_matrix.sh"
 )
 BAZELRC = os.path.join(REPO_ROOT, ".bazelrc")
+RELAY_DRIVER = os.path.join(REPO_ROOT, "scripts", "relay_presubmit_pr.sh")
 
 TPU_V5_RUNNER = "linux-x86-ct5lp-224-8tpu"
+# What branch protection actually requires, and therefore the context a
+# replacement run has to report under.
+TPU_V5_CHECK_NAME = f"Presubmit on {TPU_V5_RUNNER}"
 
 
 def load_workflow(path):
@@ -293,30 +297,50 @@ class TestRbeOptInWorkflow(
   def test_shadow_label_is_not_in_the_gating_expression(self):
     self.assertNotIn("run-rbe", self.job["continue-on-error"])
 
-  def test_auth_uses_workload_identity_not_a_service_account_key(self):
-    """rbe-tpu-oss blocks service account key creation, so WIF is the only way."""
-    auth = self.steps["Authenticate to GCP RBE"]
-    self.assertIn("workload_identity_provider", auth["with"])
-    self.assertNotIn("credentials_json", auth["with"])
-    self.assertEqual(self.job["permissions"]["id-token"], "write")
+  def test_nothing_here_authenticates_to_gcp(self):
+    """The relay moved to a workstation, so no job in this file needs a GCP
 
-  def test_the_token_permission_is_scoped_to_the_jobs_that_mint_one(self):
-    """Granting id-token at the workflow level hands it to every job.
+    credential. The full-RBE job runs on a Google-operated runner that already
+    carries application default credentials.
+    """
+    for job_id, job in self.workflow["jobs"].items():
+      for step in job.get("steps", []):
+        with self.subTest(job=job_id, step=step.get("name")):
+          self.assertNotIn("google-github-actions/auth", step.get("uses", ""))
+          self.assertNotIn(
+              "workload_identity_provider", str(step.get("with", ""))
+          )
+          self.assertNotIn("credentials_json", str(step.get("with", "")))
 
-    zizmor's overly-broad-permissions audit fails the build over it, so each
-    job that authenticates asks for the token itself.
+  def test_no_job_asks_for_an_oidc_token(self):
+    """id-token: write exists to federate an external identity into GCP.
+
+    Nothing does that any more, and zizmor's overly-broad-permissions audit
+    fails the build over a permission nobody uses.
     """
     self.assertNotIn("id-token", self.workflow.get("permissions", {}))
-    for name, job in self.workflow["jobs"].items():
-      authenticates = any(
-          "google-github-actions/auth" in step.get("uses", "")
-          for step in job.get("steps", [])
-      )
-      with self.subTest(job=name):
-        if authenticates:
-          self.assertEqual(job["permissions"]["id-token"], "write")
-        else:
-          self.assertNotIn("id-token", job.get("permissions", {}))
+    for job_id, job in self.workflow["jobs"].items():
+      with self.subTest(job=job_id):
+        self.assertNotIn("id-token", job.get("permissions", {}))
+
+  def test_the_full_rbe_job_runs_where_credentials_already_exist(self):
+    """ubuntu-latest has no GCP identity.
+
+    The self-hosted runner does, and it
+
+    requires a job container.
+    """
+    self.assertNotEqual(self.job["runs-on"], "ubuntu-latest")
+    self.assertIn("image", self.job["container"])
+
+  def test_the_full_rbe_job_pins_bash(self):
+    """The ml-build container defaults to `sh`, which has no [[ ]].
+
+    Anything
+
+    written as bash misbehaves silently without this.
+    """
+    self.assertEqual(self.job["defaults"]["run"]["shell"], "bash")
 
   def test_third_party_actions_are_pinned_to_a_commit(self):
     for name, step in self.steps.items():
@@ -325,18 +349,6 @@ class TestRbeOptInWorkflow(
       with self.subTest(step=name):
         ref = step["uses"].split("@")[1]
         self.assertRegex(ref, r"^[0-9a-f]{40}$", "Pin actions to a full SHA")
-
-  def test_missing_credentials_fail_a_gating_run(self):
-    check = self.steps["Check RBE credentials are configured"]
-    self.assertIn("'ci:replace-tpu-v5'", check["env"]["IS_GATING"])
-    self.assertIn("exit 1", check["run"])
-
-  def test_steps_needing_credentials_are_skipped_without_them(self):
-    for name in ["Authenticate to GCP RBE", "Set up Bazel", "Run Test Suite"]:
-      with self.subTest(step=name):
-        self.assertIn(
-            "steps.creds.outputs.configured == 'true'", self.steps[name]["if"]
-        )
 
   def test_test_suite_input_selects_a_matrix_leg(self):
     suites = {
@@ -537,39 +549,95 @@ class TestOssShardCountsStaySized(
         )
 
 
-class TestRelayJob(
+class TestRelayHandoffJob(
     unittest.TestCase  # UNITTEST_OK=No RNG; tests workflow config.
 ):
-  """The relay job is what ci:replace-tpu-v5 actually gates on."""
+  """The relay runs on a workstation, so this job's whole job is to say so.
+
+  A hierarchical firewall above rbe-tpu-oss denies port 22 from 0.0.0.0/0, so
+  no GitHub runner can reach the fleet. What GitHub can still do is hold the
+  required check open and print the command.
+  """
 
   @classmethod
   def setUpClass(cls):
     cls.workflow = load_workflow(TEST_RBE_YML)
-    cls.job = cls.workflow["jobs"]["relay_tpu_v5"]
+    cls.job = cls.workflow["jobs"]["relay_handoff"]
     cls.steps = {step["name"]: step for step in cls.job["steps"]}
     cls.presubmit = load_workflow(PRESUBMIT_YML)
+    cls.body = " ".join(step.get("run", "") for step in cls.job["steps"])
 
   def test_both_the_shadow_and_the_replacement_label_start_it(self):
     condition = self.job["if"]
     self.assertIn("'ci:relay-tpu-v5'", condition)
     self.assertIn("'ci:replace-tpu-v5'", condition)
 
-  def test_only_the_replacement_label_makes_it_gate(self):
-    expression = self.job["continue-on-error"]
-    self.assertIn("'ci:replace-tpu-v5'", expression)
-    self.assertIn("inputs.mode == 'replacement'", expression)
-    self.assertNotIn("ci:relay-tpu-v5", expression)
-    self.assertTrue(expression.lstrip().startswith("${{ !("))
+  def test_it_holds_the_required_check_open_for_a_replacement_run(self):
+    """Without this the ct5lp check is simply absent, which reads as a
 
-  def test_replacing_puts_the_relay_behind_the_required_check_name(self):
-    self.assertIn(TPU_V5_RUNNER, self.job["name"])
-    self.assertIn("ci:replace-tpu-v5", self.job["name"])
+    configuration mistake rather than as work waiting on a person.
+    """
+    step = self.steps["Hold the required check open"]
+    self.assertIn("env.IS_REPLACEMENT == 'true'", step["if"])
+    self.assertIn("state=pending", step["run"])
+    self.assertEqual(self.job["env"]["GATING_CONTEXT"], TPU_V5_CHECK_NAME)
+
+  def test_only_the_replacement_step_writes_a_status(self):
+    """Every step that POSTs a status has to sit behind the replacement guard,
+
+    or a shadow run would start answering for the check that gates the PR.
+    """
+    writers = [
+        (name, step)
+        for name, step in self.steps.items()
+        if "/statuses/" in step.get("run", "")
+    ]
+    self.assertTrue(
+        writers, "no step posts a status; did this job get renamed?"
+    )
+    for name, step in writers:
+      with self.subTest(step=name):
+        self.assertIn("env.IS_REPLACEMENT == 'true'", step["if"])
+
+  def test_it_does_not_overwrite_a_verdict_already_reported(self):
+    """A later `labeled` event fires on the same SHA.
+
+    Reposting pending there
+
+    would knock a finished relay run back to waiting.
+    """
+    run = self.steps["Hold the required check open"]["run"]
+    self.assertIn('"${existing}" == "success"', run)
+    self.assertIn('"${existing}" == "failure"', run)
+    self.assertIn("exit 0", run)
+
+  def test_fork_pull_requests_are_excluded(self):
+    """A fork PR gets a read-only token, so the status POST would just fail."""
+    self.assertIn(
+        "github.event.pull_request.head.repo.full_name == github.repository",
+        self.job["env"]["IS_INTERNAL"],
+    )
+    self.assertIn(
+        "env.IS_INTERNAL == 'true'",
+        self.steps["Hold the required check open"]["if"],
+    )
+
+  def test_it_asks_for_status_write_and_nothing_more(self):
+    permissions = self.job["permissions"]
+    self.assertEqual(permissions["statuses"], "write")
+    self.assertEqual(permissions["contents"], "read")
+    self.assertNotIn("id-token", permissions)
+
+  def test_it_names_the_script_a_googler_has_to_run(self):
+    self.assertIn("scripts/relay_presubmit_pr.sh", self.body)
+
+  def test_it_touches_no_hardware(self):
+    """This job holds no GCP credential and must not pretend otherwise."""
+    self.assertNotIn("spot_tpu_fleet.sh", self.body)
+    self.assertNotIn("gcloud", self.body)
 
   def test_the_bypass_notice_stands_down_when_the_relay_takes_the_name(self):
-    """Two check runs under one name, one of them always green, hides a red
-
-    relay. The notice job only claims the name for a plain bypass.
-    """
+    """Two checks under one name, one of them always green, hides a red relay."""
     notice = self.presubmit["jobs"]["tpu_v5_bypass_notice"]
     self.assertIn("tpu_v5_replaced != 'true'", notice["name"])
 
@@ -582,65 +650,58 @@ class TestRelayJob(
     for label in ("run-rbe", "ci:relay-tpu-v5", "ci:replace-tpu-v5"):
       self.assertIn(f'"{label}"', group)
 
-  def test_it_borrows_the_fleet_and_never_deletes_it(self):
-    """`down` here would delete VMs belonging to whoever brought them up."""
-    body = " ".join(step.get("run", "") for step in self.job["steps"])
-    self.assertIn("spot_tpu_fleet.sh attach", body)
-    self.assertIn("spot_tpu_fleet.sh detach", body)
-    self.assertNotIn("spot_tpu_fleet.sh down", body)
-    self.assertNotIn("tpus tpu-vm delete", body)
 
-  def test_it_always_detaches(self):
-    """A run that dies holding every session file starves the next one."""
-    detach = self.steps["Detach from the fleet"]
-    self.assertIn("always()", detach["if"])
+class TestRelayDriverScript(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests script text.
+):
+  """scripts/relay_presubmit_pr.sh is what actually reports the verdict.
 
-  def test_it_builds_with_the_config_that_keeps_runfiles_on_disk(self):
-    """--config=ci alone sets --remote_download_minimal, and the base cache is
+  These checks pin the contract it shares with the workflows: the check name it
+  claims, and the promise that it only ever borrows hardware.
+  """
 
-    built by reading the runfiles trees off bazel-bin.
+  @classmethod
+  def setUpClass(cls):
+    with open(RELAY_DRIVER, "r", encoding="utf-8") as f:
+      cls.source = f.read()
+
+  def test_it_claims_the_same_check_name_the_workflow_holds_open(self):
+    """If these two drift, a replacement run resolves a check nobody required."""
+    self.assertIn(f'GATING_CONTEXT="{TPU_V5_CHECK_NAME}"', self.source)
+    workflow = load_workflow(TEST_RBE_YML)
+    handoff = workflow["jobs"]["relay_handoff"]
+    self.assertEqual(handoff["env"]["GATING_CONTEXT"], TPU_V5_CHECK_NAME)
+
+  def test_a_shadow_run_reports_under_its_own_context(self):
+    """A shadow run must stay out of the required-check namespace, or an
+
+    advisory run could satisfy branch protection on its own.
     """
-    run = self.steps["Run the presubmit suite on TPU v5e"]["run"]
-    self.assertIn("--bazel-config ci_tpu_v5_relay", run)
+    match = re.search(r'SHADOW_CONTEXT="([^"]+)"', self.source)
+    self.assertIsNotNone(match, "the driver must define SHADOW_CONTEXT")
+    self.assertNotEqual(match.group(1), TPU_V5_CHECK_NAME)
+    self.assertNotIn(TPU_V5_RUNNER, match.group(1))
 
-    with open(BAZELRC, "r", encoding="utf-8") as f:
-      bazelrc = f.read()
-    self.assertIn(
-        "common:ci_tpu_v5_relay --remote_download_outputs=all", bazelrc
-    )
+  def test_it_borrows_the_fleet_and_never_deletes_it(self):
+    self.assertIn('"$FLEET" attach', self.source)
+    self.assertIn('"$FLEET" detach', self.source)
+    self.assertNotIn('"$FLEET" up', self.source)
+    self.assertNotIn('"$FLEET" down', self.source)
+    self.assertNotIn("tpus tpu-vm delete", self.source)
 
-  def test_it_uses_a_key_minted_for_this_run(self):
-    """A GitHub runner has no developer home directory to read a key from."""
-    self.assertIn(
-        "ssh-keygen", self.steps["Mint an SSH key for this run"]["run"]
-    )
-    self.assertIn(
-        "--ssh-identity", self.steps["Attach to the TPU v5e fleet"]["run"]
-    )
+  def test_it_refuses_to_report_on_code_it_did_not_run(self):
+    self.assertIn("CLI_SKIP_HEAD_CHECK", self.source)
+    self.assertIn("rev-parse HEAD", self.source)
 
-  def test_auth_uses_workload_identity_not_a_service_account_key(self):
-    auth = self.steps["Authenticate to GCP"]
-    self.assertIn("workload_identity_provider", auth["with"])
-    self.assertNotIn("credentials_json", auth["with"])
+  def test_it_checks_for_the_proxy_that_makes_ssh_work(self):
+    """Without corp-ssh-helper every SSH hangs until it times out, which is a
 
-  def test_a_gating_run_without_credentials_fails_instead_of_going_green(self):
-    run = self.steps["Check relay credentials are configured"]["run"]
-    self.assertIn("IS_GATING", run)
-    self.assertIn("::error::", run)
-    self.assertIn("exit 1", run)
+    slow and confusing way to discover the firewall.
+    """
+    self.assertIn("corp-ssh-helper", self.source)
 
-  def test_third_party_actions_are_pinned_to_a_commit(self):
-    for name, step in self.steps.items():
-      if "uses" not in step:
-        continue
-      with self.subTest(step=name):
-        self.assertRegex(step["uses"], r"@[0-9a-f]{40}$")
-
-  def test_only_one_relay_run_touches_the_fleet_at_a_time(self):
-    concurrency = self.job["concurrency"]
-    self.assertEqual(concurrency["group"], "relay-tpu-v5-fleet")
-    # Cancelling would throw away the run that already holds the VMs.
-    self.assertFalse(concurrency["cancel-in-progress"])
+  def test_it_is_executable(self):
+    self.assertTrue(os.access(RELAY_DRIVER, os.X_OK))
 
 
 class TestWorkflowContextScopes(

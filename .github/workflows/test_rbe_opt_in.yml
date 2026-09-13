@@ -17,19 +17,25 @@
 #
 #   relay     Bazel keeps the test actions local and a --run_under wrapper ships
 #             each one over SSH to a single-chip Cloud TPU v5e VM leased from a
-#             standing fleet in rbe-tpu-oss. This is the path that works today.
+#             standing fleet in rbe-tpu-oss. This is the path that works today,
+#             but it cannot run here: a hierarchical firewall above rbe-tpu-oss
+#             denies port 22 from 0.0.0.0/0, so no GitHub runner can reach the
+#             fleet. A Googler drives it from a corp workstation with
+#             scripts/relay_presubmit_pr.sh, which reports the verdict back to
+#             the PR as a commit status. The relay_handoff job below publishes
+#             that pending status and the exact command to run.
 #   full RBE  Bazel sends the test actions to RBE workers that have TPU chips
-#             attached. Needs worker pools that do not exist yet.
+#             attached. Needs worker pools that do not exist yet. The CPU leg of
+#             this path does work, on the same self-hosted runner and the same
+#             application default credentials the normal presubmits use.
 #
 # Opt in per PR with a label:
 #
-#   ci:relay-tpu-v5    Run the relay alongside the normal presubmits and report
-#                      advisory results. Never blocks the PR.
-#   run-rbe            Same, for the full-RBE path.
-#   ci:replace-tpu-v5  Take TPU v5 out of presubmit.yml's matrix and gate the PR
-#                      on the relay instead. The relay job publishes its result
-#                      under the ct5lp runner's check name, so branch protection
-#                      sees the relay's real verdict.
+#   ci:relay-tpu-v5    Marks the PR for an advisory relay run. Never blocks.
+#   run-rbe            Runs the full-RBE path. Advisory.
+#   ci:replace-tpu-v5  Takes TPU v5 out of presubmit.yml's matrix and gates the
+#                      PR on the relay instead. The required ct5lp check stays
+#                      pending until a Googler runs the relay and reports it.
 #
 # See docs/CI_PRESUBMIT_AND_RBE_GUIDE.md.
 
@@ -114,17 +120,26 @@ jobs:
             suite: "cpu_only"
             extra_flags: ""
           - name: "TPU v5e Tests (Full RBE)"
-            # `runs-on` is ubuntu-latest because Bazel ships the test actions
-            # out to RBE, so state the hardware the tests land on explicitly.
+            # The tests land on RBE workers, not on this runner, so name the
+            # hardware explicitly.
             machine_type: "TPU v5e (RBE)"
             config: "ci_tpu_v5_full_rbe"
             suite: "tpu_v5e_only"
             extra_flags: "--test_tag_filters=presubmit-v5,-fails-on-tpu-v5,-nopresubmit,-notest,-nobuild"
-    runs-on: ubuntu-latest
+    # The same Google-operated runner and container the normal presubmits use.
+    # It carries application default credentials for RBE, so there is nothing to
+    # authenticate here and no credential for an outside system to mint.
+    runs-on: linux-x86-n4-16
+    container:
+      image: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:480f397c57207671315a27173ccec790ea9c66ef030af96cbe6ac9b4a6613996"
+      options: --ipc=host
     permissions:
       contents: read
-      # Lets google-github-actions/auth mint a Workload Identity Federation token.
-      id-token: write
+    # The container's default shell is `sh`, which has no [[ ]] and no
+    # /dev/tcp. Anything written as bash silently misbehaves without this.
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout Repository
@@ -133,54 +148,11 @@ jobs:
       - name: Fix Git Workspace Ownership
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      # Workload Identity Federation, because rbe-tpu-oss carries
-      # constraints/iam.disableServiceAccountKeyCreation and so cannot hand out
-      # exportable service account keys.
-      - name: Check RBE credentials are configured
-        id: creds
-        env:
-          WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-          IS_GATING: >-
-            ${{ contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5')
-            || (github.event_name == 'workflow_dispatch' && inputs.mode == 'replacement') }}
-        run: |
-          if [[ -n "$WIF_PROVIDER" ]]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "configured=false" >> "$GITHUB_OUTPUT"
-          echo "::warning::RBE credentials are not configured." \
-            "Set the GCP_WIF_PROVIDER and GCP_RBE_SERVICE_ACCOUNT repository" \
-            "variables to point at a Workload Identity Federation provider" \
-            "with access to rbe-tpu-oss."
-          # A gating run that cannot reach RBE has verified nothing, so say so
-          # instead of reporting a green check.
-          if [[ "$IS_GATING" == "true" ]]; then
-            echo "::error::ci:replace-tpu-v5 gates this PR on RBE, but RBE" \
-              "credentials are missing. Configure Workload Identity Federation" \
-              "or drop the label and let the TPU v5 presubmit run."
-            exit 1
-          fi
-
-      - name: Authenticate to GCP RBE
-        if: steps.creds.outputs.configured == 'true'
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
-        with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_RBE_SERVICE_ACCOUNT }}
-
-      - name: Set up Bazel
-        if: steps.creds.outputs.configured == 'true'
-        # The npm package ships both `bazel` and `bazelisk` shims, and bazelisk
-        # picks the version out of .bazelversion.
-        run: sudo npm install -g @bazel/bazelisk
-
       - name: Run Test Suite
         if: >-
-          steps.creds.outputs.configured == 'true'
-          && (inputs.test_suite == null
+          inputs.test_suite == null
           || inputs.test_suite == 'all'
-          || inputs.test_suite == matrix.job_info.suite)
+          || inputs.test_suite == matrix.job_info.suite
         env:
           BAZEL_CONFIG: ${{ matrix.job_info.config }}
           EXTRA_FLAGS: ${{ matrix.job_info.extra_flags }}
@@ -197,142 +169,90 @@ jobs:
             ${EXTRA_FLAGS} \
             -- //tests/... ${RBE_EXCLUDED_TARGETS}
 
-  relay_tpu_v5:
-    # With ci:replace-tpu-v5 this job claims the ct5lp runner's check name, so
-    # branch protection sees the relay's real verdict instead of presubmit.yml's
-    # always-green bypass notice. GitHub only evaluates a job's `name:`
-    # expression once the job is sent to a runner, so a skipped job publishes
-    # this as raw text and cannot collide with the real ct5lp check.
-    name: >-
-      ${{ (contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5')
-      || (github.event_name == 'workflow_dispatch' && inputs.mode == 'replacement'))
-      && 'Presubmit on linux-x86-ct5lp-224-8tpu'
-      || 'TPU v5e Tests (SSH Relay)' }}
+  relay_handoff:
+    name: "TPU v5e Relay Handoff"
+    # The relay itself runs on a Googler's workstation. All this job does is
+    # say so on the PR, so nobody is left waiting on a check that no machine
+    # here is going to report.
     if: >-
       (github.event_name == 'workflow_dispatch' && inputs.hardware_path == 'relay')
       || contains(github.event.pull_request.labels.*.name, 'ci:relay-tpu-v5')
       || contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5')
-    # Shadow runs report results without blocking. Replacement runs stand in for
-    # the TPU v5 presubmit, so a failure has to block the PR.
-    continue-on-error: >-
-      ${{ !(contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5')
-      || (github.event_name == 'workflow_dispatch' && inputs.mode == 'replacement')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Lets google-github-actions/auth mint a Workload Identity Federation token.
-      id-token: write
-    # One relay run at a time. Every run leases the whole fleet, so two of them
-    # would each ask for more VMs than exist and spend the difference waiting on
-    # flock. Queue instead of cancelling: the run that is already going has VMs
-    # in hand.
-    concurrency:
-      group: relay-tpu-v5-fleet
-      cancel-in-progress: false
+      # To publish the pending ct5lp status that a replacement run will later
+      # resolve. Fork PRs get a read-only token, so the step below is gated on
+      # the PR coming from this repository.
+      statuses: write
     env:
-      # `runner` is not in scope in a job-level env block, so the paths below use
-      # $RUNNER_TEMP inside the steps instead. Only `vars` works up here.
-      RELAY_ZONES: ${{ vars.RELAY_TPU_ZONES || 'europe-west4-b' }}
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      IS_REPLACEMENT: >-
+        ${{ contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5')
+        || (github.event_name == 'workflow_dispatch' && inputs.mode == 'replacement') }}
+      IS_INTERNAL: >-
+        ${{ github.event_name == 'workflow_dispatch'
+        || github.event.pull_request.head.repo.full_name == github.repository }}
+      GATING_CONTEXT: "Presubmit on linux-x86-ct5lp-224-8tpu"
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Fix Git Workspace Ownership
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Check relay credentials are configured
-        id: creds
-        env:
-          WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-          IS_GATING: >-
-            ${{ contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5')
-            || (github.event_name == 'workflow_dispatch' && inputs.mode == 'replacement') }}
+      # A replacement run leaves the required ct5lp check unclaimed until
+      # somebody runs the relay. Publishing it as pending turns "no check here
+      # yet" into "waiting on a person, and here is what they have to type".
+      - name: Hold the required check open
+        if: env.IS_REPLACEMENT == 'true' && env.IS_INTERNAL == 'true'
         run: |
-          if [[ -n "$WIF_PROVIDER" ]]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
+          # Don't stomp on a verdict somebody already reported for this commit.
+          # A later `labeled` event fires on the same SHA and would otherwise
+          # knock a finished run back to pending.
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
+            --jq ".statuses[] | select(.context == \"${GATING_CONTEXT}\") | .state" \
+            2>/dev/null | tail -1)
+          if [[ "${existing}" == "success" || "${existing}" == "failure" ]]; then
+            echo "${GATING_CONTEXT} is already '${existing}' for ${HEAD_SHA}; leaving it alone."
             exit 0
           fi
-          echo "configured=false" >> "$GITHUB_OUTPUT"
-          echo "::warning::The relay cannot reach rbe-tpu-oss." \
-            "Set the GCP_WIF_PROVIDER and GCP_RBE_SERVICE_ACCOUNT repository" \
-            "variables to a Workload Identity Federation provider whose" \
-            "service account holds roles/tpu.admin in rbe-tpu-oss."
-          # A gating run that never reached the hardware has verified nothing.
-          if [[ "$IS_GATING" == "true" ]]; then
-            echo "::error::ci:replace-tpu-v5 gates this PR on the relay, but" \
-              "its credentials are missing. Configure Workload Identity" \
-              "Federation or drop the label and let the ct5lp presubmit run."
-            exit 1
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f "state=pending" \
+            -f "context=${GATING_CONTEXT}" \
+            -f "description=waiting for a Googler to run the TPU v5e relay" \
+            -f "target_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > /dev/null
+          echo "Published a pending ${GATING_CONTEXT} for ${HEAD_SHA}."
+
+      - name: Explain what has to happen next
+        run: |
+          if [[ "${IS_REPLACEMENT}" == "true" ]]; then
+            mode="replacement"
+            effect="This PR cannot merge until that command reports green."
+          else
+            mode="shadow"
+            effect="Results are advisory and will not block this PR."
           fi
+          cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
+          ## TPU v5e relay: ${mode} run
 
-      - name: Authenticate to GCP
-        if: steps.creds.outputs.configured == 'true'
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
-        with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_RBE_SERVICE_ACCOUNT }}
+          The relay runs the \`presubmit-v5\` single-chip targets on Cloud TPU
+          v5e VMs in \`rbe-tpu-oss\`. It cannot run on a GitHub runner: a
+          hierarchical firewall above that project denies port 22 from the open
+          internet, and corp workstations get in through \`corp-ssh-helper\`.
 
-      - name: Set up gcloud
-        if: steps.creds.outputs.configured == 'true'
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db  # v3.0.1
-        with:
-          project_id: rbe-tpu-oss
+          A Googler on \`torchtpu-dev@\` or \`cloud-tpus-dev-team@\` runs it from
+          a corp workstation:
 
-      - name: Set up Bazel
-        if: steps.creds.outputs.configured == 'true'
-        run: sudo npm install -g @bazel/bazelisk
+          \`\`\`bash
+          git fetch origin pull/${PR_NUMBER}/head && git checkout ${HEAD_SHA}
+          scripts/relay_presubmit_pr.sh --pr ${PR_NUMBER} --mode ${mode}
+          \`\`\`
 
-      - name: Mint an SSH key for this run
-        if: steps.creds.outputs.configured == 'true'
-        run: |
-          sudo apt-get install -y openssh-client || true
-          mkdir -p "${RUNNER_TEMP}/ssh"
-          # No passphrase: nothing interactive can answer a prompt here, and the
-          # key dies with the runner.
-          ssh-keygen -t ed25519 -N '' -C "torch-tpu-relay-${GITHUB_RUN_ID}" \
-            -f "${RUNNER_TEMP}/ssh/relay_key"
+          ${effect}
 
-      # `attach` borrows the standing fleet: it lists READY VMs, uploads this
-      # run's public key to each, and writes one session file per VM. It never
-      # creates or deletes hardware, so a failed run cannot cost anyone their
-      # capacity.
-      - name: Attach to the TPU v5e fleet
-        if: steps.creds.outputs.configured == 'true'
-        run: |
-          read -r -a zones <<< "${RELAY_ZONES}"
-          zone_args=()
-          for zone in "${zones[@]}"; do
-            zone_args+=(--zone "${zone}")
-          done
-          scripts/spot_tpu_fleet.sh attach \
-            --pool "${RUNNER_TEMP}/tpu_pool" \
-            --ssh-identity "${RUNNER_TEMP}/ssh/relay_key" \
-            "${zone_args[@]}"
-          echo "RELAY_JOBS=$(find "${RUNNER_TEMP}/tpu_pool" -name '*.env' | wc -l)" \
-            >> "$GITHUB_ENV"
+          See \`docs/CI_PRESUBMIT_AND_RBE_GUIDE.md\` section 5.
+          SUMMARY
 
-      - name: Run the presubmit suite on TPU v5e
-        if: steps.creds.outputs.configured == 'true'
-        env:
-          SSH_IDENTITY: ${{ runner.temp }}/ssh/relay_key
-        run: |
-          scripts/run_presubmit_v5_relay.sh \
-            --session-pool "${RUNNER_TEMP}/tpu_pool" \
-            --output-dir "${RUNNER_TEMP}/presubmit_report" \
-            --bazel-config ci_tpu_v5_relay \
-            --jobs "${RELAY_JOBS}"
-
-      - name: Upload the presubmit report
-        if: always() && steps.creds.outputs.configured == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: relay-presubmit-report
-          path: ${{ runner.temp }}/presubmit_report
-          if-no-files-found: ignore
-
-      # Never `down` here. The fleet belongs to whoever brought it up, and this
-      # job only borrowed it.
-      - name: Detach from the fleet
-        if: always()
-        run: scripts/spot_tpu_fleet.sh detach --pool "${RUNNER_TEMP}/tpu_pool" || true
+          if [[ "${IS_INTERNAL}" != "true" ]]; then
+            echo "::warning::This PR is from a fork, so the pending check could" \
+              "not be published. A maintainer has to run the relay and report it."
+          fi

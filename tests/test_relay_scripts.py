@@ -19,6 +19,7 @@ Everything here exercises paths that bail out before the first SSH hop, so the
 suite needs no TPU, no network, and no gcloud credentials.
 """
 
+import json
 import os
 import re
 import shlex
@@ -37,6 +38,7 @@ RELAY_RUNNER = os.path.join(REPO_ROOT, "ci", "tools", "relay_test_runner.sh")
 REMOTE_EXECUTOR = os.path.join(
     REPO_ROOT, "ci", "tools", "remote_tpu_executor.sh"
 )
+RELAY_DRIVER = os.path.join(REPO_ROOT, "scripts", "relay_presubmit_pr.sh")
 
 SESSION_KEYS = (
     "TPU_IP",
@@ -2517,3 +2519,437 @@ class TestTestRuleEnvReachesTheVm(
   def test_a_value_with_shell_metacharacters_survives_intact(self):
     forwarded = self.forwarded(TORCH_LOGS_FORMAT="%(message)s; rm -rf /")
     self.assertEqual(forwarded["TORCH_LOGS_FORMAT"], "%(message)s; rm -rf /")
+
+
+class RelayDriverTestCase(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
+  """Harness for scripts/relay_presubmit_pr.sh.
+
+  Every external command the driver shells out to is replaced with a recorder:
+  `gh`, the fleet script, the relay runner, and corp-ssh-helper. Nothing here
+  touches GitHub, GCP, or a TPU.
+  """
+
+  HEAD_SHA = "a" * 40
+
+  def setUp(self):
+    self.tmp = tempfile.TemporaryDirectory()
+    self.addCleanup(self.tmp.cleanup)
+    self.bin = os.path.join(self.tmp.name, "bin")
+    self.pool = os.path.join(self.tmp.name, "pool")
+    self.out = os.path.join(self.tmp.name, "out")
+    os.makedirs(self.bin)
+    os.makedirs(self.pool)
+    self.calls = os.path.join(self.tmp.name, "calls.log")
+    # The preflight refuses to run anywhere the SSH proxy is missing.
+    self.write_stub("corp-ssh-helper", "exit 0")
+    self.write_stub("gcloud", "exit 0")
+
+  def write_stub(self, name, body):
+    """Installs an executable that logs its arguments, then runs `body`."""
+    path = os.path.join(self.bin, name)
+    lines = [
+        "#!/usr/bin/env bash",
+        'printf "%s %s\\n" "' + name + '" "$*" >> "$CALL_LOG"',
+        body,
+    ]
+    with open(path, "w", encoding="utf-8") as f:
+      f.write("\n".join(lines) + "\n")
+    os.chmod(path, 0o755)
+    return path
+
+  def fake_gh(self, labels=("ci:replace-tpu-v5",), head_sha=None):
+    """A `gh` that answers the queries the driver makes and records the rest."""
+    label_output = "".join(f"{label}\n" for label in labels)
+    body = "\n".join([
+        'case "$*" in',
+        f'  *"pulls/"*".head.sha"*) echo "{head_sha or self.HEAD_SHA}" ;;',
+        f"  *\"pulls/\"*\".labels\"*) printf '%s' '{label_output}' ;;",
+        '  *"comments?per_page"*) echo "" ;;',
+        "  *) ;;",
+        "esac",
+        "exit 0",
+    ])
+    return self.write_stub("gh", body)
+
+  def fake_fleet(self, vms=2):
+    """A fleet script that writes session files on attach and clears on detach."""
+    body = "\n".join([
+        'pool=""',
+        'prev=""',
+        'for arg in "$@"; do',
+        '  if [[ "$prev" == "--pool" ]]; then pool="$arg"; fi',
+        '  prev="$arg"',
+        "done",
+        'if [[ "$1" == "attach" ]]; then',
+        '  mkdir -p "$pool"',
+        (
+            f"  for i in $(seq 1 {vms}); do echo TPU_NAME=vm$i >"
+            ' "$pool/vm_$i.env"; done'
+        ),
+        'elif [[ "$1" == "detach" ]]; then',
+        '  rm -f "$pool"/*.env',
+        "fi",
+        "exit 0",
+    ])
+    return self.write_stub("spot_tpu_fleet.sh", body)
+
+  def fake_relay(
+      self, status="PASSED", failed=0, exit_code=0, write_summary=True
+  ):
+    """A relay runner that drops a summary where the driver looks for one."""
+    summary = json.dumps({
+        "status": status,
+        "total_targets": 57,
+        "passed_targets": 57 - failed,
+        "failed_targets": failed,
+        "duration_seconds": 450.8,
+    })
+    lines = []
+    if write_summary:
+      lines += [
+          'out=""',
+          'prev=""',
+          'for arg in "$@"; do',
+          '  if [[ "$prev" == "--output-dir" ]]; then out="$arg"; fi',
+          '  prev="$arg"',
+          "done",
+          'mkdir -p "$out"',
+          "cat > \"$out/presubmit_summary.json\" <<'JSON'",
+          summary,
+          "JSON",
+          'echo "report body" > "$out/presubmit_report.md"',
+      ]
+    lines.append(f"exit {exit_code}")
+    return self.write_stub("run_presubmit_v5_relay.sh", "\n".join(lines))
+
+  def run_driver(self, *args, **env_overrides):
+    env = {
+        "PATH": self.bin + os.pathsep + os.environ["PATH"],
+        "HOME": self.tmp.name,
+        "USER": "tester",
+        "CALL_LOG": self.calls,
+        "GH_BIN": os.path.join(self.bin, "gh"),
+        "SPOT_TPU_FLEET_BIN": os.path.join(self.bin, "spot_tpu_fleet.sh"),
+        "RUN_PRESUBMIT_V5_RELAY_BIN": os.path.join(
+            self.bin, "run_presubmit_v5_relay.sh"
+        ),
+    }
+    env.update(env_overrides)
+    return subprocess.run(
+        ["bash", RELAY_DRIVER, *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+  def recorded(self):
+    if not os.path.exists(self.calls):
+      return []
+    with open(self.calls, "r", encoding="utf-8") as f:
+      return [line.rstrip("\n") for line in f]
+
+  def gh_calls(self):
+    return [call for call in self.recorded() if call.startswith("gh ")]
+
+  def fleet_calls(self):
+    return [
+        call
+        for call in self.recorded()
+        if call.startswith("spot_tpu_fleet.sh ")
+    ]
+
+  def relay_call(self):
+    return next(
+        call
+        for call in self.recorded()
+        if call.startswith("run_presubmit_v5_relay.sh ")
+    )
+
+  def posted_statuses(self):
+    """Returns (state, context) for every status the driver published."""
+    statuses = []
+    for call in self.gh_calls():
+      if "/statuses/" not in call:
+        continue
+      state = re.search(r"state=(\S+)", call)
+      context = re.search(r"context=(.+?)(?= -f |$)", call)
+      statuses.append((
+          state.group(1) if state else None,
+          context.group(1) if context else None,
+      ))
+    return statuses
+
+  def default_args(self, mode="shadow"):
+    return [
+        "--pr",
+        "3730",
+        "--mode",
+        mode,
+        "--pool",
+        self.pool,
+        "--output-dir",
+        self.out,
+        "--skip-head-check",
+    ]
+
+  def stub_everything(self, **relay_kwargs):
+    self.fake_gh()
+    self.fake_fleet()
+    self.fake_relay(**relay_kwargs)
+
+
+class TestRelayDriverArguments(RelayDriverTestCase):
+  """Argument validation, before anything external gets touched."""
+
+  def test_it_requires_a_pull_request(self):
+    result = self.run_driver("--mode", "shadow")
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("--pr is required", result.stderr)
+
+  def test_it_rejects_a_non_numeric_pull_request(self):
+    result = self.run_driver("--pr", "twelve")
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("--pr must be a number", result.stderr)
+
+  def test_it_rejects_an_unknown_mode(self):
+    result = self.run_driver("--pr", "1", "--mode", "gating")
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("--mode must be", result.stderr)
+
+  def test_it_rejects_a_malformed_repo(self):
+    result = self.run_driver("--pr", "1", "--repo", "torch_tpu")
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("OWNER/NAME", result.stderr)
+
+  def test_it_rejects_a_non_numeric_job_count(self):
+    result = self.run_driver("--pr", "1", "--jobs", "lots")
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("--jobs must be a number", result.stderr)
+
+  def test_it_rejects_an_unknown_flag(self):
+    result = self.run_driver("--pr", "1", "--turbo")
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("unknown argument", result.stderr)
+
+  def test_a_dry_run_touches_nothing(self):
+    self.stub_everything()
+    result = self.run_driver(
+        *self.default_args(), "--dry-run", "--sha", self.HEAD_SHA
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(self.recorded(), [])
+
+  def test_a_dry_run_names_the_context_it_would_report_under(self):
+    result = self.run_driver(
+        *self.default_args(mode="replacement"),
+        "--dry-run",
+        "--sha",
+        self.HEAD_SHA,
+    )
+    self.assertIn("Presubmit on linux-x86-ct5lp-224-8tpu", result.stdout)
+
+
+class TestRelayDriverPreflight(RelayDriverTestCase):
+  """Refusals that have to happen before any hardware is leased."""
+
+  def test_it_stops_when_the_ssh_proxy_is_missing(self):
+    """Without corp-ssh-helper every SSH hangs until it times out, which is a
+
+    slow and confusing way to discover the firewall.
+    """
+    self.stub_everything()
+    result = self.run_driver(
+        *self.default_args(),
+        CORP_SSH_HELPER_BIN=os.path.join(self.bin, "no-such-proxy"),
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("corp-ssh-helper", result.stderr)
+    self.assertEqual(self.fleet_calls(), [])
+
+  def test_it_refuses_to_report_on_a_tree_that_is_not_the_pr_head(self):
+    self.stub_everything()
+    result = self.run_driver(
+        "--pr", "3730", "--pool", self.pool, "--output-dir", self.out
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("Reporting a verdict for code you did not run", result.stderr)
+    self.assertEqual(self.posted_statuses(), [])
+
+  def test_a_replacement_run_needs_the_replace_label(self):
+    """Without it presubmit.yml still schedules the real ct5lp runner, and both
+
+    would report under the same check name.
+    """
+    self.fake_gh(labels=("ci:relay-tpu-v5",))
+    self.fake_fleet()
+    self.fake_relay()
+    result = self.run_driver(*self.default_args(mode="replacement"))
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("ci:replace-tpu-v5", result.stderr)
+    self.assertEqual(self.posted_statuses(), [])
+
+  def test_add_label_supplies_the_missing_label(self):
+    self.fake_gh(labels=())
+    self.fake_fleet()
+    self.fake_relay()
+    result = self.run_driver(
+        *self.default_args(mode="replacement"), "--add-label"
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertTrue(
+        any(
+            "issues/3730/labels" in call and "ci:replace-tpu-v5" in call
+            for call in self.gh_calls()
+        ),
+        self.gh_calls(),
+    )
+
+  def test_a_shadow_run_does_not_need_any_label(self):
+    self.fake_gh(labels=())
+    self.fake_fleet()
+    self.fake_relay()
+    result = self.run_driver(*self.default_args())
+    self.assertEqual(result.returncode, 0, result.stderr)
+
+  def test_it_stops_when_no_vms_are_available(self):
+    self.fake_gh()
+    self.fake_fleet(vms=0)
+    self.fake_relay()
+    result = self.run_driver(*self.default_args())
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("does not create hardware", result.stderr)
+
+
+class TestRelayDriverReporting(RelayDriverTestCase):
+  """What lands on the pull request."""
+
+  SHADOW = "TPU v5e relay (shadow)"
+  GATING = "Presubmit on linux-x86-ct5lp-224-8tpu"
+
+  def test_a_passing_shadow_run_reports_under_the_advisory_context(self):
+    self.stub_everything()
+    result = self.run_driver(*self.default_args())
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(
+        self.posted_statuses(),
+        [("pending", self.SHADOW), ("success", self.SHADOW)],
+    )
+
+  def test_a_passing_replacement_run_resolves_the_required_check(self):
+    self.stub_everything()
+    result = self.run_driver(*self.default_args(mode="replacement"))
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(
+        self.posted_statuses(),
+        [("pending", self.GATING), ("success", self.GATING)],
+    )
+
+  def test_a_failing_run_reports_failure_and_exits_non_zero(self):
+    self.stub_everything(status="FAILED", failed=3, exit_code=1)
+    result = self.run_driver(*self.default_args(mode="replacement"))
+    self.assertNotEqual(result.returncode, 0)
+    self.assertEqual(self.posted_statuses()[-1], ("failure", self.GATING))
+
+  def test_a_run_that_leaves_no_summary_reports_error_not_success(self):
+    """An interrupted run has verified nothing.
+
+    Reporting green would be a lie.
+    """
+    self.stub_everything(exit_code=2, write_summary=False)
+    result = self.run_driver(*self.default_args(mode="replacement"))
+    self.assertNotEqual(result.returncode, 0)
+    self.assertEqual(self.posted_statuses()[-1][0], "error")
+
+  def test_a_nonzero_exit_with_no_failing_target_is_an_error_not_a_failure(
+      self,
+  ):
+    """A build break or a dead fleet is not the same as a test failing."""
+    self.stub_everything(status="PASSED", failed=0, exit_code=1)
+    self.run_driver(*self.default_args())
+    self.assertEqual(self.posted_statuses()[-1][0], "error")
+
+  def test_the_verdict_carries_the_target_counts(self):
+    self.stub_everything()
+    self.run_driver(*self.default_args())
+    final = [call for call in self.gh_calls() if "/statuses/" in call][-1]
+    self.assertIn("57/57 targets passed", final)
+
+  def test_it_comments_the_report_on_the_pull_request(self):
+    self.stub_everything()
+    self.run_driver(*self.default_args())
+    self.assertTrue(
+        any("issues/3730/comments" in call for call in self.gh_calls()),
+        self.gh_calls(),
+    )
+
+  def test_no_report_leaves_the_pull_request_alone(self):
+    self.stub_everything()
+    result = self.run_driver(*self.default_args(), "--no-report")
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(self.posted_statuses(), [])
+
+
+class TestRelayDriverFleetHandling(RelayDriverTestCase):
+  """The driver borrows hardware. It must never own it."""
+
+  def fleet_verbs(self):
+    return [call.split()[1] for call in self.fleet_calls()]
+
+  def test_it_attaches_and_detaches(self):
+    self.stub_everything()
+    self.run_driver(*self.default_args())
+    self.assertEqual(self.fleet_verbs(), ["attach", "detach"])
+
+  def test_it_detaches_even_when_the_relay_fails(self):
+    """A run that dies holding every session file starves the next one."""
+    self.stub_everything(status="FAILED", failed=1, exit_code=1)
+    self.run_driver(*self.default_args())
+    self.assertIn("detach", self.fleet_verbs())
+
+  def test_it_never_creates_or_deletes_hardware(self):
+    self.stub_everything()
+    self.run_driver(*self.default_args())
+    self.assertNotIn("up", self.fleet_verbs())
+    self.assertNotIn("down", self.fleet_verbs())
+
+  def test_it_passes_every_zone_through(self):
+    self.stub_everything()
+    self.run_driver(
+        *self.default_args(), "--zone", "us-west1-c", "--zone", "us-west4-a"
+    )
+    attach = next(call for call in self.fleet_calls() if " attach " in call)
+    self.assertIn("--zone us-west1-c", attach)
+    self.assertIn("--zone us-west4-a", attach)
+
+  def test_it_defaults_to_europe_west4_b(self):
+    self.stub_everything()
+    self.run_driver(*self.default_args())
+    attach = next(call for call in self.fleet_calls() if " attach " in call)
+    self.assertIn("--zone europe-west4-b", attach)
+
+  def test_it_defaults_the_job_count_to_the_number_of_vms(self):
+    """More jobs than VMs leaves tests spinning in the lease retry loop."""
+    self.fake_gh()
+    self.fake_fleet(vms=4)
+    self.fake_relay()
+    self.run_driver(*self.default_args())
+    self.assertIn("--jobs 4", self.relay_call())
+
+  def test_an_explicit_job_count_wins(self):
+    self.fake_gh()
+    self.fake_fleet(vms=4)
+    self.fake_relay()
+    self.run_driver(*self.default_args(), "--jobs", "2")
+    self.assertIn("--jobs 2", self.relay_call())
+
+  def test_it_builds_with_the_config_that_keeps_runfiles_on_disk(self):
+    """--config=ci alone sets --remote_download_minimal, and the base cache is
+
+    built by reading the runfiles trees off bazel-bin.
+    """
+    self.stub_everything()
+    self.run_driver(*self.default_args())
+    self.assertIn("--bazel-config ci_tpu_v5_relay", self.relay_call())

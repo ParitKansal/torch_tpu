@@ -12,11 +12,16 @@ hardware tests should take more than editing a PR description.
 | Goal | How to Trigger | What Happens |
 | :--- | :--- | :--- |
 | **Normal presubmits** | Default | Runs CPU, TPU v5 (`linux-x86-ct5lp-224-8tpu`), and TPU v7. |
-| **Relay shadow run** | Label `ci:relay-tpu-v5` | Normal presubmits still run. The relay runs the same v5 targets on Cloud TPU v5e VMs as advisory (`continue-on-error: true`) and never blocks the PR. |
-| **Relay replacement** | Label `ci:replace-tpu-v5` | Drops TPU v5 from the presubmit matrix and gates the PR on the relay instead. The relay job publishes under the ct5lp check name, so branch protection sees its real verdict. CPU and TPU v7 still run. |
-| **Full-RBE shadow run** | Label `run-rbe` | Advisory run of the CPU and TPU v5e suites through RBE workers. Needs TPU worker pools that do not exist yet, so today this reports a credentials warning and skips. |
+| **Relay shadow run** | Label `ci:relay-tpu-v5`, then a Googler runs `scripts/relay_presubmit_pr.sh` | Normal presubmits still run. The relay covers the same single-chip v5 targets and reports under its own advisory check. Never blocks the PR. |
+| **Relay replacement** | Label `ci:replace-tpu-v5`, then a Googler runs the same script with `--mode replacement` | Drops TPU v5 from the presubmit matrix. The required ct5lp check goes pending until the relay reports, so the relay's verdict gates the PR. CPU and TPU v7 still run. |
+| **Full-RBE shadow run** | Label `run-rbe` | Advisory run of the CPU and TPU v5e suites through RBE workers. The TPU leg needs worker pools that do not exist yet. |
 | **Standalone bypass** | Label `ci:bypass-tpu-v5` | Drops TPU v5 and runs nothing in its place. For runner outages, or PRs that don't touch v5 code. |
 | **Manual dispatch** | Actions UI or `gh workflow run` | `bypass-tpu-v5: true` on `presubmit.yml`, or `hardware_path` + `mode` on `test_rbe_opt_in.yml`. |
+
+> [!IMPORTANT]
+> The relay runs on a Googler's corp workstation, not in GitHub Actions. A
+> hierarchical firewall above `rbe-tpu-oss` blocks port 22 from every GitHub
+> runner. Section 5 has the evidence and the one command to run.
 
 ---
 
@@ -27,9 +32,10 @@ hardware tests should take more than editing a PR description.
   source of truth. This is the mode to start with.
 - **What happens**:
   - `presubmit.yml` runs CPU, TPU v5, and TPU v7 as usual.
-  - `test_rbe_opt_in.yml`'s `relay_tpu_v5` job attaches to the standing v5e
-    fleet in `rbe-tpu-oss`, runs the `presubmit-v5` single-chip targets, and
-    uploads a markdown report as a run artifact.
+  - A Googler runs `scripts/relay_presubmit_pr.sh --pr <PR> --mode shadow`. It
+    borrows the standing v5e fleet in `rbe-tpu-oss`, runs the `presubmit-v5`
+    single-chip targets, posts the verdict under `TPU v5e relay (shadow)`, and
+    comments the full report on the PR.
   - Relay failures are advisory and don't block the merge.
 - **What it covers**: the same targets the ct5lp job runs, minus the ones tagged
   `requires-tpu-v5lite:8`. The relay leases one v5litepod-1 VM per test action,
@@ -44,13 +50,16 @@ hardware tests should take more than editing a PR description.
   - `presubmit.yml`'s bypass notice job stands down. It publishes under
     `TPU v5 Bypass Notice` instead of claiming the ct5lp check name,
     because an always-green check next to a real one hides a red relay run.
-  - `relay_tpu_v5` claims `Presubmit on linux-x86-ct5lp-224-8tpu` and runs with
-    `continue-on-error: false`, so a relay failure blocks the PR.
+  - `relay_handoff` publishes `Presubmit on linux-x86-ct5lp-224-8tpu` as
+    **pending**, so the PR shows it is waiting on a person rather than missing
+    a check.
+  - A Googler runs `scripts/relay_presubmit_pr.sh --pr <PR> --mode replacement`,
+    which resolves that same check to the relay's real verdict.
 
 > [!WARNING]
-> If the relay can't reach `rbe-tpu-oss`, a run in this mode fails instead of
-> reporting green. A gating check that never touched hardware has verified
-> nothing.
+> The required check stays pending until someone runs the relay. That is the
+> intended failure mode: a gating check that never touched hardware has
+> verified nothing, so it must not go green on its own.
 
 > [!NOTE]
 > Multi-chip coverage does not move with the label. The 20 targets tagged
@@ -60,9 +69,10 @@ hardware tests should take more than editing a PR description.
 ### Mode 3: Full-RBE shadow run (`run-rbe`)
 - **Use case**: Exercising the RBE path once TPU-attached worker pools exist.
 - **What happens**: `run_tests` builds and tests through RBE with
-  `--config=ci_tpu_v5_full_rbe`. Advisory only. This label deliberately cannot
-  gate a PR, because `//bazel/platforms:rbe_tpu_v5e` asks for a worker pool
-  nobody has provisioned.
+  `--config=ci_tpu_v5_full_rbe`, on the same self-hosted runner and application
+  default credentials the normal presubmits use. Advisory only. The TPU leg
+  cannot gate a PR, because `//bazel/platforms:rbe_tpu_v5e` asks for a worker
+  pool nobody has provisioned.
 
 ### Mode 4: Standalone bypass (`ci:bypass-tpu-v5`)
 - **Use case**: The PR only touches CPU, TPU v7, or docs, or the v5 runners are
@@ -73,24 +83,28 @@ hardware tests should take more than editing a PR description.
 
 ---
 
-## 3. Manual Workflow Dispatch via GitHub CLI
+## 3. Driving it from the command line
 
 ```bash
-# Run presubmits with TPU v5 bypassed
+# Relay, advisory. Check out the PR head first.
+git fetch origin pull/<PR>/head && git checkout FETCH_HEAD
+scripts/relay_presubmit_pr.sh --pr <PR> --mode shadow
+
+# Relay, gating. --add-label applies ci:replace-tpu-v5 for you.
+scripts/relay_presubmit_pr.sh --pr <PR> --mode replacement --add-label
+
+# See the plan without touching hardware.
+scripts/relay_presubmit_pr.sh --pr <PR> --dry-run
+
+# Run presubmits with TPU v5 bypassed and nothing in its place.
 gh workflow run presubmit.yml -f bypass-tpu-v5=true
 
-# Relay, advisory
-gh workflow run test_rbe_opt_in.yml -f hardware_path=relay -f mode=shadow
-
-# Relay, gating
-gh workflow run test_rbe_opt_in.yml -f hardware_path=relay -f mode=replacement
-
-# Full RBE instead of the relay
+# Full RBE instead of the relay.
 gh workflow run test_rbe_opt_in.yml -f hardware_path=full-rbe -f test_suite=tpu_v5e_only
 ```
 
-Adding a label from the command line, since `gh pr edit --add-label` does not
-work on this repo:
+Adding a label by hand, since `gh pr edit --add-label` does not work on this
+repo:
 
 ```bash
 gh api repos/google-pytorch/torch_tpu/issues/<PR>/labels \
@@ -99,34 +113,84 @@ gh api repos/google-pytorch/torch_tpu/issues/<PR>/labels \
 
 ---
 
-## 4. RBE credentials (one-time repo setup)
+## 4. Who can run the relay, and what they need
 
-Both paths authenticate with Workload Identity Federation. Neither uses a
-service account key, and neither can: `rbe-tpu-oss` carries
-`constraints/iam.disableServiceAccountKeyCreation`, so no exportable key exists
-to put in a secret.
+The relay runs on a **corp workstation or cloudtop**, not on a GitHub runner.
+Section 5 explains why. What a Googler needs:
 
-Set these **repository variables** (not secrets — none of the values are
-sensitive):
-
-| Variable | Value | Needed by |
+| Requirement | How to get it | Check it |
 | :--- | :--- | :--- |
-| `GCP_WIF_PROVIDER` | Full provider resource name, `projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>` | both paths |
-| `GCP_RBE_SERVICE_ACCOUNT` | Service account email the provider is allowed to impersonate | both paths |
-| `RELAY_TPU_ZONES` | Space-separated zones to look for fleet VMs in. Defaults to `europe-west4-b` | relay only |
+| Membership of `torchtpu-dev@google.com` or `cloud-tpus-dev-team@google.com` | go/membership, or ask in the group | `gcloud compute tpus tpu-vm list --project=rbe-tpu-oss --zone=europe-west4-b` |
+| `corp-ssh-helper` on PATH | Standard on cloudtop and corp workstations | `command -v corp-ssh-helper` |
+| `gcloud` application default credentials | `gcloud auth application-default login` | `gcloud auth list` |
+| The `gh` CLI, authenticated | go/gh-cli | `gh auth status` |
+| Write access to the repo | Needed to set labels and post statuses | `gh api repos/google-pytorch/torch_tpu --jq .permissions` |
 
-Until these are set:
+Both groups hold `projects/rbe-tpu-oss/roles/torchTpuCiRelay`, a custom
+borrow-only role:
 
-- **Shadow runs** log a warning and skip. They were never going to block anything.
-- **Replacement runs fail.** They gate the PR on hardware, so reporting green
-  without reaching it would be a lie.
+| Permission | Why |
+| :--- | :--- |
+| `tpu.nodes.list`, `tpu.nodes.get` | `attach` finds READY VMs and reads their addresses |
+| `tpu.nodes.update` | `gcloud compute tpus tpu-vm ssh` writes the caller's public key into the **node's own** metadata |
+| `tpu.locations.*`, `tpu.operations.*` | Reading zones and polling operations |
+| `serviceusage.services.use` | Billing attribution on API calls |
+
+It deliberately leaves out `tpu.nodes.create` and `tpu.nodes.delete`, so
+"borrow, never own" holds in IAM and not just by convention. Nobody running the
+relay can destroy the fleet.
+
+To add another group:
+
+```bash
+gcloud projects add-iam-policy-binding rbe-tpu-oss \
+  --member='group:YOUR-GROUP@google.com' \
+  --role='projects/rbe-tpu-oss/roles/torchTpuCiRelay'
+```
+
+> [!NOTE]
+> The build phase sends compile actions to the shared OSS RBE instance
+> (`projects/tensorflow-testing/instances/default_instance`), which is separate
+> from `rbe-tpu-oss` and uses your ordinary application default credentials.
 
 ---
 
-## 5. Turning the relay on for the repo (one-time setup)
+## 5. Why the relay runs on your workstation
 
-Everything below is infrastructure work, done once. After that, contributors
-only need to add a label.
+A hierarchical firewall policy above `rbe-tpu-oss` denies all ingress from
+`0.0.0.0/0` at priority 31. The allow rules above it list Google corp and relay
+netblocks plus RFC1918. The project's own `default-allow-ssh` rule sits at
+priority 1000 in the VPC, which is never reached — hierarchy rules are
+evaluated first.
+
+So:
+
+| From | Port 22 to a fleet VM |
+| :--- | :--- |
+| Corp workstation or cloudtop | **works** — `/etc/ssh/ssh_config` proxies through `corp-ssh-helper --proxy-mode=grue` |
+| Anything inside the VPC (RFC1918) | **works** — priority 24 allows it |
+| GitHub-hosted runner | blocked |
+| The repo's self-hosted runners in `ml-velocity-actions-production` | blocked — different VPC, so traffic arrives from a public NAT address |
+
+Confirm it yourself. A raw TCP connect fails even from a corp machine, while
+`ssh` to the same address succeeds, because only the latter picks up the
+ProxyCommand:
+
+```bash
+ip=$(gcloud compute tpus tpu-vm list --project=rbe-tpu-oss \
+  --zone=europe-west4-b --limit=1 \
+  --format='value(networkEndpoints[0].accessConfig.externalIp)')
+python3 -c "import socket,sys; socket.create_connection((sys.argv[1],22),10)" "$ip"   # times out
+ssh -o BatchMode=yes "$(whoami)@${ip}" true                                           # works
+```
+
+This also rules out Workload Identity Federation as a fix. A GitHub-hosted
+runner could hold a perfectly valid GCP token and still not reach port 22, so
+federating an external identity provider into the project would buy nothing.
+The WIF pool, provider bindings and repository variables that used to be here
+have been removed.
+
+### The one-time infrastructure
 
 **1. A standing v5e fleet.** The relay attaches to VMs that already exist; it
 never creates them. Bring the fleet up from a workstation or a long-lived job:
@@ -145,84 +209,76 @@ Check what is running with `scripts/spot_tpu_fleet.sh status --pool /tmp/tpu_poo
 > when the experiment ends, and check for strays with
 > `scripts/spot_tpu_manager.sh reap --dry-run`.
 
-**2. A GitHub OIDC provider in `rbe-tpu-oss`.** The pool, the service account
-bindings and both repository variables are already in place. The provider itself
-is **blocked**: `constraints/iam.workloadIdentityPoolProviders` is `denyAll` at
-the google.com org root, so no google.com project may federate an external
-identity provider. Creating it fails with:
-
-```
-FAILED_PRECONDITION: Org Policy violated for value:
-  'https://token.actions.githubusercontent.com'
-```
-
-Clearing that needs an exemption through http://gustfront for project
-`rbe-tpu-oss`, naming the constraint and the GitHub issuer. See go/cute-3pid for
-the policy and what a request has to contain. Approved precedents for the same
-pattern: b/444962666, b/491798501, b/508563563.
-
-Once the exemption lands, one command finishes the job:
+**2. Borrowing capacity you did not create.** `attach` defaults to VMs named
+`spot-tpu-v5e-*`. To borrow from a reservation whose VMs are named something
+else, widen the search:
 
 ```bash
-gcloud iam workload-identity-pools providers create-oidc torch-tpu \
-  --project=rbe-tpu-oss --location=global --workload-identity-pool=github \
-  --issuer-uri="https://token.actions.githubusercontent.com" \
-  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.ref=assertion.ref,attribute.event_name=assertion.event_name" \
-  --attribute-condition="assertion.repository in ['google-pytorch/torch_tpu','jonathan1920/torch_tpu']"
+scripts/spot_tpu_fleet.sh attach --pool /tmp/tpu_pool \
+  --name-prefix '' --accelerator-type v5litepod-1 --zone europe-west4-b
 ```
 
-The attribute condition is the security boundary. Without it, any GitHub
-repository could mint credentials into the project.
+`--name-prefix` only applies to `attach`. The teardown path stays pinned to
+`spot-tpu-v5e-`, so a widened search can never widen a delete.
 
-**3. IAM on the service account the provider impersonates.**
-`torch-tpu-ci-sa@rbe-tpu-oss.iam.gserviceaccount.com`, already configured:
+**3. Branch protection.** Nothing to change. A replacement run posts a commit
+status under the existing `Presubmit on linux-x86-ct5lp-224-8tpu` context, so
+the required check you already have keeps working and now carries the relay's
+verdict.
 
-| Role | Why |
-| :--- | :--- |
-| `projects/rbe-tpu-oss/roles/torchTpuCiRelay` | Custom. `tpu.nodes.get/list/update` plus the location and operation readers. `attach` lists READY VMs, reads their addresses, and pushes the run's public key |
-| `roles/remotebuildexecution.actionCacheWriter` | The build phase writes to the RBE cache |
-
-`gcloud compute tpus tpu-vm ssh` writes the public key into the **TPU node's own
-metadata**, not project metadata, which is why `tpu.nodes.update` is enough. The
-custom role leaves out `tpu.nodes.create` and `tpu.nodes.delete` on purpose, so
-"CI borrows, never owns" holds in IAM and not just by convention.
-
-`roles/iam.workloadIdentityUser` is granted **on the service account**, once per
-repository via `principalSet://.../attribute.repository/<repo>`. Never grant it
-across the whole pool, and never at project level.
-
-**4. Network path.** The runner SSHes to the VMs' external IPs on port 22. The
-default network's `default-allow-ssh` rule already permits this. If that rule is
-tightened, the relay stops working from GitHub-hosted runners and needs a
-self-hosted runner inside the VPC instead.
-
-**5. Branch protection, only if you want replacement to gate.** Nothing to
-change: the relay job publishes under the existing
-`Presubmit on linux-x86-ct5lp-224-8tpu` check name when `ci:replace-tpu-v5` is
-on, so the required check you already have keeps working and now carries the
-relay's verdict.
-
-**6. The labels.** Create `ci:relay-tpu-v5` if it does not exist:
+**4. The labels.** Create them if they do not exist:
 
 ```bash
 gh label create ci:relay-tpu-v5 --repo google-pytorch/torch_tpu \
-  --description "Run the TPU v5e SSH relay as an advisory shadow check"
+  --description "TPU v5e SSH relay runs as an advisory shadow check"
+gh label create ci:replace-tpu-v5 --repo google-pytorch/torch_tpu \
+  --description "Drop the ct5lp presubmit and gate on the TPU v5e relay instead"
 ```
 
-### How the CI job borrows the fleet
+### Running it
 
-`relay_tpu_v5` mints an ed25519 key for the run, calls
-`spot_tpu_fleet.sh attach`, and always calls `detach` at the end.
+Check out the PR head, then point the driver at the PR:
 
-- `attach` lists `state:READY` VMs whose names start with `spot-tpu-v5e-`,
-  uploads the run's public key to each, and writes one session file per VM. It
-  issues no `create` and no `delete`.
-- `detach` deletes the session files and leaves the hardware alone. CI must
-  never call `down`: that would delete VMs belonging to whoever brought the
-  fleet up.
+```bash
+git fetch origin pull/<PR>/head && git checkout FETCH_HEAD
 
-A job-level concurrency group (`relay-tpu-v5-fleet`, `cancel-in-progress:
-false`) keeps two relay runs from each trying to lease the whole fleet.
+# Advisory. Reports under "TPU v5e relay (shadow)". Never blocks the PR.
+scripts/relay_presubmit_pr.sh --pr <PR> --mode shadow
+
+# Gating. Reports under "Presubmit on linux-x86-ct5lp-224-8tpu".
+scripts/relay_presubmit_pr.sh --pr <PR> --mode replacement --add-label
+```
+
+What the driver does, in order:
+
+1. Refuses to start unless `corp-ssh-helper` is present and the working tree is
+   at the PR's head commit. Reporting a verdict for code you did not run is
+   worse than not reporting one. `--skip-head-check` overrides.
+2. For a replacement run, checks the PR carries `ci:replace-tpu-v5`, or adds it
+   with `--add-label`. Without that label `presubmit.yml` still schedules the
+   real ct5lp runner and both would report under the same check name.
+3. Posts a `pending` status so the PR shows the run is under way.
+4. `attach`es to the fleet, runs the suite, and `detach`es. It never calls `up`
+   or `down`, so it cannot create or delete anyone's hardware.
+5. Reads `presubmit_summary.json` and posts `success`, `failure`, or `error`,
+   then upserts a PR comment with the full report. It does not trust the exit
+   code alone: a run that dies before writing a summary reports `error`, not a
+   pass.
+
+Useful flags: `--zone` (repeatable), `--jobs N`, `--pool DIR`, `--dry-run`,
+`--no-report` to run the suite without touching the PR.
+
+### What GitHub still does
+
+`relay_handoff` in `test_rbe_opt_in.yml` needs no GCP access at all. On a
+replacement PR it publishes the `Presubmit on linux-x86-ct5lp-224-8tpu` check as
+**pending**, with the exact command in the job summary, so the PR reads as
+"waiting on a person" instead of "missing a check". It leaves a status alone if
+that commit already has a verdict, so adding a label later cannot knock a
+finished run back to pending.
+
+Fork PRs get a read-only token, so the pending status cannot be published there.
+The job logs a warning instead, and a maintainer runs the relay.
 
 ---
 

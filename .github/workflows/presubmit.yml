@@ -106,10 +106,10 @@ jobs:
     # is not bypassed. The skipped one reads as a failure to anything gating on
     # that check. Only claim the name when this job is standing in for it.
     #
-    # `ci:replace-tpu-v5` is the one case where it must not: there the relay job
-    # in test_rbe_opt_in.yml publishes under that name and carries a real
-    # verdict. Claiming it here too would put an always-green check next to it
-    # and hide a red relay run.
+    # `ci:replace-tpu-v5` is the one case where it must not: there a Googler
+    # runs the relay from a workstation and posts the verdict as a commit
+    # status under that name. Claiming it here too would put an always-green
+    # check next to it and hide a red relay run.
     name: >-
       ${{ needs.setup.outputs.tpu_v5_bypassed == 'true'
       && needs.setup.outputs.tpu_v5_replaced != 'true'
@@ -128,9 +128,11 @@ jobs:
           A bypass label or workflow input took the self-hosted TPU v5 runner out
           of this run's job matrix.
 
-          If the PR carries `ci:replace-tpu-v5`, TPU v5 coverage moved to the
-          'RBE Hardware TPU Tests' workflow, which publishes its result under
-          this runner's check name and gates this PR.
+          If the PR carries `ci:replace-tpu-v5`, TPU v5 coverage moves to the
+          SSH relay, which a Googler runs from a corp workstation with
+          scripts/relay_presubmit_pr.sh. That run posts its verdict as a commit
+          status under this runner's check name, so this PR stays blocked until
+          it reports green.
 
           See docs/CI_PRESUBMIT_AND_RBE_GUIDE.md.
           ========================================================================

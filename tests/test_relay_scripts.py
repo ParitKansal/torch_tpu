@@ -2953,3 +2953,54 @@ class TestRelayDriverFleetHandling(RelayDriverTestCase):
     self.stub_everything()
     self.run_driver(*self.default_args())
     self.assertIn("--bazel-config ci_tpu_v5_relay", self.relay_call())
+
+
+class TestRelayDriverBazelFlags(RelayDriverTestCase):
+  """What the driver hands the relay runner on the bazel side.
+
+  The ci configs point the build event upload at an instance only the CI
+  service account can write to. When anyone else runs the relay the upload
+  fails after the suite has already passed, bazel exits non-zero, and the
+  driver reports a green run as an error. So the driver switches the upload
+  off unless asked for it.
+  """
+
+  def relay_args(self):
+    return self.relay_call().split(" ", 1)[1]
+
+  def test_it_turns_the_resultstore_upload_off_by_default(self):
+    self.stub_everything()
+    result = self.run_driver(*self.default_args())
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertIn("--bazel-flag --bes_backend=", self.relay_args())
+
+  def test_upload_results_leaves_the_upload_alone(self):
+    self.stub_everything()
+    result = self.run_driver(*self.default_args(), "--upload-results")
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertNotIn("--bes_backend=", self.relay_args())
+
+  def test_it_forwards_an_extra_flag(self):
+    self.stub_everything()
+    result = self.run_driver(
+        *self.default_args(), "--bazel-flag", "--verbose_failures"
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertIn("--bazel-flag --verbose_failures", self.relay_args())
+
+  def test_an_extra_flag_does_not_displace_the_default(self):
+    self.stub_everything()
+    self.run_driver(*self.default_args(), "--bazel-flag=--verbose_failures")
+    args = self.relay_args()
+    self.assertIn("--bes_backend=", args)
+    self.assertIn("--verbose_failures", args)
+
+  def test_the_config_still_goes_through(self):
+    self.stub_everything()
+    self.run_driver(*self.default_args())
+    self.assertIn("--bazel-config ci_tpu_v5_relay", self.relay_args())
+
+  def test_a_missing_flag_value_is_an_error(self):
+    result = self.run_driver("--pr", "1", "--bazel-flag")
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("--bazel-flag requires an argument", result.stderr)

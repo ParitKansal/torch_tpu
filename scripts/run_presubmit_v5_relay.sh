@@ -55,6 +55,9 @@ CLI_PROJECT="$ALLOWED_PROJECT"
 # output base. CI has a cold one and needs --bazel-config=ci_tpu_v5_relay to
 # send the compile actions to RBE.
 CLI_BAZEL_CONFIG=""
+# Extra flags appended after --config on both bazel invocations, so a caller can
+# override anything a config pulled in. Repeated flags: the last one wins.
+CLI_BAZEL_FLAGS=()
 
 # Process supervision state
 _BAZEL_PID=""
@@ -89,6 +92,10 @@ Options:
                            Use ci_tpu_v5_relay on a cold machine: it sends the
                            compile actions to RBE and still downloads the
                            runfiles trees the base cache is built from.
+  --bazel-flag=FLAG        Extra flag for the build and test invocations, after
+                           --config so it wins. Repeatable. The driver uses it
+                           to pass --bes_backend= and skip the ResultStore
+                           upload, which a personal account cannot do.
   -h, --help               Show this help message and exit
 EOF
 }
@@ -164,6 +171,11 @@ parse_args() {
         CLI_BAZEL_CONFIG="$2"; shift 2 ;;
       --bazel-config=*)
         CLI_BAZEL_CONFIG="${1#*=}"; shift ;;
+      --bazel-flag)
+        [[ $# -lt 2 ]] && { echo "ERROR [run_presubmit]: --bazel-flag requires an argument." >&2; exit 1; }
+        CLI_BAZEL_FLAGS+=("$2"); shift 2 ;;
+      --bazel-flag=*)
+        CLI_BAZEL_FLAGS+=("${1#*=}"); shift ;;
       -h|--help)
         show_help; exit 0 ;;
       *)
@@ -377,6 +389,8 @@ bazel_test_flags() {
     "--test_summary=detailed" \
     "--test_tag_filters=${CLI_FILTER}" \
     "--test_timeout=${CLI_TEST_TIMEOUT}"
+  # Last, so a caller can override any of the above.
+  (( ${#CLI_BAZEL_FLAGS[@]} == 0 )) || printf '%s\n' "${CLI_BAZEL_FLAGS[@]}"
 }
 
 # 6. Main execution flow
@@ -504,6 +518,7 @@ main() {
   echo -e "\nBuilding test targets so the base cache can see every dependency..."
   local build_flags=()
   [[ -z "$CLI_BAZEL_CONFIG" ]] || build_flags+=("--config=${CLI_BAZEL_CONFIG}")
+  build_flags+=(${CLI_BAZEL_FLAGS[@]+"${CLI_BAZEL_FLAGS[@]}"})
   if ! bazel build \
     ${build_flags[@]+"${build_flags[@]}"} \
     --test_tag_filters="$CLI_FILTER" \

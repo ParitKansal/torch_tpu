@@ -756,9 +756,10 @@ INFO: Build completed.
     )
 
 
-class PresubmitPipelineEndToEndTest(
-    unittest.TestCase  # UNITTEST_OK=No RNG; tests report generation.
+class PipelineMockToolchainTestCase(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
 ):
+  """Runs the relay driver against stub tools instead of real hardware."""
 
   def setUp(self):
     self.td = tempfile.TemporaryDirectory()
@@ -767,49 +768,6 @@ class PresubmitPipelineEndToEndTest(
 
   def tearDown(self):
     self.td.cleanup()
-
-  def test_pipeline_dry_run_e2e(self):
-    cmd = [
-        RUNNER_SCRIPT,
-        "--dry-run",
-        f"--output-dir={self.output_dir}",
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
-    self.assertEqual(proc.returncode, 0, proc.stderr)
-    self.assertIn(
-        "torch_tpu Presubmit-v5 Relay Execution Pipeline", proc.stdout
-    )
-    self.assertIn("--local_test_jobs=1", proc.stdout)
-
-    summary_file = os.path.join(self.output_dir, "presubmit_summary.json")
-    report_file = os.path.join(self.output_dir, "presubmit_report.md")
-    self.assertTrue(os.path.isfile(summary_file))
-    self.assertTrue(os.path.isfile(report_file))
-
-    with open(summary_file, "r") as f:
-      data = json.load(f)
-
-    self.assertEqual(data["status"], "DRY_RUN")
-    self.assertEqual(data["project"], "rbe-tpu-oss")
-
-    # The literal count moves whenever anyone adds a tagged test, so check the
-    # things that must hold instead: the banner agrees with the summary, and
-    # the suite is not empty.
-    count_match = re.search(r"Target Count:\s+(\d+)", proc.stdout)
-    self.assertIsNotNone(count_match, proc.stdout)
-    self.assertEqual(int(count_match.group(1)), data["total_targets"])
-    self.assertGreater(data["total_targets"], 0)
-
-    # One chip per VM, so anything asking for a full 8-chip pod must be
-    # filtered out before bazel ever sees it.
-    self.assertIn("-requires-tpu-v5lite:8", proc.stdout)
-    resolved = {t["target"] for t in data["targets"]}
-    self.assertNotIn("//tests/distributed:torchcomm_multi_tpu_test", resolved)
-
-    # The plan is generated from the same list main() passes to bazel, so this
-    # also proves the real invocation keeps compilation eligible for RBE.
-    self.assertIn("--strategy=TestRunner=local", proc.stdout)
-    self.assertNotIn("--spawn_strategy", proc.stdout)
 
   def _write_exe(self, path, body):
     with open(path, "w") as f:
@@ -862,6 +820,52 @@ exit 0
     env["STAGE_RELAY_BASE_BIN"] = mock_stager
     env["TPU_SESSION_ENV"] = session_env
     return env
+
+
+class PresubmitPipelineEndToEndTest(PipelineMockToolchainTestCase):
+
+  def test_pipeline_dry_run_e2e(self):
+    cmd = [
+        RUNNER_SCRIPT,
+        "--dry-run",
+        f"--output-dir={self.output_dir}",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
+    self.assertEqual(proc.returncode, 0, proc.stderr)
+    self.assertIn(
+        "torch_tpu Presubmit-v5 Relay Execution Pipeline", proc.stdout
+    )
+    self.assertIn("--local_test_jobs=1", proc.stdout)
+
+    summary_file = os.path.join(self.output_dir, "presubmit_summary.json")
+    report_file = os.path.join(self.output_dir, "presubmit_report.md")
+    self.assertTrue(os.path.isfile(summary_file))
+    self.assertTrue(os.path.isfile(report_file))
+
+    with open(summary_file, "r") as f:
+      data = json.load(f)
+
+    self.assertEqual(data["status"], "DRY_RUN")
+    self.assertEqual(data["project"], "rbe-tpu-oss")
+
+    # The literal count moves whenever anyone adds a tagged test, so check the
+    # things that must hold instead: the banner agrees with the summary, and
+    # the suite is not empty.
+    count_match = re.search(r"Target Count:\s+(\d+)", proc.stdout)
+    self.assertIsNotNone(count_match, proc.stdout)
+    self.assertEqual(int(count_match.group(1)), data["total_targets"])
+    self.assertGreater(data["total_targets"], 0)
+
+    # One chip per VM, so anything asking for a full 8-chip pod must be
+    # filtered out before bazel ever sees it.
+    self.assertIn("-requires-tpu-v5lite:8", proc.stdout)
+    resolved = {t["target"] for t in data["targets"]}
+    self.assertNotIn("//tests/distributed:torchcomm_multi_tpu_test", resolved)
+
+    # The plan is generated from the same list main() passes to bazel, so this
+    # also proves the real invocation keeps compilation eligible for RBE.
+    self.assertIn("--strategy=TestRunner=local", proc.stdout)
+    self.assertNotIn("--spawn_strategy", proc.stdout)
 
   def test_pipeline_mock_execution_pass(self):
     env = self._mock_env(
@@ -1186,3 +1190,109 @@ class PoolSessionSummaryTest(
       data = json.load(f)
     self.assertEqual(data["tpu_vm"], "1 VM pool")
     self.assertEqual(data["tpu_vms"], ["spot-tpu-v5e-1-a"])
+
+
+class BazelFlagPassthroughTest(PipelineMockToolchainTestCase):
+  """--bazel-flag has to reach both bazel invocations, not just the test one.
+
+  The ci configs chain down to --config=resultstore_base, which uploads build
+  events to an instance only the CI service account can write to. A Googler
+  running the relay by hand needs a way to switch that upload back off, and it
+  has to apply to the build as well: the build runs first, and its failed
+  upload sinks the run before a single test starts.
+  """
+
+  LOGGING_BAZEL = """
+log="${BAZEL_ARGV_LOG}"
+printf '%s\\n' "$*" >> "$log"
+if [[ "$1" == "query" ]]; then
+  echo "//tests:empty_test"
+  exit 0
+fi
+echo "//tests:empty_test PASSED in 0.4s"
+exit 0
+"""
+
+  def _run(self, *extra_args):
+    env = self._mock_env("flag_bin", self.LOGGING_BAZEL)
+    self.argv_log = os.path.join(self.tmp_dir, "bazel_argv.log")
+    env["BAZEL_ARGV_LOG"] = self.argv_log
+    proc = subprocess.run(
+        [
+            RUNNER_SCRIPT,
+            f"--output-dir={self.output_dir}",
+            "--targets=//tests:empty_test",
+            *extra_args,
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+    )
+    self.assertEqual(proc.returncode, 0, proc.stderr)
+    return proc
+
+  def _invocation(self, verb):
+    with open(self.argv_log) as f:
+      calls = [line.rstrip("\n") for line in f]
+    matching = [call for call in calls if call.startswith(f"{verb} ")]
+    self.assertEqual(len(matching), 1, f"expected one `bazel {verb}`: {calls}")
+    return matching[0]
+
+  def test_an_extra_flag_reaches_the_build(self):
+    self._run("--bazel-flag=--bes_backend=")
+    self.assertIn("--bes_backend=", self._invocation("build"))
+
+  def test_an_extra_flag_reaches_the_test_run(self):
+    self._run("--bazel-flag=--bes_backend=")
+    self.assertIn("--bes_backend=", self._invocation("test"))
+
+  def test_the_flag_is_optional(self):
+    self._run()
+    self.assertNotIn("--bes_backend=", self._invocation("build"))
+    self.assertNotIn("--bes_backend=", self._invocation("test"))
+
+  def test_flags_repeat(self):
+    self._run("--bazel-flag=--bes_backend=", "--bazel-flag=--verbose_failures")
+    for verb in ("build", "test"):
+      with self.subTest(verb=verb):
+        self.assertIn("--bes_backend=", self._invocation(verb))
+        self.assertIn("--verbose_failures", self._invocation(verb))
+
+  def test_the_space_separated_spelling_works_too(self):
+    self._run("--bazel-flag", "--bes_backend=")
+    self.assertIn("--bes_backend=", self._invocation("test"))
+
+  def test_an_extra_flag_lands_after_the_config_it_overrides(self):
+    """Bazel takes the last value of a repeated flag, so order decides who wins.
+
+    A flag placed before --config would be overwritten by whatever that config
+    expands to.
+    """
+    self._run("--bazel-config=ci_tpu_v5_relay", "--bazel-flag=--bes_backend=")
+    for verb in ("build", "test"):
+      with self.subTest(verb=verb):
+        call = self._invocation(verb)
+        self.assertLess(
+            call.index("--config=ci_tpu_v5_relay"),
+            call.index("--bes_backend="),
+            call,
+        )
+
+  def test_a_missing_value_is_an_error(self):
+    env = self._mock_env("missing_bin", self.LOGGING_BAZEL)
+    proc = subprocess.run(
+        [RUNNER_SCRIPT, "--bazel-flag"],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+    )
+    self.assertNotEqual(proc.returncode, 0)
+    self.assertIn("--bazel-flag requires an argument", proc.stderr)
+
+  def test_the_dry_run_plan_shows_it(self):
+    proc = self._run("--dry-run", "--bazel-flag=--bes_backend=")
+    self.assertIn("--bes_backend=", proc.stdout)

@@ -58,6 +58,8 @@ CLI_DRY_RUN=false
 CLI_SKIP_HEAD_CHECK=false
 CLI_NO_REPORT=false
 CLI_ADD_LABEL=false
+CLI_UPLOAD_RESULTS=false
+CLI_BAZEL_FLAGS=()
 
 # Set once the pending status is published, so the exit trap knows it owes the
 # PR a terminal state.
@@ -92,6 +94,12 @@ Options:
                         attached. Never set this above the VM count.
   --bazel-config NAME   Default: ci_tpu_v5_relay, which sends compile actions
                         to RBE. Pass "" for a plain local build.
+  --bazel-flag FLAG     Extra bazel flag for the relay's build and test runs.
+                        Repeatable.
+  --upload-results      Send build events to ResultStore. Off by default: the
+                        ci configs point at the ml-oss-rbe-testing instance,
+                        which a personal Google account cannot write to, and
+                        the failed upload sinks an otherwise green run.
   --output-dir DIR      Report destination.
                         Default: relay_reports/pr<N>_<timestamp>
   --add-label           Add the mode's label to the PR before running.
@@ -127,6 +135,9 @@ parse_args() {
       --jobs=*) CLI_JOBS="${1#*=}"; shift ;;
       --bazel-config) [[ $# -ge 2 ]] || die "--bazel-config requires an argument."; CLI_BAZEL_CONFIG="$2"; shift 2 ;;
       --bazel-config=*) CLI_BAZEL_CONFIG="${1#*=}"; shift ;;
+      --bazel-flag) [[ $# -ge 2 ]] || die "--bazel-flag requires an argument."; CLI_BAZEL_FLAGS+=("$2"); shift 2 ;;
+      --bazel-flag=*) CLI_BAZEL_FLAGS+=("${1#*=}"); shift ;;
+      --upload-results) CLI_UPLOAD_RESULTS=true; shift ;;
       --output-dir) [[ $# -ge 2 ]] || die "--output-dir requires an argument."; CLI_OUTPUT_DIR="$2"; shift 2 ;;
       --output-dir=*) CLI_OUTPUT_DIR="${1#*=}"; shift ;;
       --add-label) CLI_ADD_LABEL=true; shift ;;
@@ -394,6 +405,18 @@ remember that those VMs bill until deleted."
     --jobs "$jobs"
   )
   [[ -z "$CLI_BAZEL_CONFIG" ]] || relay_args+=(--bazel-config "$CLI_BAZEL_CONFIG")
+  # The ci configs chain down to --config=resultstore_base, which uploads build
+  # events to the ml-oss-rbe-testing instance. Only the CI service account can
+  # write there; for anyone else the upload fails after the tests have already
+  # passed and bazel still exits non-zero. Clearing the backend drops the upload
+  # and leaves the run itself alone.
+  if [[ "$CLI_UPLOAD_RESULTS" != "true" ]]; then
+    relay_args+=(--bazel-flag "--bes_backend=")
+  fi
+  local extra_flag
+  for extra_flag in ${CLI_BAZEL_FLAGS[@]+"${CLI_BAZEL_FLAGS[@]}"}; do
+    relay_args+=(--bazel-flag "$extra_flag")
+  done
 
   local relay_rc=0
   "$RELAY" "${relay_args[@]}" || relay_rc=$?

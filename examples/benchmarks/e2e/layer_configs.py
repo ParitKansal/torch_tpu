@@ -216,6 +216,36 @@ BATCHNORM2D_TIMM_CONFIGS = (
 
 
 @dataclasses.dataclass
+class AvgPool1dConfig:
+  batch_size: int
+  channels: int
+  length: int
+  kernel_size: int
+  stride: int
+  padding: int
+
+
+AVGPOOL1D_CONFIGS = (
+    AvgPool1dConfig(
+        batch_size=16,
+        channels=256,
+        length=1024,
+        kernel_size=2,
+        stride=2,
+        padding=0,
+    ),
+    AvgPool1dConfig(
+        batch_size=16,
+        channels=512,
+        length=512,
+        kernel_size=2,
+        stride=2,
+        padding=0,
+    ),
+)
+
+
+@dataclasses.dataclass
 class AvgPool2dConfig:
   batch_size: int
   channels: int
@@ -284,6 +314,42 @@ SELECT_ADAPTIVE_POOL2D_TIMM_CONFIGS = (
 
 
 @dataclasses.dataclass
+class AvgPool3dConfig:
+  batch_size: int
+  channels: int
+  depth: int
+  height: int
+  width: int
+  kernel_size: int
+  stride: int
+  padding: int
+
+
+AVGPOOL3D_CONFIGS = (
+    AvgPool3dConfig(
+        batch_size=8,
+        channels=64,
+        depth=16,
+        height=28,
+        width=28,
+        kernel_size=2,
+        stride=2,
+        padding=0,
+    ),
+    AvgPool3dConfig(
+        batch_size=8,
+        channels=128,
+        depth=8,
+        height=14,
+        width=14,
+        kernel_size=2,
+        stride=2,
+        padding=0,
+    ),
+)
+
+
+@dataclasses.dataclass
 class AdaptiveAvgPool2dConfig:
   batch_size: int
   channels: int
@@ -295,6 +361,23 @@ class AdaptiveAvgPool2dConfig:
 ADAPTIVE_AVG_POOL2D_TIMM_CONFIGS = (
     AdaptiveAvgPool2dConfig(
         batch_size=16, channels=2048, height=7, width=7, output_size=1
+    ),
+)
+
+
+@dataclasses.dataclass
+class AdaptiveAvgPool3dConfig:
+  batch_size: int
+  channels: int
+  depth: int
+  height: int
+  width: int
+  output_size: int = 1
+
+
+ADAPTIVE_AVG_POOL3D_CONFIGS = (
+    AdaptiveAvgPool3dConfig(
+        batch_size=8, channels=256, depth=4, height=7, width=7, output_size=1
     ),
 )
 
@@ -334,6 +417,39 @@ BOTTLENECK_TIMM_CONFIGS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# MaxPool Benchmark Configurations (1D, 2D, 3D)
+#
+# All three configurations share identical activation volumes:
+#   batch_size = 16, channels = 64, total spatial elements = 12,544
+#   (1D: length=12544; 2D: 112x112=12544; 3D: 16x28x28=12544)
+# with kernel_size=3, stride=2, padding=1 to enable apples-to-apples
+# performance comparisons across spatial dimensionalities.
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class MaxPool1dConfig:
+  batch_size: int
+  channels: int
+  length: int
+  kernel_size: int
+  stride: int
+  padding: int
+
+
+MAXPOOL1D_TIMM_CONFIGS = (
+    MaxPool1dConfig(
+        batch_size=16,
+        channels=64,
+        length=12544,
+        kernel_size=3,
+        stride=2,
+        padding=1,
+    ),
+)
+
+
 @dataclasses.dataclass
 class MaxPool2dConfig:
   batch_size: int
@@ -351,6 +467,32 @@ MAXPOOL2D_TIMM_CONFIGS = (
         channels=64,
         height=112,
         width=112,
+        kernel_size=3,
+        stride=2,
+        padding=1,
+    ),
+)
+
+
+@dataclasses.dataclass
+class MaxPool3dConfig:
+  batch_size: int
+  channels: int
+  depth: int
+  height: int
+  width: int
+  kernel_size: int
+  stride: int
+  padding: int
+
+
+MAXPOOL3D_TIMM_CONFIGS = (
+    MaxPool3dConfig(
+        batch_size=16,
+        channels=64,
+        depth=16,
+        height=28,
+        width=28,
         kernel_size=3,
         stride=2,
         padding=1,

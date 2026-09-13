@@ -98,14 +98,8 @@ bool IsFutureReady(const SharedLoadedExecutableWithMetadataFuture& future) {
 // the environment variable is only read once.
 [[nodiscard]] int GetNumProcs() {
   static const int num_procs = [] {
-    const auto& env_var = GetEnvOnce<kNprocEnvVar>();
-    if (env_var.has_value()) {
-      int num_proc;
-      if (absl::SimpleAtoi(*env_var, &num_proc) && num_proc > 0) {
-        return num_proc;
-      }
-    }
-    return 0;
+    const auto env_var = GetIntegerEnvOnce<int, kNprocEnvVar>();
+    return (env_var.has_value() && *env_var > 0) ? *env_var : 0;
   }();
   return num_procs;
 }

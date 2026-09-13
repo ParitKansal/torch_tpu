@@ -21,8 +21,10 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 #include "absl/base/no_destructor.h"
+#include "absl/strings/numbers.h"
 #include "c10/util/Exception.h"
 #include "csrc/common/constexpr_map.h"
 #include "csrc/common/symbol_stage.h"
@@ -207,7 +209,11 @@ inline constexpr auto kEnvVarToStage =
         {kLocalRankEnvVar, SymbolStage::Stable()},
         {kMasterAddrEnvVar, std::nullopt},
         {kMasterPortEnvVar, std::nullopt},
-        {kNprocEnvVar, std::nullopt},
+        // Marked as Internal because it is an internal build/test runner
+        // environment variable used to adjust compilation thread concurrency,
+        // controlling TorchTPU internal behavior rather than serving as a
+        // public API contract.
+        {kNprocEnvVar, SymbolStage::InternalApi()},
         {kRankEnvVar, std::nullopt},
         {kTmpdirEnvVar, SymbolStage::Stable()},
         {kTorchShowCppStacktracesEnvVar, SymbolStage::Experimental()},
@@ -274,7 +280,7 @@ void SetEnv(const std::string& value) {
 // individually. The name must be one of the kFooEnvVar variables defined in
 // this file.
 template <const char* name>
-const std::optional<std::string>& GetEnvOnce() {
+[[nodiscard]] const std::optional<std::string>& GetEnvOnce() {
   static_assert(kEnvVarToStage.contains(name),
                 "Unknown environment variable. All env vars used by TorchTPU "
                 "must be registered in kEnvVarToStage.");
@@ -311,6 +317,57 @@ const std::optional<std::string>& GetEnvOnce() {
         return std::string(env_var);
       }());
   return *env_var;
+}
+
+// Returns the boolean value of the environment variable with the given name, or
+// std::nullopt if it is not set or cannot be parsed as a Boolean.
+//
+// This function delegates to GetEnvOnce() to read the environment variable, and
+// then parses the string into a Boolean using absl::SimpleAtob.
+template <const char* name>
+[[nodiscard]] std::optional<bool> GetBooleanEnvOnce() {
+  // Compute the value once and memoize it.
+  static const std::optional<bool> value = []() -> std::optional<bool> {
+    const auto& env_var = GetEnvOnce<name>();
+    if (!env_var.has_value()) {
+      return std::nullopt;
+    }
+    bool result = false;
+    if (absl::SimpleAtob(*env_var, &result)) {
+      return result;
+    }
+    TORCH_WARN_ONCE("expected environment variable ", name,
+                    " to be a Boolean (e.g., '1', '0', 'true', 'false'), got '",
+                    *env_var, "'");
+    return std::nullopt;
+  }();
+  return value;
+}
+
+// Returns the integer value of the environment variable with the given name, or
+// std::nullopt if it is not set or cannot be parsed as an integer.
+//
+// This function delegates to GetEnvOnce() to read the environment variable, and
+// then parses the string into an integer using absl::SimpleAtoi.
+template <typename IntType, const char* name>
+[[nodiscard]] std::optional<IntType> GetIntegerEnvOnce() {
+  static_assert(std::is_integral_v<IntType> && !std::is_same_v<IntType, bool>,
+                "IntType must be a non-boolean integral type.");
+  // Compute the value once and memoize it.
+  static const std::optional<IntType> value = []() -> std::optional<IntType> {
+    const auto& env_var = GetEnvOnce<name>();
+    if (!env_var.has_value()) {
+      return std::nullopt;
+    }
+    IntType result = 0;
+    if (absl::SimpleAtoi(*env_var, &result)) {
+      return result;
+    }
+    TORCH_WARN_ONCE("expected environment variable ", name,
+                    " to be an integer, got '", *env_var, "'");
+    return std::nullopt;
+  }();
+  return value;
 }
 
 }  // namespace torch_tpu

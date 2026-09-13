@@ -211,13 +211,12 @@ at::Tensor AtenSparseDenseMatmulGradWithSgd(
                            torch_tpu::ConvertTo<mlir::ElementType>(
                                embedding_table.scalar_type()));
 
-        TT_ASSIGN_OR_THROW(auto results,
-                           (torch_tpu::DispatchOp<7, 1>(
-                               builder_fn, inputs,
-                               {.out_dtype = out_dtype,
-                                .out_dims = out_dims,
-                                .op_param_cache_keys = std::move(param_keys),
-                                .donated_indices = {4}})));
+        TT_ASSIGN_OR_THROW(
+            auto results, (torch_tpu::DispatchOp<7, 1>(
+                              builder_fn, inputs,
+                              {.out_dtype = out_dtype,
+                               .out_dims = out_dims,
+                               .op_param_cache_keys = std::move(param_keys)})));
 
         return torch_tpu::MakeTensor(results);
       });

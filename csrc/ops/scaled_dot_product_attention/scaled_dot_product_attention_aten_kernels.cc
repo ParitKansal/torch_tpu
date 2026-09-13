@@ -298,18 +298,20 @@ AtenScaledDotProductEfficientAttention(
     const std::optional<at::Tensor>& attn_bias, bool compute_log_sumexp,
     double dropout_p, bool is_causal, std::optional<double> scale) {
   TT_KERNEL(OpName::kScaledDotProductEfficientAttention, _,
-            (query, key, value, IgnoreInCacheKey(attn_bias, "Unused"),
-             IgnoreInCacheKey(compute_log_sumexp, "Unused"),
+            (query, key, value,
+             IgnoreInCacheKey(attn_bias, "Delegates to implementation"),
+             IgnoreInCacheKey(compute_log_sumexp,
+                              "Delegates to CreateFlashAttentionKernel"),
              IgnoreInCacheKey(dropout_p, "Unused"),
              IgnoreInCacheKey(is_causal, "Delegates to implementation"),
              IgnoreInCacheKey(scale, "Delegates to implementation")),
             {
-              // Unused arguments: attn_bias, compute_log_sumexp, dropout_p,
-              // scale.
-              TT_ASSIGN_OR_THROW(auto results, CreateFlashAttentionKernel(
-                                                   query, key, value, attn_bias,
-                                                   is_causal, scale));
-              auto [out, logsumexp] = results;
+              // Unused arguments: dropout_p.
+              TT_ASSIGN_OR_THROW(auto results,
+                                 CreateFlashAttentionKernel(
+                                     query, key, value, attn_bias, is_causal,
+                                     scale, compute_log_sumexp));
+              auto [out, logsumexp] = std::move(results);
               at::Tensor philox_seed =
                   at::zeros({1}, query.options().dtype(at::kLong));
               at::Tensor philox_offset =

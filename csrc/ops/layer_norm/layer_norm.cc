@@ -16,6 +16,7 @@
 
 #include "csrc/ops/layer_norm/layer_norm.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -26,17 +27,69 @@
 #include "csrc/common/error_utils.h"
 #include "csrc/common/to_string.h"
 #include "csrc/ops/op_builder_utils.h"
-#include "csrc/ops/reductions/reductions.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Support/LLVM.h"
 #include "stablehlo/dialect/StablehloOps.h"
-#include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
 #include "stablehlo/integrations/cpp/builder/MlirBuilder.h"
 #include "stablehlo/integrations/cpp/builder/StablehloBuilder.h"
 
 namespace torch_tpu {
+
+namespace {
+
+struct TwoMoments {
+  mlir::MlirOp mean;
+  mlir::MlirOp mean_squared;
+};
+
+absl::StatusOr<TwoMoments> ComputeTwoMoments(
+    const mlir::RankedTensorType& input_type, mlir::MlirOp input_casted,
+    mlir::MlirOp sum_x, mlir::MlirOp sum_x_squared,
+    const Dimensions& reduction_axes, mlir::Type stats_type) {
+  bool has_dynamic_reduction_dim = false;
+  int64_t num_elements = 1;
+  const auto shape = input_type.getShape();
+  for (const int64_t dim_idx : reduction_axes) {
+    if (input_type.isDynamicDim(dim_idx)) {
+      has_dynamic_reduction_dim = true;
+      break;
+    }
+    TT_ASSIGN_OR_RETURN(num_elements,
+                        SafeMultiply(num_elements, shape[dim_idx]));
+  }
+
+  if (!has_dynamic_reduction_dim) {
+    mlir::MlirOp inv_num_elements =
+        MakeConstantLike(sum_x, 1.0 / static_cast<double>(num_elements));
+    return TwoMoments{
+        .mean = mlir::stablehlo::Mul(sum_x, inv_num_elements),
+        .mean_squared = mlir::stablehlo::Mul(sum_x_squared, inv_num_elements),
+    };
+  }
+
+  mlir::MlirOp count_op;
+  for (size_t i = 0; i < reduction_axes.size(); ++i) {
+    const int64_t dim_idx = reduction_axes[i];
+    mlir::MlirOp dim_size =
+        mlir::stablehlo::GetDimensionSize(input_casted, dim_idx);
+    dim_size = mlir::stablehlo::ConvertElementType(dim_size, stats_type);
+    if (i == 0) {
+      count_op = dim_size;
+    } else {
+      count_op = mlir::stablehlo::Mul(count_op, dim_size);
+    }
+  }
+  count_op =
+      mlir::stablehlo::BroadcastInDim(GetTensorTypeOrDie(sum_x), count_op, {});
+  return TwoMoments{
+      .mean = mlir::stablehlo::Div(sum_x, count_op),
+      .mean_squared = mlir::stablehlo::Div(sum_x_squared, count_op),
+  };
+}
+
+}  // namespace
 
 // This layer implements the operation as described:
 //
@@ -50,69 +103,6 @@ namespace torch_tpu {
 //
 // gamma (weight_op) and beta (bias_op) are learnable affine transform
 // parameters of shape normalized_shape.
-
-namespace {
-
-void BuildWelfordReductionBody(mlir::FloatType element_type,
-                               mlir::RegionBuilder& builder) {
-  mlir::RankedTensorType scalar_type =
-      mlir::RankedTensorType::get({}, element_type);
-
-  // 3 args for lhs (accumulators), 3 args for rhs (inputs)
-  // Layout: lhs_count, lhs_mean, lhs_m2, rhs_count, rhs_mean, rhs_m2
-  mlir::MlirOp n_a = mlir::Argument(builder, scalar_type);
-  mlir::MlirOp mu_a = mlir::Argument(builder, scalar_type);
-  mlir::MlirOp m2_a = mlir::Argument(builder, scalar_type);
-  mlir::MlirOp n_b = mlir::Argument(builder, scalar_type);
-  mlir::MlirOp mu_b = mlir::Argument(builder, scalar_type);
-  mlir::MlirOp m2_b = mlir::Argument(builder, scalar_type);
-
-  // n = n_a + n_b
-  mlir::MlirOp n = mlir::stablehlo::Add(n_a, n_b);
-
-  // delta = mu_b - mu_a
-  mlir::MlirOp delta = mlir::stablehlo::Subtract(mu_b, mu_a);
-
-  // delta_sq = delta * delta
-  mlir::MlirOp delta_sq = mlir::stablehlo::Mul(delta, delta);
-
-  // n_a * n_b
-  mlir::MlirOp na_nb = mlir::stablehlo::Mul(n_a, n_b);
-
-  // Guard against n=0 to avoid NaN from 0/0 division.
-  // We need to create constants 0 and 1 with the correct floating-point
-  // semantics.
-  const llvm::fltSemantics& semantics = element_type.getFloatSemantics();
-  mlir::MlirOp zero = MakeConstantLike(n, llvm::APFloat(semantics, "0"));
-  mlir::MlirOp one = MakeConstantLike(n, llvm::APFloat(semantics, "1"));
-
-  mlir::MlirOp n_is_zero = mlir::stablehlo::Compare(
-      n, zero, mlir::stablehlo::ComparisonDirection::EQ);
-  mlir::MlirOp safe_n = mlir::stablehlo::Select(n_is_zero, one, n);
-
-  // term = delta^2 * (n_a * n_b) / n
-  mlir::MlirOp term_num = mlir::stablehlo::Mul(delta_sq, na_nb);
-  mlir::MlirOp term = mlir::stablehlo::Div(term_num, safe_n);
-
-  // M2 = M2_a + M2_b + term
-  mlir::MlirOp m2_sum = mlir::stablehlo::Add(m2_a, m2_b);
-  mlir::MlirOp m2 = mlir::stablehlo::Add(m2_sum, term);
-
-  // mu = mu_a + delta * (n_b / n)
-  mlir::MlirOp nb_div_n = mlir::stablehlo::Div(n_b, safe_n);
-  mlir::MlirOp delta_scaled = mlir::stablehlo::Mul(delta, nb_div_n);
-  mlir::MlirOp mu = mlir::stablehlo::Add(mu_a, delta_scaled);
-
-  // If n=0, we want to return the identity (0, 0, 0).
-  // The calculations above might produce non-zero or garbage if n=0 but we
-  // masked the div. However, if n=0, then n_a=0 and n_b=0. term_num = 0
-  // (since na_nb=0). term = 0. nb_div_n = 0 / 1 = 0. delta_scaled = 0. m2 = 0
-  // + 0 + 0 = 0. mu = 0 + 0 = 0. So the result is correctly (0, 0, 0) with
-  // safe_n.
-  mlir::stablehlo::Return(builder, {n, mu, m2});
-}
-
-}  // namespace
 
 absl::StatusOr<LayerNormShloResults> BuildLayerNormShlo(
     mlir::MlirOp input_op, std::optional<mlir::MlirOp> weight_op,
@@ -128,11 +118,12 @@ absl::StatusOr<LayerNormShloResults> BuildLayerNormShlo(
     absl::c_iota(unreduced_axes, 0);
   }
 
-  // Compute mean and variance by summing over the reduction axes.
-  // We compute sum(x) and sum(x^2) in a single reduction to avoid reading the
-  // input twice.
+  // Compute mean and variance using the two-moment formulation:
+  //   E[x] = sum(x) / N
+  //   Var[x] = max(0, sum(x^2) / N - (E[x])^2)
+  // XLA fusions combine the two sum reductions into a single loop over input.
   mlir::MlirBuilder& builder = input_op.getBuilder();
-  mlir::Type element_type = input_type.getElementType();
+  const mlir::Type element_type = input_type.getElementType();
   TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=AtenNativeLayerNorm (caller) already
                  // runs this check.
       element_type.isFloat(), error::kInvalidArgument)
@@ -147,57 +138,59 @@ absl::StatusOr<LayerNormShloResults> BuildLayerNormShlo(
     input_casted = mlir::stablehlo::ConvertElementType(input_op, stats_type);
   }
 
-  mlir::FloatType stats_float_type = mlir::cast<mlir::FloatType>(stats_type);
-  auto stats_tensor_type =
+  const mlir::FloatType stats_float_type =
+      mlir::cast<mlir::FloatType>(stats_type);
+  const auto stats_tensor_type =
       mlir::RankedTensorType::get(input_type.getShape(), stats_type);
 
-  // Welford's algorithm inputs:
-  // 1. Counts: All 1s (shape of input)
-  // 2. Means: The input itself
-  // 3. M2s: All 0s (shape of input)
-  mlir::MlirOp one = MakeScalarConstant(builder, 1.0, stats_float_type);
-  mlir::MlirOp zero = MakeScalarConstant(builder, 0.0, stats_float_type);
+  const mlir::MlirOp x_squared =
+      mlir::stablehlo::Mul(input_casted, input_casted);
+  const mlir::MlirOp zero = MakeScalarConstant(builder, 0.0, stats_float_type);
+  const mlir::RankedTensorType scalar_stats_type =
+      mlir::RankedTensorType::get({}, stats_float_type);
+  const auto moments_reduce_builder =
+      [scalar_stats_type](mlir::RegionBuilder& rb) {
+        mlir::MlirOp acc_x = mlir::Argument(rb, scalar_stats_type);
+        mlir::MlirOp acc_x2 = mlir::Argument(rb, scalar_stats_type);
+        mlir::MlirOp val_x = mlir::Argument(rb, scalar_stats_type);
+        mlir::MlirOp val_x2 = mlir::Argument(rb, scalar_stats_type);
 
-  // We prepare matching input tensors for Welford's algorithm:
-  // 'counts' (all 1s) and 'm2s' (all 0s) are broadcasted to the full input
-  // shape (stats_tensor_type) to correspond with 'input_casted'.
-  mlir::MlirOp counts =
-      mlir::stablehlo::BroadcastInDim(stats_tensor_type, one, {});
-  mlir::MlirOp m2s =
-      mlir::stablehlo::BroadcastInDim(stats_tensor_type, zero, {});
+        mlir::MlirOp new_acc_x = mlir::stablehlo::Add(acc_x, val_x);
+        mlir::MlirOp new_acc_x2 = mlir::stablehlo::Add(acc_x2, val_x2);
 
-  // Initial values for reduction (identity):
-  // Count = 0, Mean = 0, M2 = 0
-  mlir::MlirOp init_count = MakeScalarConstant(builder, 0.0, stats_float_type);
-  mlir::MlirOp init_mean = MakeScalarConstant(builder, 0.0, stats_float_type);
-  mlir::MlirOp init_m2 = MakeScalarConstant(builder, 0.0, stats_float_type);
+        mlir::stablehlo::Return(rb, {new_acc_x, new_acc_x2});
+      };
 
-  auto reduce_builder = [stats_float_type](mlir::RegionBuilder& rb) {
-    BuildWelfordReductionBody(stats_float_type, rb);
-  };
+  const auto results =
+      mlir::stablehlo::Reduce(builder, {input_casted, x_squared}, {zero, zero},
+                              moments_reduce_builder, reduction_axes);
+  const mlir::MlirOp sum_x = results[0];
+  const mlir::MlirOp sum_x_squared = results[1];
 
-  auto results = mlir::stablehlo::Reduce(builder, {counts, input_casted, m2s},
-                                         {init_count, init_mean, init_m2},
-                                         reduce_builder, reduction_axes);
+  TT_ASSIGN_OR_RETURN(
+      const auto moments,
+      ComputeTwoMoments(input_type, input_casted, sum_x, sum_x_squared,
+                        reduction_axes, stats_type));
+  mlir::MlirOp mean = moments.mean;
+  mlir::MlirOp mean_squared = moments.mean_squared;
 
-  mlir::MlirOp total_count = results[0];
-  mlir::MlirOp mean = results[1];
-  mlir::MlirOp total_m2 = results[2];
+  mlir::MlirOp mean_sq = mlir::stablehlo::Mul(mean, mean);
+  mlir::MlirOp variance = mlir::stablehlo::Subtract(mean_squared, mean_sq);
 
-  // Variance = M2 / n
-  mlir::MlirOp variance = mlir::stablehlo::Div(total_m2, total_count);
+  // Clamp variance to 0 to prevent negative variance due to floating-point
+  // rounding.
+  mlir::MlirOp zero_var = MakeConstantLike(variance, 0.0);
+  variance = mlir::stablehlo::Max(variance, zero_var);
+
+  mlir::MlirOp eps_op = MakeConstantLike(variance, eps);
+  mlir::MlirOp variance_plus_eps = mlir::stablehlo::Add(variance, eps_op);
+  mlir::MlirOp rstd = mlir::stablehlo::Rsqrt(variance_plus_eps);
 
   mlir::MlirOp mean_broadcasted =
       mlir::stablehlo::BroadcastInDim(stats_tensor_type, mean, unreduced_axes);
   mlir::MlirOp input_minus_mean =
       mlir::stablehlo::Subtract(input_casted, mean_broadcasted);
 
-  // Compute reciprocal standard deviation by taking the reciprocal square root
-  // of the variance + eps.
-
-  mlir::MlirOp eps_op = MakeConstantLike(variance, eps);
-  mlir::MlirOp variance_plus_eps = mlir::stablehlo::Add(variance, eps_op);
-  mlir::MlirOp rstd = mlir::stablehlo::Rsqrt(variance_plus_eps);
   mlir::MlirOp rstd_broadcasted =
       mlir::stablehlo::BroadcastInDim(stats_tensor_type, rstd, unreduced_axes);
 
@@ -207,7 +200,6 @@ absl::StatusOr<LayerNormShloResults> BuildLayerNormShlo(
 
   // Compute affine output by multiplying normalized input by gamma and adding
   // beta.
-
   mlir::MlirOp normalized_input_casted = normalized_input;
   if (stats_type != element_type) {
     normalized_input_casted =

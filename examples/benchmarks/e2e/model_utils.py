@@ -1103,6 +1103,30 @@ def ml_layer_model_builder(
         torch.randn(src_shape, dtype=weights_dtype, device=device),
     )
 
+  elif model_name == "nn.AvgPool1d":
+    kernel_size = kwargs["kernel_size"]
+    stride = kwargs["stride"]
+    padding = kwargs["padding"]
+    channels = kwargs["channels"]
+    length = kwargs["length"]
+
+    class AvgPool1dModel(torch.nn.Module):
+
+      def __init__(self, kernel_size, stride, padding):
+        super().__init__()
+        self.pool = torch.nn.AvgPool1d(
+            kernel_size, stride=stride, padding=padding, ceil_mode=True
+        )
+
+      def forward(self, x):
+        return self.pool(x)
+
+    model = AvgPool1dModel(kernel_size, stride, padding)
+    example_inputs = torch.randn(
+        (batch_size, channels, length),
+        dtype=weights_dtype,
+        device=device,
+    )
   elif model_name == "nn.AvgPool2d":
     kernel_size = kwargs["kernel_size"]
     stride = kwargs["stride"]
@@ -1128,6 +1152,32 @@ def ml_layer_model_builder(
         dtype=weights_dtype,
         device=device,
     )
+  elif model_name == "nn.AvgPool3d":
+    kernel_size = kwargs["kernel_size"]
+    stride = kwargs["stride"]
+    padding = kwargs["padding"]
+    channels = kwargs["channels"]
+    depth = kwargs["depth"]
+    height = kwargs["height"]
+    width = kwargs["width"]
+
+    class AvgPool3dModel(torch.nn.Module):
+
+      def __init__(self, kernel_size, stride, padding):
+        super().__init__()
+        self.pool = torch.nn.AvgPool3d(
+            kernel_size, stride=stride, padding=padding, ceil_mode=True
+        )
+
+      def forward(self, x):
+        return self.pool(x)
+
+    model = AvgPool3dModel(kernel_size, stride, padding)
+    example_inputs = torch.randn(
+        (batch_size, channels, depth, height, width),
+        dtype=torch.float32,
+        device=device,
+    )
   elif model_name == "nn.AdaptiveAvgPool2d":
     output_size = kwargs["output_size"]
     channels = kwargs["channels"]
@@ -1146,6 +1196,28 @@ def ml_layer_model_builder(
     model = AdaptiveAvgPool2dModel(output_size)
     example_inputs = torch.randn(
         (batch_size, channels, height, width),
+        dtype=weights_dtype,
+        device=device,
+    )
+  elif model_name == "nn.AdaptiveAvgPool3d":
+    output_size = kwargs["output_size"]
+    channels = kwargs["channels"]
+    depth = kwargs["depth"]
+    height = kwargs["height"]
+    width = kwargs["width"]
+
+    class AdaptiveAvgPool3dModel(torch.nn.Module):
+
+      def __init__(self, output_size):
+        super().__init__()
+        self.pool = torch.nn.AdaptiveAvgPool3d(output_size)
+
+      def forward(self, x):
+        return self.pool(x)
+
+    model = AdaptiveAvgPool3dModel(output_size)
+    example_inputs = torch.randn(
+        (batch_size, channels, depth, height, width),
         dtype=weights_dtype,
         device=device,
     )
@@ -1192,6 +1264,63 @@ def ml_layer_model_builder(
         (batch_size, channels, height, width),
         dtype=weights_dtype,
         device=device,
+        requires_grad=is_training,
+    )
+  elif model_name == "nn.MaxPool1d":
+    kernel_size = kwargs["kernel_size"]
+    stride = kwargs["stride"]
+    padding = kwargs["padding"]
+    channels = kwargs["channels"]
+    length = kwargs["length"]
+
+    class MaxPool1dModel(torch.nn.Module):
+      """1D max pooling benchmark wrapper module."""
+
+      def __init__(self, kernel_size, stride, padding):
+        super().__init__()
+        self.pool = torch.nn.MaxPool1d(
+            kernel_size, stride=stride, padding=padding
+        )
+
+      def forward(self, x):
+        return self.pool(x)
+
+    model = MaxPool1dModel(kernel_size, stride, padding)
+    # Generate 1D input tensor of shape (batch_size, channels, length)
+    example_inputs = torch.randn(
+        (batch_size, channels, length),
+        dtype=weights_dtype,
+        device=device,
+        requires_grad=is_training,
+    )
+  elif model_name == "nn.MaxPool3d":
+    kernel_size = kwargs["kernel_size"]
+    stride = kwargs["stride"]
+    padding = kwargs["padding"]
+    channels = kwargs["channels"]
+    depth = kwargs["depth"]
+    height = kwargs["height"]
+    width = kwargs["width"]
+
+    class MaxPool3dModel(torch.nn.Module):
+      """3D max pooling benchmark wrapper module."""
+
+      def __init__(self, kernel_size, stride, padding):
+        super().__init__()
+        self.pool = torch.nn.MaxPool3d(
+            kernel_size, stride=stride, padding=padding
+        )
+
+      def forward(self, x):
+        return self.pool(x)
+
+    model = MaxPool3dModel(kernel_size, stride, padding)
+    # Generate 3D input tensor of shape (batch_size, channels, depth, height, width)
+    example_inputs = torch.randn(
+        (batch_size, channels, depth, height, width),
+        dtype=weights_dtype,
+        device=device,
+        requires_grad=is_training,
     )
   elif model_name == "nn.ReLU":
     shape = kwargs["shape"]

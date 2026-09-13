@@ -44,15 +44,20 @@ absl::StatusOr<mlir::MlirOp> BuildHardsigmoidShlo(mlir::MlirOp input_op) {
   TT_ASSIGN_OR_RETURN(auto element_type,
                       ConvertTo<mlir::ElementType>(type.getElementType()));
 
-  // hardsigmoid(x) = clamp(0, x * (1/6) + 0.5, 1)
-  mlir::MlirOp zero = MakeConstantLike(input_op, 0.0, element_type);
-  mlir::MlirOp one_sixth = MakeConstantLike(input_op, 1.0 / 6.0, element_type);
-  mlir::MlirOp half = MakeConstantLike(input_op, 0.5, element_type);
-  mlir::MlirOp one = MakeConstantLike(input_op, 1.0, element_type);
+  TT_ASSIGN_OR_RETURN(auto compute_dtype, InferComputationDtype(element_type));
+  TT_ASSIGN_OR_RETURN(mlir::MlirOp x, CastIfNeeded(input_op, compute_dtype));
 
-  mlir::MlirOp x_scaled = mlir::stablehlo::Mul(input_op, one_sixth);
-  mlir::MlirOp x_shifted = mlir::stablehlo::Add(x_scaled, half);
-  return mlir::stablehlo::Clamp(zero, x_shifted, one);
+  // hardsigmoid(x) = clamp(0, x + 3, 6) * (1/6)
+  mlir::MlirOp zero = MakeConstantLike(x, 0.0, compute_dtype);
+  mlir::MlirOp three = MakeConstantLike(x, 3.0, compute_dtype);
+  mlir::MlirOp six = MakeConstantLike(x, 6.0, compute_dtype);
+  mlir::MlirOp one_sixth = MakeConstantLike(x, 1.0 / 6.0, compute_dtype);
+
+  mlir::MlirOp x_shifted = mlir::stablehlo::Add(x, three);
+  mlir::MlirOp clamped = mlir::stablehlo::Clamp(zero, x_shifted, six);
+  mlir::MlirOp result = mlir::stablehlo::Mul(clamped, one_sixth);
+
+  return CastIfNeeded(result, element_type);
 }
 
 absl::StatusOr<mlir::MlirOp> BuildHardsigmoidBackwardShlo(
@@ -61,22 +66,28 @@ absl::StatusOr<mlir::MlirOp> BuildHardsigmoidBackwardShlo(
   TT_ASSIGN_OR_RETURN(auto element_type,
                       ConvertTo<mlir::ElementType>(type.getElementType()));
 
+  TT_ASSIGN_OR_RETURN(auto compute_dtype, InferComputationDtype(element_type));
+  TT_ASSIGN_OR_RETURN(mlir::MlirOp g, CastIfNeeded(grad_output, compute_dtype));
+  TT_ASSIGN_OR_RETURN(mlir::MlirOp x, CastIfNeeded(self, compute_dtype));
+
   // grad = 1/6 if -3 < x < 3 else 0
-  mlir::MlirOp neg_three = MakeConstantLike(self, -3.0, element_type);
-  mlir::MlirOp three = MakeConstantLike(self, 3.0, element_type);
+  mlir::MlirOp neg_three = MakeConstantLike(x, -3.0, compute_dtype);
+  mlir::MlirOp three = MakeConstantLike(x, 3.0, compute_dtype);
 
   mlir::MlirOp cond_le = mlir::stablehlo::Compare(
-      self, neg_three, mlir::stablehlo::ComparisonDirection::LE);
+      x, neg_three, mlir::stablehlo::ComparisonDirection::LE);
   mlir::MlirOp cond_ge = mlir::stablehlo::Compare(
-      self, three, mlir::stablehlo::ComparisonDirection::GE);
+      x, three, mlir::stablehlo::ComparisonDirection::GE);
 
-  mlir::MlirOp zero = MakeConstantLike(self, 0.0, element_type);
-  mlir::MlirOp one_sixth = MakeConstantLike(self, 1.0 / 6.0, element_type);
+  mlir::MlirOp zero = MakeConstantLike(x, 0.0, compute_dtype);
+  mlir::MlirOp one_sixth = MakeConstantLike(x, 1.0 / 6.0, compute_dtype);
 
-  mlir::MlirOp mid_grad = mlir::stablehlo::Mul(grad_output, one_sixth);
+  mlir::MlirOp mid_grad = mlir::stablehlo::Mul(g, one_sixth);
 
   mlir::MlirOp out_of_bounds = mlir::stablehlo::Or(cond_le, cond_ge);
-  return mlir::stablehlo::Select(out_of_bounds, zero, mid_grad);
+  mlir::MlirOp result = mlir::stablehlo::Select(out_of_bounds, zero, mid_grad);
+
+  return CastIfNeeded(result, element_type);
 }
 
 }  // namespace

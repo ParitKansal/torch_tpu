@@ -22,8 +22,8 @@
 
 #include "absl/base/nullability.h"
 #include "absl/status/statusor.h"
+#include "csrc/common/env_vars.h"
 #include "csrc/common/error_utils.h"
-#include "csrc/distributed/slicebuilder/discovery.h"
 #include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 
@@ -46,7 +46,9 @@ absl::StatusOr<absl_nonnull std::unique_ptr<xla::PjRtClient>> GetPjRtClient(
   }
   if (device_type == "xla_cpu") {
     int64_t cpu_device_count = 1;
-    if (auto world_size_or = GetWorldSizeFromEnvOnce(); world_size_or.ok()) {
+    if (const auto& world_size_or =
+            GetRequiredIntegerEnvOnce<int, kWorldSizeEnvVar>();
+        world_size_or.ok()) {
       cpu_device_count = *world_size_or;
     }
     return xla::GetCApiClient("cpu", {{"cpu_device_count", cpu_device_count}});

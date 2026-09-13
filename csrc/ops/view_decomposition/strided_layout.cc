@@ -57,7 +57,8 @@ StridedLayout MakeContiguousBaseLayout(absl::Span<const int64_t> shape) {
 StridedLayout StridedLayout::FromTensor(const at::Tensor& tensor) {
   auto sizes = tensor.sizes();
   auto strides = tensor.strides();
-  StridedLayout layout{.storage_offset = tensor.storage_offset()};
+  StridedLayout layout{.storage_offset =
+                           tensor.sym_storage_offset().expect_int()};
   layout.strided_dims.reserve(tensor.dim());
   for (int i = 0; i < tensor.dim(); ++i) {
     layout.strided_dims.push_back(

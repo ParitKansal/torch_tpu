@@ -32,7 +32,6 @@ import torch
 from torch._dynamo.utils import dynamo_timed
 from torch._functorch._aot_autograd.schemas import AOTDispatchCompiler
 from torch._inductor.fx_passes import post_grad
-from torch._inductor.fx_passes import reinplace
 from torch._inductor.utils import InputType
 from torch._logging import trace_structured
 from torch._logging._internal import trace_log
@@ -459,7 +458,6 @@ class StaticCompiler(Compiler):
     This method performs the steps below. Steps 4-7 are executed asynchronously
     if `StaticCompiler` was initialized with `async_compile=True`:
     1.  Applies pre-compilation graph transformations:
-        -   Prepares auto functionalized ops and auto-detects donated inputs.
         -   Decomposes auto functionalized operations.
         -   Marks embedded constants.
     2.  Lints and recompiles the graph module.
@@ -492,12 +490,6 @@ class StaticCompiler(Compiler):
       `async_compiled=True`, otherwise `AsyncCompiledArtifact`), which can be
       called to execute the compiled graph on TPU.
     """  # fmt: skip
-    # Run PyTorch Inductor's reinplace pass to determine which mutable ops can
-    # safely execute in-place without defensive copies.
-    graph_transform_observer.GraphTransformObserver(
-        graph_module, "reinplace_inplaceable_ops"
-    ).apply_graph_pass(reinplace.reinplace_inplaceable_ops_core)
-
     # Decompose auto functionalized ops, we need to explicitly do this because
     # the default behaviour inserts flatten and unflatten ops at the boundaries
     # which then blocks buffer donation.

@@ -511,7 +511,7 @@ absl::Status DeviceGeneratorImpl::AdvanceDeviceStateTensor(int64_t num_elements,
     return BuildRngStateUpdateShlo(rng_input_state, num_elements, bit_width);
   };
   const OpSplitMode split_mode =
-      GetEnvOnce<kTorchTpuInternalSplitRngStateUpdate>().value_or("0") == "1"
+      GetBooleanEnvOnce<kTorchTpuInternalSplitRngStateUpdate>().value_or(false)
           ? OpSplitMode::kSplitBoth
           : OpSplitMode::kNone;
 

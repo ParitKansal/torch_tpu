@@ -244,7 +244,6 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/compile",
-        "//src/torch_tpu/_internal/compile:torch_tpu_compiled_executable",
         "//src/torch_tpu/_internal/device:_device_module",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/distributed/launchers:singlehost_wrapper",

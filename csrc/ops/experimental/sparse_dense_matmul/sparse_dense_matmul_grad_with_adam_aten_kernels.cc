@@ -351,8 +351,7 @@ AtenSparseDenseMatmulGradWithAdam(
             (DispatchOp<9, 3>(builder_fn, inputs,
                               {.out_dtypes = {out_dtype, out_dtype, vel_dtype},
                                .out_dims_list = {out_dims, out_dims, vel_dims},
-                               .op_param_cache_keys = std::move(param_keys),
-                               .donated_indices = {4, 5, 6}})));
+                               .op_param_cache_keys = std::move(param_keys)})));
 
         return std::make_tuple(MakeTensor(std::move(results[0])),
                                MakeTensor(std::move(results[1])),

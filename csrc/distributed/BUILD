@@ -286,7 +286,6 @@ torch_tpu_cc_library(
     deps = [
         "//csrc/common:env_vars",
         "@com_google_absl//absl/log:absl_log",
-        "@com_google_absl//absl/strings",
     ],
 )
 

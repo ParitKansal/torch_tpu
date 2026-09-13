@@ -1023,6 +1023,8 @@ class HandshakeTest(seed_test_utils.RepeatableTest):
         )
 
   @parameterized.parameters(0, 1)
+  # TODO(b/560244886): re-enable the test once deflaked in OSS.
+  @absltest.skip("zmq.error.Again: Resource temporarily unavailable")
   def test_handshake_request_matching(self, coordinator_rank: int) -> None:
     with mock.patch.dict(
         os.environ,
@@ -1129,6 +1131,8 @@ class HandshakeTest(seed_test_utils.RepeatableTest):
           8, test_wrapper, _run_mismatched_multi_frame_count_exhaustion
       )
 
+  # TODO(b/560244886): re-enable the test once deflaked in OSS.
+  @absltest.skip("zmq.error.Again: Resource temporarily unavailable")
   def test_target_count_increases_during_exhaustion(self) -> None:
     """Tests that when target_count increases during an exhaust round, lagging ranks are exhausted to the higher target count."""
     with mock.patch.dict(

@@ -18,21 +18,6 @@ on:
   # Allow manual runs from the Actions tab for testing
   workflow_dispatch:
     inputs:
-      ab_mode:
-        description: "Run A/B comparison (baseline vs experiment)."
-        required: false
-        type: boolean
-        default: false
-      baseline_ref:
-        description: "Git ref for the baseline in A/B mode. Defaults to PR base or main."
-        required: false
-        type: string
-        default: ""
-      experiment_ref:
-        description: "Git ref for the experiment in A/B mode. Defaults to current commit SHA."
-        required: false
-        type: string
-        default: ""
       benchmark_filter:
         description: "Regex to filter by benchmark name (e.g., 'test_qwen3.*')."
         required: false
@@ -48,22 +33,71 @@ on:
         required: false
         type: string
         default: "{}"
+      torch_tpu_wheel:
+        description: >-
+          gs:// path to an already-built torch_tpu wheel to benchmark. If empty,
+          build a fresh wheel from the selected ref. Otherwise, the provided
+          wheel is used for running the benchmarks.
+        required: false
+        type: string
+        default: ""
+      python_version:
+        description: >-
+          Python the wheel is built for and the benchmarks run under. One
+          value drives both, which is what keeps them consistent.
+        required: false
+        type: choice
+        default: "3.12"
+        # Keep in sync with SUPPORTED_PYTHON_VERSIONS in
+        # bazel/supported_python_versions.bzl.
+        options:
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
 
 permissions:
   contents: read
   pull-requests: write
 
 jobs:
+  build_wheel:
+    name: Build torch_tpu wheel
+    if: ${{ !inputs.torch_tpu_wheel }}
+    runs-on: linux-x86-n4-16
+    container:
+      image: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:480f397c57207671315a27173ccec790ea9c66ef030af96cbe6ac9b4a6613996"  # Tag infrastructure-public-image-2c74567ee8e0
+      # Disable ipc isolation to prevent shm limit issues.
+      options: --ipc=host
+    permissions:
+      contents: read
+    outputs:
+      gcs_wheel_path: ${{ steps.build.outputs.gcs_wheel_path }}
+    steps:
+      - name: Checkout TorchTPU
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Build and upload wheel
+        id: build
+        uses: ./.github/actions/build-wheel
+        with:
+          python_version: ${{ inputs.python_version }}
   run_benchmarks:
     name: Run TorchTPU benchmarks
+    needs: [build_wheel]
+    if: >-
+      !cancelled() &&
+      (needs.build_wheel.result == 'success' ||
+       needs.build_wheel.result == 'skipped')
     uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@aa854ba7bdb77966a9cc1a013417f1c1a208c4c0 # main
     with:
-      registry_file: "examples/benchmarks/benchmark_registry.pbtxt"
+      registry_file: "examples/benchmarks/e2e/harness/benchmark_registry.pbtxt"
       bap_ref: "aa854ba7bdb77966a9cc1a013417f1c1a208c4c0"
       runner: "linux-x86-n4-16"
-      ab_mode: ${{ inputs.ab_mode }}
-      baseline_ref: ${{ inputs.baseline_ref }}
-      experiment_ref: ${{ inputs.experiment_ref }}
       benchmark_filter: ${{ inputs.benchmark_filter }}
       environment_filter: ${{ inputs.environment_filter }}
       custom_metadata: ${{ inputs.custom_metadata }}
+      custom_env_vars: |
+        TORCH_TPU_WHEEL=${{ inputs.torch_tpu_wheel || needs.build_wheel.outputs.gcs_wheel_path }}
+        TORCH_TPU_PYTHON_VERSION=${{ inputs.python_version }}

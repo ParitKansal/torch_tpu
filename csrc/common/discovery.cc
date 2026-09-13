@@ -19,7 +19,6 @@
 
 #include "absl/base/no_destructor.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/numbers.h"
 #include "csrc/common/env_vars.h"
 #include "csrc/common/error_utils.h"
 
@@ -28,17 +27,17 @@ namespace torch_tpu {
 const absl::StatusOr<int64_t>& GetPremappedBufferSizeFromEnvOnce() {
   static const absl::NoDestructor<absl::StatusOr<int64_t>>
       premapped_buffer_size([]() -> absl::StatusOr<int64_t> {
-        const auto& env_val = GetEnvOnce<kTpuPremappedBufferSizeEnvVar>();
-        if (!env_val.has_value()) {
+        const auto& raw_val = GetEnvOnce<kTpuPremappedBufferSizeEnvVar>();
+        if (!raw_val.has_value()) {
           SetEnv<kTpuPremappedBufferSizeEnvVar>("0");
           return 0;
         }
-        int64_t size;
-        TT_RET_CHECK(absl::SimpleAtoi(*env_val, &size),
-                     error::kFailedPrecondition)
+        const auto env_val =
+            GetIntegerEnvOnce<int64_t, kTpuPremappedBufferSizeEnvVar>();
+        TT_RET_CHECK(env_val.has_value(), error::kFailedPrecondition)
             << "the " << kTpuPremappedBufferSizeEnvVar
-            << " environment variable is not a valid integer: " << *env_val;
-        return size;
+            << " environment variable is not a valid integer: " << *raw_val;
+        return *env_val;
       }());
   return *premapped_buffer_size;
 }

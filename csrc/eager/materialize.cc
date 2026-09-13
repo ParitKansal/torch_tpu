@@ -36,6 +36,7 @@
 #include "absl/base/no_destructor.h"
 #include "absl/base/nullability.h"
 #include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/absl_log.h"
@@ -200,6 +201,78 @@ MaterializationStages ApplySplitMode(
     std::vector<absl_nonnull std::unique_ptr<Traversal>>&& traversals,
     const MaterializationTaskCommon& common, mlir::MLIRContext& mlir_context) {
   MaterializationStages result;
+
+  // Eager ops traced over placeholder tensors (e.g. aten::clone during
+  // direct_compile) leave abandoned DeferredOps on the events queue. Drop any
+  // output that transitively depends on a placeholder so the real ops sharing
+  // this traversal can still materialize.
+  absl::flat_hash_map<const DeviceBufferList*, bool> placeholder_memo;
+  auto depends_on_placeholder =
+      [&placeholder_memo](auto& self,
+                          const SharedDeviceBufferList& node) -> bool {
+    if (node == nullptr) return false;
+    if (node->is_placeholder()) return true;
+    auto it = placeholder_memo.find(node.get());
+    if (it != placeholder_memo.end()) return it->second;
+
+    const auto deferred_op = node->deferred_op();
+    if (!deferred_op) {
+      placeholder_memo[node.get()] = false;
+      return false;
+    }
+
+    placeholder_memo[node.get()] = false;
+    for (const auto& input : deferred_op->inputs()) {
+      if (input.is_placeholder() || self(self, input.device_buffer_list())) {
+        placeholder_memo[node.get()] = true;
+        return true;
+      }
+    }
+    return false;
+  };
+
+  auto output_depends_on_placeholder =
+      [&depends_on_placeholder](const DeviceBufferRef& ref) -> bool {
+    if (ref.is_placeholder()) return true;
+    return depends_on_placeholder(depends_on_placeholder,
+                                  ref.device_buffer_list());
+  };
+
+  std::vector<absl_nonnull std::unique_ptr<Traversal>> clean_traversals;
+  clean_traversals.reserve(traversals.size());
+
+  for (auto& traversal : traversals) {
+    std::vector<DeviceBufferRef> clean_outputs;
+    for (const auto& output : traversal->outputs()) {
+      if (!output_depends_on_placeholder(output)) {
+        clean_outputs.push_back(output);
+      }
+    }
+
+    if (clean_outputs.empty()) {
+      ABSL_VLOG(1) << "Skipping traversal containing only placeholder outputs";
+      continue;
+    }
+
+    if (clean_outputs.size() == traversal->outputs().size()) {
+      clean_traversals.push_back(std::move(traversal));
+    } else {
+      ABSL_VLOG(1) << "Pruning placeholder outputs from traversal: kept "
+                   << clean_outputs.size() << " of "
+                   << traversal->outputs().size() << " outputs";
+      const auto core_pinning_mode = traversal->core_pinning_mode();
+      auto clean_traversal_or = Traversal::Create(std::move(clean_outputs));
+      if (clean_traversal_or.ok()) {
+        if (core_pinning_mode != CorePinningMode::kUnpinned) {
+          (*clean_traversal_or)->SetCorePinningMode(core_pinning_mode);
+        }
+        clean_traversals.push_back(std::move(*clean_traversal_or));
+      } else if (result.first_error.ok()) {
+        result.first_error = clean_traversal_or.status();
+      }
+    }
+  }
+  traversals = std::move(clean_traversals);
 
   if (common.materialization_mode == MaterializationMode::kSplitGraph) {
     tsl::profiler::TraceMe t("SplitTraversal");

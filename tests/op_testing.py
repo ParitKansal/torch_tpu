@@ -4358,7 +4358,7 @@ def _load_golden_files() -> None:
     test_srcdir = pathlib.Path(os.environ["TEST_SRCDIR"])
     candidate_dirs.extend([
         test_srcdir / "_main" / "tests",
-        test_srcdir / "google3" / "third_party" / "py" / "torch_tpu" / "tests",
+        test_srcdir / "torch_tpu" / "tests",
     ])
 
   golden_files: list[pathlib.Path] = []

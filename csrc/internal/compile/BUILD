@@ -87,10 +87,7 @@ torch_tpu_cc_library(
     hdrs = [
         "torch_compile_utils.h",
     ],
-    deps = [
-        "//csrc/common:env_vars",
-        "@com_google_absl//absl/strings",
-    ],
+    deps = ["//csrc/common:env_vars"],
 )
 
 # This library is not used directly, but is needed for go/cclean. Without

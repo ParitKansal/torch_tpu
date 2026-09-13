@@ -339,6 +339,8 @@ std::string_view ToString(OpName op_name) {  // NOLINT(readability/fn_size)
       return "elu_backward.grad_input";
     case OpName::kEluOut:
       return "elu.out";
+    case OpName::kEmbedding:
+      return "embedding";
     case OpName::kEmbeddingBag:
       return "_embedding_bag";
     case OpName::kEmbeddingBagBackward:
@@ -347,6 +349,8 @@ std::string_view ToString(OpName op_name) {  // NOLINT(readability/fn_size)
       return "_embedding_bag_forward_only";
     case OpName::kEmbeddingDenseBackward:
       return "embedding_dense_backward";
+    case OpName::kEmbeddingOut:
+      return "embedding.out";
     case OpName::kEmbeddingRenorm_:
       return "embedding_renorm_";
     case OpName::kEmpty:
@@ -1005,6 +1009,10 @@ std::string_view ToString(OpName op_name) {  // NOLINT(readability/fn_size)
       return "max";
     case OpName::kMaxDimMax:
       return "max.dim_max";
+    case OpName::kMaxPool1d:
+      return "max_pool1d";
+    case OpName::kMaxPool1dBackward:
+      return "max_pool1d_backward";
     case OpName::kMaxPool2d:
       return "max_pool2d";
     case OpName::kMaxPool2dBackward:
@@ -1013,6 +1021,10 @@ std::string_view ToString(OpName op_name) {  // NOLINT(readability/fn_size)
       return "max_pool2d_with_indices_backward.grad_input";
     case OpName::kMaxPool2dWithIndicesOut:
       return "max_pool2d_with_indices.out";
+    case OpName::kMaxPool3d:
+      return "max_pool3d";
+    case OpName::kMaxPool3dBackward:
+      return "max_pool3d_backward";
     case OpName::kMaxPool3dWithIndices:
       return "max_pool3d_with_indices";
     case OpName::kMaxPool3dWithIndicesBackward:

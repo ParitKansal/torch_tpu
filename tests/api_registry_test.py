@@ -20,6 +20,9 @@ import warnings
 from absl.testing import absltest
 import torch
 import torch_tpu
+from torch_tpu._internal.pallas.pallas import (
+    jax_op as internal_jax_op,
+)
 from torch_tpu._internal.profiler.profiler_config import (
     TpuProfilerConfig as InternalTpuProfilerConfig,
 )
@@ -95,6 +98,25 @@ class ApiRegistryTest(seed_test_utils.RepeatableTest):
     """Verifies dir(torch.tpu.profiler) returns public symbol list."""
     self.assertEqual(dir(torch.tpu.profiler), ["TpuProfilerConfig"])
     self.assertEqual(dir(torch_tpu.profiler), ["TpuProfilerConfig"])
+
+  def test_pallas_api_registry(self):
+    """Verifies public exposure, identity, metadata, and proxy behavior for pallas."""
+    # 1. Symbol identity
+    self.assertIs(torch.tpu.pallas.jax_op, internal_jax_op)
+
+    # 2. Lifecycle stage metadata
+    fn = torch.tpu.pallas.jax_op
+    self.assertEqual(
+        getattr(fn, annotations.TT_API_STAGE, None),
+        annotations.Stage.EXPERIMENTAL.value,
+    )
+
+    # 3. Proxy dir and invalid attribute handling
+    self.assertEqual(dir(torch.tpu.pallas), ["jax_op"])
+    with self.assertRaises(  # ASSERT_RAISES_OK=Verifies proxy module raises AttributeError for non-existent attributes
+        AttributeError
+    ):
+      _ = getattr(torch.tpu.pallas, "non_existent_attribute")
 
 
 if __name__ == "__main__":

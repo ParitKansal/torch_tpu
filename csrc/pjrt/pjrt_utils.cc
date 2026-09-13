@@ -452,9 +452,10 @@ absl::StatusOr<PjRtBufferPointers> Execute(
       TT_ASSIGN_OR_RETURN(
           const std::string fingerprint,
           executable->GetLoadedExecutable()->FingerprintExecutable());
-      const std::optional<std::string>& rank = GetEnvOnce<kRankEnvVar>();
+      const std::optional<int> rank = GetIntegerEnvOnce<int, kRankEnvVar>();
       ABSL_VLOG(8) << "Executable with collectives on rank "
-                   << (rank.has_value() ? *rank : "<unknown_rank>")
+                   << (rank.has_value() ? absl::StrCat(*rank)
+                                        : "<unknown_rank>")
                    << " has PjRT executable fingerprint: "
                    << absl::BytesToHexString(fingerprint)
                    << " and HLO module fingerprint: "

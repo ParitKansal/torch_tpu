@@ -28,19 +28,11 @@
 #include "absl/strings/str_cat.h"
 #include "csrc/common/env_vars.h"
 #include "csrc/common/utils.h"
-#include "torch/csrc/utils/cpp_stacktraces.h"
 
 namespace torch_tpu {
 
 std::optional<bool> TorchShowCppStacktraces() {
-  static const auto state = []() -> std::optional<bool> {
-    const auto& env_var = GetEnvOnce<kTorchShowCppStacktracesEnvVar>();
-    if (!env_var.has_value()) {
-      return std::nullopt;
-    }
-    // The env var is set. Let PyTorch parse it.
-    return torch::get_cpp_stacktraces_enabled();
-  }();
+  static const auto state = GetBooleanEnvOnce<kTorchShowCppStacktracesEnvVar>();
   return state;
 }
 

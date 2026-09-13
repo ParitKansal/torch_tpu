@@ -105,11 +105,11 @@ class AmpTest(seed_test_utils.RepeatableTest):
     mlir_text = tpu_torch_compile.serialize_mlir_text(mlir)
 
     # Operations that get actually performed:
-    # - embedding layer uses f32 (%1 through %3)
-    # - linear layer converts to bf16 (%4 through %10)
-    # - multiplication preserves bf16 (%11 through %15)
+    # - embedding layer uses f32 (%2)
+    # - linear layer converts to bf16 (%3 through %9)
+    # - multiplication preserves bf16 (%10 through %14)
     # - y is cast to bf16 (%0)
-    # - loss function converts to f32 (%16 through %25)
+    # - loss function converts to f32 (%15 through %25)
     expected_mlir = """module @tt_jit_build_mlir_compile_mlir_as_strided {
   func.func @main(%arg0: tensor<10xi64>, %arg1: tensor<10x10xf32>, %arg2: tensor<10x10xf32>, %arg3: tensor<10x10xf32>, %arg4: tensor<10xf32>) -> tensor<f32> {
     %cst = stablehlo.constant dense<2.000000e+00> : tensor<f32>
@@ -118,36 +118,35 @@ class AmpTest(seed_test_utils.RepeatableTest):
     %cst_2 = stablehlo.constant dense<1.000000e+00> : tensor<bf16>
     %0 = stablehlo.convert %arg3 : (tensor<10x10xf32>) -> tensor<10x10xbf16>
     %1 = stablehlo.transpose %0, dims = [1, 0] : (tensor<10x10xbf16>) -> tensor<10x10xbf16>
-    %2 = stablehlo.reshape %arg0 : (tensor<10xi64>) -> tensor<10x1xi64>
-    %3 = "stablehlo.gather"(%arg2, %2) <{dimension_numbers = #stablehlo.gather<offset_dims = [1], collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, indices_are_sorted = false, slice_sizes = array<i64: 1, 10>}> : (tensor<10x10xf32>, tensor<10x1xi64>) -> tensor<10x10xf32>
-    %4 = stablehlo.convert %3 : (tensor<10x10xf32>) -> tensor<10x10xbf16>
-    %5 = stablehlo.convert %arg4 : (tensor<10xf32>) -> tensor<10xbf16>
-    %6 = stablehlo.dot %4, %1, precision = [DEFAULT, DEFAULT] : (tensor<10x10xbf16>, tensor<10x10xbf16>) -> tensor<10x10xbf16>
-    %7 = stablehlo.broadcast_in_dim %cst_1, dims = [] : (tensor<bf16>) -> tensor<10x10xbf16>
-    %8 = stablehlo.multiply %6, %7 : tensor<10x10xbf16>
-    %9 = stablehlo.broadcast_in_dim %cst_2, dims = [] : (tensor<bf16>) -> tensor<10xbf16>
-    %10 = stablehlo.multiply %5, %9 : tensor<10xbf16>
-    %11 = stablehlo.broadcast_in_dim %10, dims = [1] : (tensor<10xbf16>) -> tensor<10x10xbf16>
-    %12 = stablehlo.add %11, %8 : tensor<10x10xbf16>
-    %13 = stablehlo.convert %cst_0 : (tensor<f64>) -> tensor<bf16>
-    %14 = stablehlo.broadcast_in_dim %13, dims = [] : (tensor<bf16>) -> tensor<10x10xbf16>
-    %15 = stablehlo.multiply %12, %14 : tensor<10x10xbf16>
-    %16 = stablehlo.convert %15 : (tensor<10x10xbf16>) -> tensor<10x10xf32>
-    %17 = stablehlo.subtract %16, %arg1 : tensor<10x10xf32>
-    %18 = stablehlo.broadcast_in_dim %cst, dims = [] : (tensor<f32>) -> tensor<10x10xf32>
-    %19 = stablehlo.power %17, %18 : tensor<10x10xf32>
+    %2 = "stablehlo.gather"(%arg2, %arg0) <{dimension_numbers = #stablehlo.gather<offset_dims = [1], collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, indices_are_sorted = false, slice_sizes = array<i64: 1, 10>}> : (tensor<10x10xf32>, tensor<10xi64>) -> tensor<10x10xf32>
+    %3 = stablehlo.convert %2 : (tensor<10x10xf32>) -> tensor<10x10xbf16>
+    %4 = stablehlo.convert %arg4 : (tensor<10xf32>) -> tensor<10xbf16>
+    %5 = stablehlo.dot %3, %1, precision = [DEFAULT, DEFAULT] : (tensor<10x10xbf16>, tensor<10x10xbf16>) -> tensor<10x10xbf16>
+    %6 = stablehlo.broadcast_in_dim %cst_1, dims = [] : (tensor<bf16>) -> tensor<10x10xbf16>
+    %7 = stablehlo.multiply %5, %6 : tensor<10x10xbf16>
+    %8 = stablehlo.broadcast_in_dim %cst_2, dims = [] : (tensor<bf16>) -> tensor<10xbf16>
+    %9 = stablehlo.multiply %4, %8 : tensor<10xbf16>
+    %10 = stablehlo.broadcast_in_dim %9, dims = [1] : (tensor<10xbf16>) -> tensor<10x10xbf16>
+    %11 = stablehlo.add %10, %7 : tensor<10x10xbf16>
+    %12 = stablehlo.convert %cst_0 : (tensor<f64>) -> tensor<bf16>
+    %13 = stablehlo.broadcast_in_dim %12, dims = [] : (tensor<bf16>) -> tensor<10x10xbf16>
+    %14 = stablehlo.multiply %11, %13 : tensor<10x10xbf16>
+    %15 = stablehlo.convert %14 : (tensor<10x10xbf16>) -> tensor<10x10xf32>
+    %16 = stablehlo.subtract %15, %arg1 : tensor<10x10xf32>
+    %17 = stablehlo.broadcast_in_dim %cst, dims = [] : (tensor<f32>) -> tensor<10x10xf32>
+    %18 = stablehlo.power %16, %17 : tensor<10x10xf32>
     %cst_3 = stablehlo.constant dense<0.000000e+00> : tensor<f32>
-    %20 = stablehlo.reduce(%19 init: %cst_3) applies stablehlo.add across dimensions = [0, 1] : (tensor<10x10xf32>, tensor<f32>) -> tensor<f32>
+    %19 = stablehlo.reduce(%18 init: %cst_3) applies stablehlo.add across dimensions = [0, 1] : (tensor<10x10xf32>, tensor<f32>) -> tensor<f32>
     %cst_4 = stablehlo.constant dense<1.000000e+02> : tensor<f32>
-    %21 = stablehlo.divide %20, %cst_4 : tensor<f32>
+    %20 = stablehlo.divide %19, %cst_4 : tensor<f32>
     %cst_5 = stablehlo.constant dense<0x7FC00000> : tensor<10x10xf32>
-    %22 = stablehlo.reshape %cst_5 : (tensor<10x10xf32>) -> tensor<100xf32>
-    %23 = stablehlo.reshape %21 : (tensor<f32>) -> tensor<1xf32>
+    %21 = stablehlo.reshape %cst_5 : (tensor<10x10xf32>) -> tensor<100xf32>
+    %22 = stablehlo.reshape %20 : (tensor<f32>) -> tensor<1xf32>
     %c = stablehlo.constant dense<0> : tensor<i64>
-    %24 = stablehlo.dynamic_update_slice %22, %23, %c : (tensor<100xf32>, tensor<1xf32>, tensor<i64>) -> tensor<100xf32>
-    %25 = stablehlo.slice %24 [0:1] : (tensor<100xf32>) -> tensor<1xf32>
-    %26 = stablehlo.reshape %25 : (tensor<1xf32>) -> tensor<f32>
-    return %26 : tensor<f32>
+    %23 = stablehlo.dynamic_update_slice %21, %22, %c : (tensor<100xf32>, tensor<1xf32>, tensor<i64>) -> tensor<100xf32>
+    %24 = stablehlo.slice %23 [0:1] : (tensor<100xf32>) -> tensor<1xf32>
+    %25 = stablehlo.reshape %24 : (tensor<1xf32>) -> tensor<f32>
+    return %25 : tensor<f32>
   }
 }"""
     self.assertEqual(mlir_text.strip(), expected_mlir.strip())

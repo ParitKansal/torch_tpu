@@ -72,6 +72,7 @@ benchmark = [
     "dm-tree>=0.1.10",
     "google-cloud-storage>=2.14.0",
     "google-api-core>=2.18.0",
+    "transformers>=5.8.0",
 ]
 
 examples = [

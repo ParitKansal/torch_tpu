@@ -51,20 +51,20 @@ bool UsesLocalBackupTaskForTier3Read() {
                         "as tier-3 cache is disabled.";
       return false;
     }
-    const auto& backup = GetEnvOnce<
+    const auto backup = GetBooleanEnvOnce<
         kTorchTpuInternalTier3CompilationCacheLocalBackupTaskEnvVar>();
     if (!backup.has_value()) {
       ABSL_LOG(INFO)
           << "Backup compilation for tier-3 cache read is enabled by default.";
       return true;
     }
-    const bool enabled = *backup != "0";
+    const bool enabled = *backup;
     ABSL_LOG(INFO)
         << "Backup compilation for tier-3 cache read is "
         << (enabled ? "enabled" : "disabled")
         << " based on the environment variable "
         << kTorchTpuInternalTier3CompilationCacheLocalBackupTaskEnvVar
-        << ", which has value \"" << *backup << "\".";
+        << ", which has value \"" << (*backup ? "true" : "false") << "\".";
     return enabled;
   }();
   return result;

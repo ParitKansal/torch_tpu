@@ -14,6 +14,11 @@
 
 """Unit tests for the op_testing framework."""
 
+import gzip
+import os
+import pathlib
+import plistlib
+import tempfile
 from typing import Any
 from unittest import mock
 
@@ -153,6 +158,66 @@ class OpTestingTest(op_testing.OpInfoTestBase):
         op_testing.find_cast_pairs([torch.float32]),
         op_testing.CastPairs(illegal_pair=None, allowed_pair=None),
     )
+
+  @parameterized.parameters(
+      ("_main",),
+      ("torch_tpu",),
+  )
+  def test_load_golden_files_from_test_srcdir(self, workspace_name):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      tmp_path = pathlib.Path(tmpdir)
+      empty_file = tmp_path / "site-packages" / "tests" / "op_testing.py"
+      empty_file.parent.mkdir(parents=True)
+      empty_file.touch()
+
+      test_srcdir = tmp_path / "runfiles"
+      target_tests_dir = test_srcdir / workspace_name / "tests"
+      target_tests_dir.mkdir(parents=True)
+
+      prefix = op_testing._golden_file_prefix()
+      dummy_golden = target_tests_dir / f"{prefix}0.gz"
+      with gzip.open(dummy_golden, "wb") as f:
+        plistlib.dump({}, f, fmt=plistlib.FMT_BINARY)
+
+      mock_golden_data = mock.MagicMock(spec=op_testing.GoldenGpuData)
+      with (
+          flagsaver.flagsaver(golden_data_base_dir=""),
+          mock.patch.dict(os.environ, {"TEST_SRCDIR": str(test_srcdir)}),
+          mock.patch.object(op_testing, "__file__", str(empty_file)),
+          mock.patch.object(
+              pathlib.Path, "cwd", return_value=tmp_path / "empty_cwd"
+          ),
+          mock.patch.object(op_testing, "_GOLDEN_GPU_DATA", mock_golden_data),
+      ):
+        op_testing._load_golden_files()
+        mock_golden_data.clear.assert_called_once()
+        mock_golden_data.merge_plistlib_pytree.assert_called_once_with({})
+
+  def test_load_golden_files_candidate_dirs_error_message(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      tmp_path = pathlib.Path(tmpdir)
+      empty_file = tmp_path / "site-packages" / "tests" / "op_testing.py"
+      empty_file.parent.mkdir(parents=True)
+      empty_file.touch()
+
+      test_srcdir = tmp_path / "runfiles"
+
+      with (
+          flagsaver.flagsaver(golden_data_base_dir=""),
+          mock.patch.dict(os.environ, {"TEST_SRCDIR": str(test_srcdir)}),
+          mock.patch.object(op_testing, "__file__", str(empty_file)),
+          mock.patch.object(
+              pathlib.Path, "cwd", return_value=tmp_path / "empty_cwd"
+          ),
+      ):
+        with self.assertRaises(  # ASSERT_RAISES_OK=Missing golden files test.
+            ValueError
+        ) as cm:
+          op_testing._load_golden_files()
+        error_msg = str(cm.exception)
+        self.assertIn(str(test_srcdir / "_main" / "tests"), error_msg)
+        self.assertIn(str(test_srcdir / "torch_tpu" / "tests"), error_msg)
+        self.assertNotIn("google3", error_msg)
 
 
 class GoldenGpuDataLazyDecodeTest(

@@ -23,14 +23,12 @@ import portpicker
 import torch
 from torch import distributed as dist
 from torch_tpu._internal import compile as tpu_compile
-from torch_tpu._internal.compile import _backend
 from torch_tpu._internal.distributed import handshake
 from torch_tpu._internal.distributed.launchers import singlehost_wrapper
 from torch_tpu._internal.utils import test_utils as utils
 from torch_tpu._internal.distributed import multiprocessing
 from tests.distributed import distributed_utils
 
-TpuBackend = _backend.TpuBackend
 Handshake = handshake.Handshake
 
 
@@ -47,7 +45,7 @@ def _test_wrapper(test_fn, *args, **kwargs):
 
 def run_handshake_no_rank_divergence_test():
   rank = dist.get_rank()
-  backend = TpuBackend(debug=True)
+  debugs: list[tpu_compile.TpuCompileDebug] = []
   x = torch.ones(4, device="tpu") * (rank + 1)
   y = torch.ones(4, device="tpu") * 2
 
@@ -57,19 +55,23 @@ def run_handshake_no_rank_divergence_test():
     return z
 
   compiled_fn = torch.compile(
-      no_rank_divergence, backend=backend, fullgraph=True
+      no_rank_divergence,
+      backend="tpu",
+      fullgraph=True,
+      options={"serializable": False, "debug_callback": debugs.append},
   )
   _ = compiled_fn(x, y)
-  assert len(backend._compiled_executables) > 0
-  exec_artifact = backend._compiled_executables[0]
-  assert (
-      len(exec_artifact.mlir_texts) == 1
-  ), f"Expected 1 entry in mlir_texts, got {len(exec_artifact.mlir_texts)}"
+  compiled_executables = [e for x in debugs for e in x.compiled_executables]
+  assert len(compiled_executables) > 0
+  assert len(debugs[0].stablehlo_forward_text) == 1, (
+      "Expected 1 entry in stablehlo_forward_text, got "
+      f"{len(debugs[0].stablehlo_forward_text)}"
+  )
 
 
 def run_handshake_rank_divergence_test():
   rank = dist.get_rank()
-  backend = TpuBackend(debug=True)
+  debugs: list[tpu_compile.TpuCompileDebug] = []
   x = torch.ones(4, device="tpu") * (rank + 1)
   y = torch.ones(4, device="tpu") * 2
 
@@ -80,23 +82,27 @@ def run_handshake_rank_divergence_test():
     dist.all_reduce(z)
     return z
 
-  compiled_fn = torch.compile(rank_divergence, backend=backend)
+  compiled_fn = torch.compile(
+      rank_divergence,
+      backend="tpu",
+      options={"serializable": False, "debug_callback": debugs.append},
+  )
   _ = compiled_fn(x, y)
-  assert len(backend._compiled_executables) > 0
-  exec_artifact = backend._compiled_executables[0]
+  compiled_executables = [e for x in debugs for e in x.compiled_executables]
+  assert len(compiled_executables) > 0
+  exec_artifact = compiled_executables[0]
   assert len(exec_artifact.mlir_texts) == 3, (
-      f"Expected 3 executables on rank {rank}, got"
-      f" {len(exec_artifact.mlir_texts)}"
+      f"Expected 3 executables on rank {rank}, got "
+      f"{len(exec_artifact.mlir_texts)}"
   )
   assert "stablehlo.all_reduce" in exec_artifact.mlir_texts[1], (
-      "Expected index 1 to be a skinny collective, got"
-      f" {exec_artifact.mlir_texts[1]}"
+      "Expected index 1 to be a skinny collective, got "
+      f"{exec_artifact.mlir_texts[1]}"
   )
 
 
 def run_handshake_divergence_after_iteration_test():
   rank = dist.get_rank()
-  backend = TpuBackend(debug=True)
   x = torch.ones(4, device="tpu") * (rank + 1)
   y = torch.ones(4, device="tpu") * 2
 
@@ -109,7 +115,11 @@ def run_handshake_divergence_after_iteration_test():
     dist.all_reduce(z)
     return z
 
-  compiled_fn = torch.compile(divergence_after_iteration, backend=backend)
+  compiled_fn = torch.compile(
+      divergence_after_iteration,
+      backend="tpu",
+      options={"serializable": False},
+  )
   _ = compiled_fn(x, y)
   iteration += 1
   _ = compiled_fn(x, y)
@@ -119,7 +129,6 @@ def run_handshake_divergence_after_iteration_on_a_single_rank_test(
     divergent_rank: int,
 ):
   rank = dist.get_rank()
-  backend = TpuBackend(debug=True)
   x = torch.ones(4, device="tpu") * (rank + 1)
   y = torch.ones(4, device="tpu") * 2
 
@@ -132,7 +141,11 @@ def run_handshake_divergence_after_iteration_on_a_single_rank_test(
     dist.all_reduce(z)
     return z
 
-  compiled_fn = torch.compile(divergence_after_iteration, backend=backend)
+  compiled_fn = torch.compile(
+      divergence_after_iteration,
+      backend="tpu",
+      options={"serializable": False},
+  )
   _ = compiled_fn(x, y)
   iteration += 1
   _ = compiled_fn(x, y)
@@ -142,7 +155,7 @@ def run_handshake_uneven_executables_between_ranks_test(
     divergent_rank: int,
 ):
   rank = dist.get_rank()
-  backend = TpuBackend(debug=True)
+  debugs: list[tpu_compile.TpuCompileDebug] = []
   x = torch.ones(4, device="tpu") * (rank + 1)
   y = torch.ones(4, device="tpu") * 2
 
@@ -155,25 +168,28 @@ def run_handshake_uneven_executables_between_ranks_test(
     dist.all_reduce(z)
     return z
 
-  compiled_fn = torch.compile(uneven_executables, backend=backend)
+  compiled_fn = torch.compile(
+      uneven_executables,
+      backend="tpu",
+      options={"serializable": False, "debug_callback": debugs.append},
+  )
   _ = compiled_fn(x, y)
+  compiled_executables = [e for x in debugs for e in x.compiled_executables]
   if rank == divergent_rank:
-    assert len(backend._compiled_executables) == 2, (
-        f"Expected 2 executables on rank {rank}, got"
-        f" {len(backend._compiled_executables)}"
-    )
+    assert (
+        len(compiled_executables) == 2
+    ), f"Expected 2 executables on rank {rank}, got {len(compiled_executables)}"
   else:
-    assert len(backend._compiled_executables) == 1, (
-        f"Expected 1 executable on rank {rank}, got"
-        f" {len(backend._compiled_executables)}"
-    )
+    assert (
+        len(compiled_executables) == 1
+    ), f"Expected 1 executable on rank {rank}, got {len(compiled_executables)}"
 
 
 def run_handshake_last_frame_on_divergent_rank_is_not_collective_test(
     divergent_rank: int,
 ):
   rank = dist.get_rank()
-  backend = TpuBackend(debug=True)
+  debugs: list[tpu_compile.TpuCompileDebug] = []
   x = torch.ones(4, device="tpu") * (rank + 1)
   y = torch.ones(4, device="tpu") * 2
 
@@ -197,41 +213,43 @@ def run_handshake_last_frame_on_divergent_rank_is_not_collective_test(
 
   compiled_fn = torch.compile(
       last_frame_on_divergent_rank_is_not_collective_test,
-      backend=backend,
+      backend="tpu",
+      options={"serializable": False, "debug_callback": debugs.append},
   )
   _ = compiled_fn(x, y)
 
-  compiled_spmd_fn = torch.compile(spmd_function, backend=backend)
+  compiled_spmd_fn = torch.compile(
+      spmd_function,
+      backend="tpu",
+      options={"serializable": False, "debug_callback": debugs.append},
+  )
   _ = compiled_spmd_fn(x, y)
 
+  compiled_executables = [e for x in debugs for e in x.compiled_executables]
   if rank == divergent_rank:
     # 1 for spmd_function, 1 for
     # last_frame_on_divergent_rank_is_not_collective_test
-    assert len(backend._compiled_executables) == 2, (
-        f"Expected 2 executables on rank {rank}, got"
-        f" {len(backend._compiled_executables)}"
-    )
+    assert (
+        len(compiled_executables) == 2
+    ), f"Expected 2 executables on rank {rank}, got {len(compiled_executables)}"
     spmd_function_index = 1
   else:
     # Non divergent ranks will have an extra executable due to a dynamo break
     # in last_frame_on_divergent_rank_is_not_collective_test
-    assert len(backend._compiled_executables) == 3, (
-        f"Expected 3 executables on rank {rank}, got"
-        f" {len(backend._compiled_executables)}"
-    )
+    assert (
+        len(compiled_executables) == 3
+    ), f"Expected 3 executables on rank {rank}, got {len(compiled_executables)}"
     spmd_function_index = 2
 
   # First executable should have no internal splits because of the handshake.
-  assert len(backend._compiled_executables[0].mlir_texts) == 1, (
-      f"Expected no internal splits on rank {rank}, got"
-      f" {len(backend._compiled_executables[0].mlir_texts)}"
+  assert len(debugs[0].stablehlo_forward_text) == 1, (
+      f"Expected no internal splits on rank {rank}, got "
+      f"{len(debugs[0].stablehlo_forward_text)}"
   )
   # SPMD function should have no internal splits because of the handshake.
-  assert (
-      len(backend._compiled_executables[spmd_function_index].mlir_texts) == 1
-  ), (
-      f"Expected no internal splits for SPMD function on rank {rank}, got"
-      f" {len(backend._compiled_executables[spmd_function_index].mlir_texts)}"
+  assert len(debugs[spmd_function_index].stablehlo_forward_text) == 1, (
+      f"Expected no internal splits for SPMD function on rank {rank}, got "
+      f"{len(debugs[spmd_function_index].stablehlo_forward_text)}"
   )
 
 
@@ -239,7 +257,7 @@ def run_handshake_separate_vs_composed_compiled_functions_test(
     divergent_rank: int,
 ):
   rank = dist.get_rank()
-  backend = TpuBackend(debug=True)
+  debugs: list[tpu_compile.TpuCompileDebug] = []
   x = torch.ones(4, device="tpu") * (rank + 1)
   y = torch.ones(4, device="tpu") * 2
 
@@ -258,31 +276,42 @@ def run_handshake_separate_vs_composed_compiled_functions_test(
     return foo2(z, y)
 
   if rank == divergent_rank:
-    compiled_foo1 = torch.compile(foo1, backend=backend)
+    compiled_foo1 = torch.compile(
+        foo1,
+        backend="tpu",
+        options={"serializable": False, "debug_callback": debugs.append},
+    )
     res1 = compiled_foo1(x, y)
-    compiled_foo2 = torch.compile(foo2, backend=backend)
+    compiled_foo2 = torch.compile(
+        foo2,
+        backend="tpu",
+        options={"serializable": False, "debug_callback": debugs.append},
+    )
     res = compiled_foo2(res1, y)
   else:
-    compiled_foo = torch.compile(foo, backend=backend)
+    compiled_foo = torch.compile(
+        foo,
+        backend="tpu",
+        options={"serializable": False, "debug_callback": debugs.append},
+    )
     res = compiled_foo(x, y)
 
   utils.assert_close(res, torch.ones(4, device="tpu") * 144.0)
 
+  compiled_executables = [e for x in debugs for e in x.compiled_executables]
   if rank == divergent_rank:
-    assert len(backend._compiled_executables) == 2, (
-        f"Expected 2 executables on rank {rank}, got"
-        f" {len(backend._compiled_executables)}"
-    )
+    assert (
+        len(compiled_executables) == 2
+    ), f"Expected 2 executables on rank {rank}, got {len(compiled_executables)}"
   else:
-    assert len(backend._compiled_executables) == 1, (
-        f"Expected 1 executable on rank {rank}, got"
-        f" {len(backend._compiled_executables)}"
-    )
+    assert (
+        len(compiled_executables) == 1
+    ), f"Expected 1 executable on rank {rank}, got {len(compiled_executables)}"
 
 
 def run_handshake_no_rank_divergence_async_compile_test():
   rank = dist.get_rank()
-  backend = TpuBackend(debug=True)
+  debugs: list[tpu_compile.TpuCompileDebug] = []
   x = torch.ones(4, device="tpu") * (rank + 1)
   y = torch.ones(4, device="tpu") * 2
 
@@ -293,9 +322,13 @@ def run_handshake_no_rank_divergence_async_compile_test():
 
   compiled_fn = torch.compile(
       no_rank_divergence,
-      backend=backend,
+      backend="tpu",
       fullgraph=True,
-      options={"async_compile": True},
+      options={
+          "async_compile": True,
+          "serializable": False,
+          "debug_callback": debugs.append,
+      },
   )
   try:
     _ = compiled_fn(x, y)
@@ -309,16 +342,16 @@ def run_handshake_no_rank_divergence_async_compile_test():
 
   res = compiled_fn(x, y)
   utils.assert_close(res, torch.ones(4, device="tpu") * 18.0)
-  assert len(backend._compiled_executables) > 0
-  exec_artifact = backend._compiled_executables[0]
-  assert (
-      len(exec_artifact.mlir_texts) == 1
-  ), f"Expected 1 entry in mlir_texts, got {len(exec_artifact.mlir_texts)}"
+  compiled_executables = [e for x in debugs for e in x.compiled_executables]
+  assert len(compiled_executables) > 0
+  assert len(debugs[0].stablehlo_forward_text) == 1, (
+      "Expected 1 entry in stablehlo_forward_text, got "
+      f"{len(debugs[0].stablehlo_forward_text)}"
+  )
 
 
 def run_handshake_divergence_after_iteration_async_compile_test():
   rank = dist.get_rank()
-  backend = TpuBackend(debug=True)
   x = torch.ones(4, device="tpu") * (rank + 1)
   y = torch.ones(4, device="tpu") * 2
 
@@ -333,8 +366,8 @@ def run_handshake_divergence_after_iteration_async_compile_test():
 
   compiled_fn = torch.compile(
       divergence_after_iteration,
-      backend=backend,
-      options={"async_compile": True},
+      backend="tpu",
+      options={"async_compile": True, "serializable": False},
   )
   try:
     _ = compiled_fn(x, y)

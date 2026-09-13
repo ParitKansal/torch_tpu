@@ -20,10 +20,10 @@ from unittest import mock
 from absl.testing import absltest
 import torch
 from torch import distributed as dist
-from torch_tpu._internal.compile import _backend
 from torch_tpu._internal.compile import compiler
 from torch_tpu._internal.compile import split_compiler
 from torch_tpu._internal.compile import torch_tpu_compiled_executable
+from torch_tpu._internal.compile.debug import TpuCompileDebug
 from torch_tpu._internal.distributed import collective_ops
 from torch_tpu._internal.distributed.launchers import singlehost_wrapper
 from torch_tpu._internal.utils import test_utils as utils
@@ -32,7 +32,6 @@ from tests import seed_test_utils
 from tests.distributed import distributed_utils
 
 CompiledArtifact = torch_tpu_compiled_executable.CompiledArtifact
-TpuBackend = _backend.TpuBackend
 _SplitCompiledExecutable = split_compiler._SplitCompiledExecutable
 _COLLECTIVE_OPS = collective_ops.COLLECTIVE_OPS
 SplitCompiler = split_compiler.SplitCompiler
@@ -135,7 +134,7 @@ def _test_wrapper(test_fn, *args, **kwargs):
 
 
 def run_compile_all_reduce_and_serdes_test():
-  backend = TpuBackend(debug=True)
+  debugs: list[TpuCompileDebug] = []
 
   def f(x):
     y = x * 2
@@ -144,7 +143,11 @@ def run_compile_all_reduce_and_serdes_test():
     z = y + 3
     return z
 
-  compiled_f = torch.compile(f, backend=backend)
+  compiled_f = torch.compile(
+      f,
+      backend="tpu",
+      options={"serializable": False, "debug_callback": debugs.append},
+  )
 
   x = torch.ones((2, 2), device="tpu")
   res = compiled_f(x)
@@ -154,11 +157,12 @@ def run_compile_all_reduce_and_serdes_test():
   utils.assert_close(res.cpu(), expected)
 
   # Verify splitting in backend.
-  assert (
-      len(backend._compiled_executables) == 1
-  ), f"Expected 1 compiled executable, got {len(backend._compiled_executables)}"
+  assert len(debugs[0].compiled_executables) == 1, (
+      "Expected 1 compiled executable, got"
+      f" {len(debugs[0].compiled_executables)}"
+  )
 
-  wrapper = backend._compiled_executables[0]
+  wrapper = debugs[0].compiled_executables[0]
   assert isinstance(
       wrapper, _SplitCompiledExecutable
   ), f"Expected _SplitCompiledExecutable, got {type(wrapper)}"
@@ -208,7 +212,7 @@ def run_compile_all_reduce_and_serdes_test():
 
 
 def run_compile_no_splits_when_env_zero_test():
-  backend = TpuBackend(debug=True)
+  debugs: list[TpuCompileDebug] = []
 
   def f(x):
     y = x * 2
@@ -217,7 +221,11 @@ def run_compile_no_splits_when_env_zero_test():
     z = y + 3
     return z
 
-  compiled_f = torch.compile(f, backend=backend)
+  compiled_f = torch.compile(
+      f,
+      backend="tpu",
+      options={"serializable": False, "debug_callback": debugs.append},
+  )
 
   x = torch.ones((2, 2), device="tpu")
   res = compiled_f(x)
@@ -226,11 +234,12 @@ def run_compile_no_splits_when_env_zero_test():
   expected = torch.full((2, 2), 59.0, device="cpu")
   utils.assert_close(res.cpu(), expected)
 
-  assert (
-      len(backend._compiled_executables) == 1
-  ), f"Expected 1 compiled executable, got {len(backend._compiled_executables)}"
+  assert len(debugs[0].compiled_executables) == 1, (
+      "Expected 1 compiled executable, got"
+      f" {len(debugs[0].compiled_executables)}"
+  )
 
-  wrapper = backend._compiled_executables[0]
+  wrapper = debugs[0].compiled_executables[0]
   assert isinstance(
       wrapper, _SplitCompiledExecutable
   ), f"Expected _SplitCompiledExecutable, got {type(wrapper)}"
@@ -240,14 +249,18 @@ def run_compile_no_splits_when_env_zero_test():
 def run_compile_two_collectives_test():
   """Test that two collectives are compiled separately."""
 
-  backend = TpuBackend(debug=True)
+  debugs: list[TpuCompileDebug] = []
 
   def f(x, y):
     dist.all_reduce(x)
     dist.all_reduce(y)
     return x + y + 3
 
-  compiled_f = torch.compile(f, backend=backend)
+  compiled_f = torch.compile(
+      f,
+      backend="tpu",
+      options={"serializable": False, "debug_callback": debugs.append},
+  )
 
   x = torch.ones((2, 2), device="tpu")
   y = torch.ones((2, 2), device="tpu")
@@ -257,8 +270,8 @@ def run_compile_two_collectives_test():
   expected = torch.full((2, 2), 19.0, device="cpu")
   utils.assert_close(res.cpu(), expected)
 
-  assert len(backend._compiled_executables) == 1
-  wrapper = backend._compiled_executables[0]
+  assert len(debugs[0].compiled_executables) == 1
+  wrapper = debugs[0].compiled_executables[0]
   assert isinstance(wrapper, _SplitCompiledExecutable)
 
   split_gm = wrapper._split_gm
@@ -309,10 +322,15 @@ class CollectiveModule(torch.nn.Module):
 
 
 def run_torch_compile_fullgraph_no_break_test():
-  backend = TpuBackend(debug=True)
+  debugs: list[TpuCompileDebug] = []
   with torch.device("tpu"):
     model = CollectiveModule()
-  compiled_model = torch.compile(model, backend=backend, fullgraph=True)
+  compiled_model = torch.compile(
+      model,
+      backend="tpu",
+      fullgraph=True,
+      options={"serializable": False, "debug_callback": debugs.append},
+  )
 
   x = torch.ones((2, 2), device="tpu")
   res = compiled_model(x)
@@ -322,11 +340,12 @@ def run_torch_compile_fullgraph_no_break_test():
   utils.assert_close(res.cpu(), expected)
 
   # Verify splitting in backend.
-  assert (
-      len(backend._compiled_executables) == 1
-  ), f"Expected 1 compiled executable, got {len(backend._compiled_executables)}"
+  assert len(debugs[0].compiled_executables) == 1, (
+      "Expected 1 compiled executable, got"
+      f" {len(debugs[0].compiled_executables)}"
+  )
 
-  wrapper = backend._compiled_executables[0]
+  wrapper = debugs[0].compiled_executables[0]
   assert isinstance(
       wrapper, _SplitCompiledExecutable
   ), f"Expected _SplitCompiledExecutable, got {type(wrapper)}"
@@ -461,7 +480,7 @@ def run_all_to_all_collectives_test():
 
 
 def run_rank_variable_dead_collective_test():
-  backend = TpuBackend(debug=True)
+  debugs: list[TpuCompileDebug] = []
   rank = int(os.environ["RANK"])
   world_size = dist.get_world_size()
 
@@ -473,7 +492,11 @@ def run_rank_variable_dead_collective_test():
     return x
 
   x = torch.tensor([1.0], device="tpu")
-  compiled_f = torch.compile(func, backend=backend)
+  compiled_f = torch.compile(
+      func,
+      backend="tpu",
+      options={"serializable": False, "debug_callback": debugs.append},
+  )
   actual = compiled_f(x)
   expected = (
       torch.tensor([float(world_size)]) if rank == 0 else torch.tensor([1.0])
@@ -481,11 +504,12 @@ def run_rank_variable_dead_collective_test():
   utils.assert_close(actual.cpu(), expected)
 
   # Verify splitting in backend.
-  assert (
-      len(backend._compiled_executables) == 1
-  ), f"Expected 1 compiled executable, got {len(backend._compiled_executables)}"
+  assert len(debugs[0].compiled_executables) == 1, (
+      "Expected 1 compiled executable, got"
+      f" {len(debugs[0].compiled_executables)}"
+  )
 
-  wrapper = backend._compiled_executables[0]
+  wrapper = debugs[0].compiled_executables[0]
   assert isinstance(
       wrapper, _SplitCompiledExecutable
   ), f"Expected _SplitCompiledExecutable, got {type(wrapper)}"
@@ -554,10 +578,10 @@ class _DummyCompiledExecutable(CompiledArtifact):
 class DummyBaseCompiler(compiler.Compiler):
 
   def __init__(self):
-    super().__init__(debug=True)
+    super().__init__()
     self.compiler_fn = lambda gm, args: gm
 
-  def __call__(self, gm, args, is_fwd=True, module_name=None):
+  def __call__(self, gm, args, is_fwd=True, module_name=None, **kwargs):
     return _DummyCompiledExecutable(gm)
 
 

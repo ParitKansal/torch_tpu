@@ -3435,21 +3435,21 @@ Device-side assertion tracking was not enabled by user.""",
           testcase_name="bool",
           dtype=torch.bool,
           error=RuntimeError,
-          tpu_message="max_pool3d_with_indices(): bool dtype is not supported",
+          tpu_message="max_pool3d(): bool dtype is not supported",
           gpu_dtype="Bool",
       ),
       dict(
           testcase_name="int32",
           dtype=torch.int32,
           error=NotImplementedError,
-          tpu_message="max_pool3d_with_indices(): not implemented for int32",
+          tpu_message="max_pool3d(): not implemented for int32",
           gpu_dtype="Int",
       ),
       dict(
           testcase_name="int64",
           dtype=torch.int64,
           error=NotImplementedError,
-          tpu_message="max_pool3d_with_indices(): not implemented for int64",
+          tpu_message="max_pool3d(): not implemented for int64",
           gpu_dtype="Long",
       ),
   )
@@ -4070,6 +4070,7 @@ Supported combinations for non-constant padding:
       ).backward(torch.randn(1, 6, 4, 4, 4, device=et.device()))
 
   def test_adaptive_avg_pool2d_unsupported_dtypes(self):
+    t_bool = torch.zeros((1, 1, 4, 4), device=et.device(), dtype=torch.bool)
     t_complex = torch.zeros(
         (1, 1, 4, 4), device=et.device(), dtype=torch.complex64
     )
@@ -4081,42 +4082,49 @@ Supported combinations for non-constant padding:
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (uint8, int8, int16, int32, int64, complex64), got complex64""",
+        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (bool, uint8, int8, int16, int32, int64, complex64), got bool""",
+        gpu=""""adaptive_avg_pool2d_cuda" not implemented for 'Bool'""",
+    ):
+      torch.nn.functional.adaptive_avg_pool2d(t_bool, output_size=2)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (bool, uint8, int8, int16, int32, int64, complex64), got complex64""",
         gpu=""""adaptive_avg_pool2d_cuda" not implemented for 'ComplexFloat'""",
     ):
       torch.nn.functional.adaptive_avg_pool2d(t_complex, output_size=2)
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (uint8, int8, int16, int32, int64, complex64), got uint8""",
+        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (bool, uint8, int8, int16, int32, int64, complex64), got uint8""",
         gpu=""""adaptive_avg_pool2d_cuda" not implemented for 'Byte'""",
     ):
       torch.nn.functional.adaptive_avg_pool2d(t_uint8, output_size=2)
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (uint8, int8, int16, int32, int64, complex64), got int8""",
+        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (bool, uint8, int8, int16, int32, int64, complex64), got int8""",
         gpu=""""adaptive_avg_pool2d_cuda" not implemented for 'Char'""",
     ):
       torch.nn.functional.adaptive_avg_pool2d(t_int8, output_size=2)
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (uint8, int8, int16, int32, int64, complex64), got int16""",
+        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (bool, uint8, int8, int16, int32, int64, complex64), got int16""",
         gpu=""""adaptive_avg_pool2d_cuda" not implemented for 'Short'""",
     ):
       torch.nn.functional.adaptive_avg_pool2d(t_int16, output_size=2)
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (uint8, int8, int16, int32, int64, complex64), got int32""",
+        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (bool, uint8, int8, int16, int32, int64, complex64), got int32""",
         gpu=""""adaptive_avg_pool2d_cuda" not implemented for 'Int'""",
     ):
       torch.nn.functional.adaptive_avg_pool2d(t_int32, output_size=2)
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (uint8, int8, int16, int32, int64, complex64), got int64""",
+        tpu="""adaptive_avg_pool2d(): expected input dtype to be none of (bool, uint8, int8, int16, int32, int64, complex64), got int64""",
         gpu=""""adaptive_avg_pool2d_cuda" not implemented for 'Long'""",
     ):
       torch.nn.functional.adaptive_avg_pool2d(t_int64, output_size=2)
@@ -6516,17 +6524,117 @@ Supported combinations for non-constant padding:
     ):
       torch.nn.functional.rms_norm(inp, normalized_shape)
 
-  def test_rms_norm_bool(self):
-    inp = torch.ones(5, 5, device=et.device(), dtype=torch.bool)
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="bool",
+          dtype=torch.bool,
+          tpu_dtype="bool",
+          gpu_dtype="Bool",
+      ),
+      dict(
+          testcase_name="int64",
+          dtype=torch.int64,
+          tpu_dtype="int64",
+          gpu_dtype="Long",
+      ),
+  )
+  def test_rms_norm_unsupported_dtypes(
+      self, dtype: torch.dtype, tpu_dtype: str, gpu_dtype: str
+  ):
+    inp = torch.ones(5, 5, device=et.device(), dtype=dtype)
     normalized_shape = (5,)
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""fused_rms_norm(): expected the input dtype to be floating point, got bool""",
-        gpu=""""LayerNormKernelImpl" not implemented for 'Bool'""",
+        tpu=f"""fused_rms_norm(): expected the input dtype to be floating point, got {tpu_dtype}""",
+        gpu=f""""LayerNormKernelImpl" not implemented for '{gpu_dtype}'""",
         message_reviewed_by="chizz",
     ):
       torch.nn.functional.rms_norm(inp, normalized_shape)
+
+  def test_rms_norm_backward_int(self):
+    inp = torch.ones(5, 5, device=et.device(), dtype=torch.int32)
+    normalized_shape = (5,)
+    grad = torch.randn(5, 5, device=et.device())
+    rstd = torch.randn(5, 1, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""fused_rms_norm_backward(): expected the input dtype to be floating point, got int32""",
+        gpu=""""LayerNormBackwardKernelImpl" not implemented for 'Int'""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._fused_rms_norm_backward(
+          grad,
+          inp,
+          normalized_shape,
+          rstd,
+          weight=None,
+          output_mask=[True, False],
+      )
+
+  def test_rms_norm_backward_bool(self):
+    inp = torch.ones(5, 5, device=et.device(), dtype=torch.bool)
+    normalized_shape = (5,)
+    grad = torch.randn(5, 5, device=et.device())
+    rstd = torch.randn(5, 1, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""fused_rms_norm_backward(): expected the input dtype to be floating point, got bool""",
+        gpu=""""LayerNormBackwardKernelImpl" not implemented for 'Bool'""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._fused_rms_norm_backward(
+          grad,
+          inp,
+          normalized_shape,
+          rstd,
+          weight=None,
+          output_mask=[True, False],
+      )
+
+  def test_rms_norm_backward_normalized_shape_empty(self):
+    inp = torch.ones(5, 5, device=et.device())
+    normalized_shape = []
+    grad = torch.randn(5, 5, device=et.device())
+    rstd = torch.randn(5, 1, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""fused_rms_norm_backward(): the normalized shape must have >= 1 dimensions""",
+        gpu="""Expected normalized_shape to be at least 1-dimensional, i.e., containing at least one element, but got normalized_shape = []""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._fused_rms_norm_backward(
+          grad,
+          inp,
+          normalized_shape,
+          rstd,
+          weight=None,
+          output_mask=[True, False],
+      )
+
+  def test_rms_norm_backward_normalized_shape_too_large(self):
+    inp = torch.ones(5, 5, device=et.device())
+    normalized_shape = (5, 3, 3)
+    grad = torch.randn(5, 5, device=et.device())
+    rstd = torch.randn(5, 1, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""fused_rms_norm_backward(): expected the normalized shape to have <= 2 dimensions, got 3""",
+        gpu="""Given normalized_shape=[5, 3, 3], expected input with shape [*, 5, 3, 3], but got input of size[5, 5]""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._fused_rms_norm_backward(
+          grad,
+          inp,
+          normalized_shape,
+          rstd,
+          weight=None,
+          output_mask=[True, False],
+      )
 
   def test_hardswish_unsupported_dtype(self):
     t = torch.tensor([1, 2], device=et.device(), dtype=torch.int32)
@@ -7451,6 +7559,13 @@ Device-side assertion tracking was not enabled by user.""",
         gpu="""adaptive_avg_pool3d_cuda(): Expected 4D or 5D tensor, but got [10, 10, 10]""",
     ):
       torch.ops.aten.adaptive_avg_pool3d.out(inp, tuple(out.shape), out=out)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool3d(): expected input to be a 4-D or 5-D tensor, got 3-D tensor""",
+        gpu="""adaptive_avg_pool3d_cuda(): Expected 4D or 5D tensor, but got [10, 10, 10]""",
+    ):
+      torch.ops.aten.adaptive_avg_pool3d(inp, tuple(out.shape))
 
   def test_max_pool2d_with_indices_invalid_rank(self):
     inp = torch.ones(10, 10, device=et.device())
@@ -11011,32 +11126,43 @@ Device-side assertion tracking was not enabled by user.""",
       t = torch.ones(2, 2, device=et.device(), dtype=torch.complex64)
       torch.cummin(t, dim=1)
 
-  def test_logcumsumexp_with_unsupported_integer_dtype(self):
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="int32",
+          dtype=torch.int32,
+          tpu_dtype="int32",
+          gpu_dtype="Int",
+      ),
+      dict(
+          testcase_name="bool",
+          dtype=torch.bool,
+          tpu_dtype="bool",
+          gpu_dtype="Bool",
+      ),
+      dict(
+          testcase_name="int64",
+          dtype=torch.int64,
+          tpu_dtype="int64",
+          gpu_dtype="Long",
+      ),
+  )
+  def test_logcumsumexp_with_unsupported_dtype(
+      self, dtype: torch.dtype, tpu_dtype: str, gpu_dtype: str
+  ):
     """Tests logcumsumexp rejects non-floating-point inputs.
 
     Only the functional path is exercised. The out= path decomposes through the
     functional _logcumsumexp under functionalization, so AtenLogcumsumexpOut's
     identical check is unreachable (marked ERROR_COV_INFEASIBLE in the kernel).
     """
-    t = torch.ones(2, 2, device=et.device(), dtype=torch.int32)
+    t = torch.ones(2, 2, device=et.device(), dtype=dtype)
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""logcumsumexp(): expected the input dtype to be floating point, got int32""",
-        gpu=""""logcumsumexp_cuda" not implemented for 'Int'""",
-        message_reviewed_by="wan",
+        tpu=f"""logcumsumexp(): expected the input dtype to be floating point, got {tpu_dtype}""",
+        gpu=f""""logcumsumexp_cuda" not implemented for '{gpu_dtype}'""",
+        message_reviewed_by="chizz",
     ):
       torch.logcumsumexp(t, dim=1)
-
-  def test_logcumsumexp_with_unsupported_bool_dtype(self):
-    """Tests logcumsumexp rejects bool inputs with expected error."""
-    t = torch.tensor([True, False], device=et.device(), dtype=torch.bool)
-    with et.assert_raises_message(
-        RuntimeError,
-        tpu="""logcumsumexp(): expected the input dtype to be floating point, got bool""",
-        gpu=""""logcumsumexp_cuda" not implemented for 'Bool'""",
-        message_reviewed_by="adivinpatel",
-    ):
-      torch.logcumsumexp(t, dim=0)
 
   def test_unsafe_masked_index_error(self):
     with et.assert_raises_message(

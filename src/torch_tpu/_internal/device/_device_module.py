@@ -64,22 +64,32 @@ class _DefaultGeneratorsProperty:
 
   Mirrors the type and lazy initialization behavior of PyTorch's native
   `torch.cuda.default_generators`.
+
+  Attributes:
+    _cached_default_generators: A lazily-initialized tuple holding the default
+      `torch.Generator` instances for each TPU device. It contains exactly
+      `owner.device_count()` elements, ordered by device ordinal (i.e. element
+      at index `i` corresponds to device index `i`). Crossing the pybind11
+      boundary creates new Python wrapper objects on each call to
+      `_device_ops_backend.get_default_generator()`, so caching this tuple
+      ensures identity persistence (`torch.tpu.default_generators is
+      torch.tpu.default_generators`) matching upstream PyTorch semantics.
   """
 
   def __init__(self):
-    self._cached_tuple = None
+    self._cached_default_generators: tuple[torch.Generator, ...] | None = None
 
   def __get__(self, instance, owner):
     if owner is None:
       return ()
-    if self._cached_tuple is None:
+    if self._cached_default_generators is None:
       # Ensure initialized
       owner.current_device()
-      self._cached_tuple = tuple(
+      self._cached_default_generators = tuple(
           _device_ops_backend.get_default_generator(i)
           for i in range(owner.device_count())
       )
-    return self._cached_tuple
+    return self._cached_default_generators
 
 
 # __tt_api_stages__ maps attribute names to ApiStageInfo stage metadata.

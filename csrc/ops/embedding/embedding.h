@@ -29,6 +29,9 @@ namespace torch_tpu {
 
 enum class EmbeddingBagMode { kSum = 0, kMean = 1, kMax = 2 };
 
+absl::StatusOr<mlir::MlirOp> BuildEmbeddingShlo(mlir::MlirOp weight,
+                                                mlir::MlirOp indices);
+
 absl::StatusOr<MlirOpResults<4>> BuildEmbeddingBagShlo(
     mlir::MlirOp weight, mlir::MlirOp indices, mlir::MlirOp offsets,
     bool scale_grad_by_freq, int64_t mode, bool sparse,

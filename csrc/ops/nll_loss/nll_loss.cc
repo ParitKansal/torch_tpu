@@ -19,6 +19,7 @@
 
 #include "ATen/core/Reduction.h"
 #include "absl/status/statusor.h"
+#include "csrc/common/aten_utils.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/ops/binary.h"
 #include "csrc/ops/gather/gather.h"
@@ -52,7 +53,14 @@ absl::StatusOr<MlirOpResults<2>> BuildNllLossForwardOutShlo(
   // reduction: a scalar
   // ignore_index: a scalar
 
-  TT_ASSIGN_OR_RETURN(mlir::ElementType self_dtype, GetElementType(self));
+  TT_ASSIGN_OR_RETURN(mlir::ElementType orig_self_dtype, GetElementType(self));
+  TT_ASSIGN_OR_RETURN(mlir::ElementType compute_dtype,
+                      InferComputationDtype(orig_self_dtype));
+
+  TT_ASSIGN_OR_RETURN(self, CastIfNeeded(self, compute_dtype));
+  if (weight.has_value()) {
+    TT_ASSIGN_OR_RETURN(weight, CastIfNeeded(weight.value(), compute_dtype));
+  }
 
   // mask = target != ignore_index
   // mask is of shape [batch] with 0s and 1s.
@@ -61,13 +69,13 @@ absl::StatusOr<MlirOpResults<2>> BuildNllLossForwardOutShlo(
   TT_ASSIGN_OR_RETURN(mlir::MlirOp mask,
                       BuildNeShlo(target, ignore_index_bcast));
   mlir::MlirOp mask_float =
-      mlir::stablehlo::ConvertElementType(mask, self_dtype);
+      mlir::stablehlo::ConvertElementType(mask, compute_dtype);
 
   // loss = - self[target]
   TT_ASSIGN_OR_RETURN(mlir::MlirOp target_unsqueeze, Unsqueeze(target, 1));
   TT_ASSIGN_OR_RETURN(mlir::MlirOp gathered_unsqueeze,
                       BuildGatherShlo(self, 1, target_unsqueeze,
-                                      /*sparse_grad=*/false, self_dtype));
+                                      /*sparse_grad=*/false, compute_dtype));
   TT_ASSIGN_OR_RETURN(mlir::MlirOp gathered, Squeeze(gathered_unsqueeze, {1}));
   // loss_no_reduction is of shape [batch], which contains the loss for each
   // sample.
@@ -83,11 +91,14 @@ absl::StatusOr<MlirOpResults<2>> BuildNllLossForwardOutShlo(
   loss_no_reduction = mlir::stablehlo::Mul(loss_no_reduction, weight_to_apply);
 
   mlir::MlirOp total_weight_scalar;
-  TT_ASSIGN_OR_RETURN(
-      total_weight_scalar,
-      BuildSumShlo(weight_to_apply, GetAllDimensions(weight_to_apply),
-                   ReductionMode::kDropDims,
-                   /*element_type_opt=*/std::nullopt));
+  if (!unsqueezed && reduction == at::Reduction::None) {
+    total_weight_scalar = MakeScalarConstant(builder, 0.0, compute_dtype);
+  } else {
+    TT_ASSIGN_OR_RETURN(
+        total_weight_scalar,
+        BuildSumShlo(weight_to_apply, GetAllDimensions(weight_to_apply),
+                     ReductionMode::kDropDims));
+  }
 
   mlir::MlirOp loss_output;
   if (reduction == at::Reduction::None) {
@@ -96,8 +107,7 @@ absl::StatusOr<MlirOpResults<2>> BuildNllLossForwardOutShlo(
     TT_ASSIGN_OR_RETURN(
         mlir::MlirOp sum,
         BuildSumShlo(loss_no_reduction, GetAllDimensions(loss_no_reduction),
-                     ReductionMode::kDropDims,
-                     /*element_type_opt=*/std::nullopt));
+                     ReductionMode::kDropDims));
     if (reduction == at::Reduction::Sum) {
       loss_output = sum;
     } else if (reduction == at::Reduction::Mean) {
@@ -115,6 +125,10 @@ absl::StatusOr<MlirOpResults<2>> BuildNllLossForwardOutShlo(
   if (unsqueezed && reduction == at::Reduction::None) {
     TT_ASSIGN_OR_RETURN(loss_output, Squeeze(loss_output, {0}));
   }
+
+  TT_ASSIGN_OR_RETURN(loss_output, CastIfNeeded(loss_output, orig_self_dtype));
+  TT_ASSIGN_OR_RETURN(total_weight_scalar,
+                      CastIfNeeded(total_weight_scalar, orig_self_dtype));
   return {{loss_output, total_weight_scalar}};
 }
 
@@ -144,22 +158,28 @@ absl::StatusOr<mlir::MlirOp> BuildNllLossBackwardGradInputShlo(
   // total_weight: a scalar
 
   // Define the types.
-  TT_ASSIGN_OR_RETURN(mlir::ElementType self_dtype, GetElementType(self));
-  TT_ASSIGN_OR_RETURN(mlir::ElementType grad_output_dtype,
-                      GetElementType(grad_output));
+  TT_ASSIGN_OR_RETURN(mlir::ElementType orig_self_dtype, GetElementType(self));
+  TT_ASSIGN_OR_RETURN(mlir::ElementType compute_dtype,
+                      InferComputationDtype(orig_self_dtype));
   mlir::RankedTensorType target_type = GetTensorTypeOrDie(target);
+
+  TT_ASSIGN_OR_RETURN(grad_output, CastIfNeeded(grad_output, compute_dtype));
+  TT_ASSIGN_OR_RETURN(total_weight, CastIfNeeded(total_weight, compute_dtype));
+  if (weight.has_value()) {
+    TT_ASSIGN_OR_RETURN(weight, CastIfNeeded(weight.value(), compute_dtype));
+  }
 
   // Initialize grad_input to zeros of shape [batch, num_classes].
   // Use self shape since the grad is w.r.t. self.
-  // Use grad_output dtype to keep grad dtype consistent.
-  mlir::MlirOp grad_input = MakeConstantLike(self, 0, grad_output_dtype);
+  // Use compute_dtype to keep intermediate grad accumulation in full precision.
+  mlir::MlirOp grad_input = MakeConstantLike(self, 0, compute_dtype);
 
   // mask is of shape [batch] with 0s and 1s.
   // 0s are for ignoring samples with ignore_index.
   mlir::MlirOp ignore_index_bcast = MakeConstantLike(target, ignore_index);
   TT_ASSIGN_OR_RETURN(mlir::MlirOp mask,
                       BuildNeShlo(target, ignore_index_bcast));
-  mask = mlir::stablehlo::ConvertElementType(mask, grad_output_dtype);
+  mask = mlir::stablehlo::ConvertElementType(mask, compute_dtype);
 
   // Initialize grad_val to -grad_output no matter it's a scalar or [batch].
   mlir::MlirOp grad_val = mlir::stablehlo::Neg(grad_output);
@@ -195,7 +215,7 @@ absl::StatusOr<mlir::MlirOp> BuildNllLossBackwardGradInputShlo(
   // grad_input[i, target[i]] += grad_val[i, 0]
   TT_ASSIGN_OR_RETURN(grad_input,
                       BuildScatterShlo(grad_input, 1, target, grad_val,
-                                       ScatterOp::kAdd, self_dtype));
+                                       ScatterOp::kAdd, compute_dtype));
 
   // Squeeze the batch dimension if it was added earlier.
   if (unsqueezed) {
@@ -208,7 +228,7 @@ absl::StatusOr<mlir::MlirOp> BuildNllLossBackwardGradInputShlo(
         grad_input);
   }
 
-  return grad_input;
+  return CastIfNeeded(grad_input, orig_self_dtype);
 }
 
 }  // namespace torch_tpu

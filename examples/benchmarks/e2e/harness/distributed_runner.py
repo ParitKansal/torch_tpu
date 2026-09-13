@@ -35,15 +35,12 @@ from examples.benchmarks.e2e import common
 from examples.benchmarks.e2e.harness import compile as compile_lib
 from examples.benchmarks.e2e.harness import context as context_lib
 from examples.benchmarks.e2e.harness import discovery as discovery_lib
+from examples.benchmarks.e2e.harness import distributed_models
 from examples.benchmarks.e2e.harness import export as export_lib
-
-# Unused import required to register MLCompass and runner flags with absl.
-from examples.benchmarks.e2e.harness import flags as _  # pylint: disable=unused-import  # noqa: F401
 from examples.benchmarks.e2e.harness import flags as flags_lib
 from examples.benchmarks.e2e.harness import measure as measure_lib
 from examples.benchmarks.e2e.harness import metrics as metrics_lib
 from examples.benchmarks.e2e.harness import mode as mode_lib
-from examples.benchmarks.e2e.harness import models
 from examples.benchmarks.e2e.harness import registry as registry_lib
 from examples.benchmarks.e2e.harness import step_lib
 from examples.benchmarks.e2e.harness import steps
@@ -52,7 +49,7 @@ from examples.benchmarks.e2e.harness import torch_device_ops
 from torch_tpu._internal.distributed import multiprocessing
 from tests.distributed import distributed_utils
 
-discovery_lib.import_submodules(models)
+discovery_lib.import_submodules(distributed_models)
 discovery_lib.import_submodules(steps)
 
 _FRAMEWORK = mode_lib.Framework.TORCH

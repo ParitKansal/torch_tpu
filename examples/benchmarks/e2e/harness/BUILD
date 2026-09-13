@@ -33,7 +33,7 @@ torch_tpu_py_library(
     srcs = ["base_test.py"],
     deps = [
         "//shims/absl_py/logging",
-        "//tests:seed_test_utils",
+        "//shims/absl_py/testing:absltest",
     ],
 )
 
@@ -176,6 +176,9 @@ torch_tpu_py_test(
         "--max_warmup_steps=1",
         "--post_warmup_steps=0",
     ],
+    data = [
+        "//examples/huggingface_transformers:model_configs_data",
+    ],
     env = {
         "BENCHMARK_PLATFORM": "v5e_1x1",
     },
@@ -245,7 +248,7 @@ torch_tpu_py_library(
         ":target",
         ":torch_device_ops",
         "//examples/benchmarks/e2e:common",
-        "//examples/benchmarks/e2e/harness/models",
+        "//examples/benchmarks/e2e/harness/distributed_models",
         "//examples/benchmarks/e2e/harness/steps",
         "//shims/absl_py:app",
         "//shims/absl_py/logging",
@@ -255,6 +258,41 @@ torch_tpu_py_library(
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//tests/distributed:distributed_utils",
         "@pypi//fairscale",
+    ],
+)
+
+torch_tpu_py_test(
+    name = "torch_benchmark_full",
+    timeout = "long",
+    srcs = ["torch_benchmark_test.py"],
+    main = "torch_benchmark_test.py",
+    notap = "Intended to be run with nightly benchmark suite",
+    tags = [
+        "requires-net:external",
+    ],
+    deps = [
+        ":base_test",
+        ":cases",
+        ":compile",
+        ":context",
+        ":discovery",
+        ":export",
+        ":flags",
+        ":measure",
+        ":metrics",
+        ":mode",
+        ":registry",
+        ":step_lib",
+        ":target",
+        ":torch_device_ops",
+        "//examples/benchmarks/e2e:common",
+        "//examples/benchmarks/e2e/harness/models",
+        "//examples/benchmarks/e2e/harness/steps",
+        "//shims/absl_py/logging",
+        "//shims/absl_py/testing:absltest",
+        "//shims/absl_py/testing:parameterized",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
     ],
 )
 

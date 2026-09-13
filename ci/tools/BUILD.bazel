@@ -12,7 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
+
 exports_files(
     ["run_cc_tpu_test.sh"],
     visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "list_ci_tests",
+    srcs = ["list_ci_tests.py"],
+    data = [
+        "//:.bazelrc",
+        "//:github_workflows",
+    ],
+    deps = [
+        "@pypi//pyyaml",
+    ],
+)
+
+py_test(
+    name = "list_ci_tests_test",
+    srcs = ["list_ci_tests_test.py"],
+    data = [
+        "//:.bazelrc",
+        "//:github_workflows",
+    ],
+    deps = [
+        ":list_ci_tests",
+    ],
 )

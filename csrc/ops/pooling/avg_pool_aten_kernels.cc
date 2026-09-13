@@ -42,8 +42,10 @@
 #include "csrc/ops/op_names.h"
 #include "csrc/ops/pooling/pooling.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/Casting.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Types.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -55,32 +57,40 @@
 namespace torch_tpu {
 namespace {
 
-// Common computation shared between AvgPool and AvgPoolGrad.
+// Scales the output of the pooling reduction (sum) by the divisor.
 //
-// We use division instead of multiplication by reciprocal (1.0 / divisor)
-// here for better numerical correctness, even though it might be slower.
-// For integer types, calculating 1.0 / divisor can result in a
-// fraction (e.g., -0.5), which truncates to 0 when converted to an integer
-// for use with MakeConstant or multiplication. This would lead to incorrect
-// results (e.g., an all-zero tensor).
-//
-// The divisor for average pooling is computed based on pooling parameters:
-// 1. If divisor_override is provided, it is used.
-// 2. If count_include_pad is true, divisor is the window size.
-// 3. Otherwise, divisor is the number of valid elements in the window,
-//    ignoring padded elements.
-absl::StatusOr<mlir::MlirOp> ComputeAvgPoolDivisor(
-    mlir::MlirBuilder& builder, const mlir::RankedTensorType& input_type,
-    const mlir::RankedTensorType& sum_type,
+// For floating point element types with a constant divisor, we multiply by the
+// reciprocal (1.0 / divisor) using MulOp, avoiding hardware vector division
+// which is significantly slower on TPU. If divisor is 1, this is a no-op.
+// For dynamic divisors (e.g., asymmetric padding with ceil_mode, or when
+// count_include_pad is false), we compute the per-window count tensor and
+// divide.
+absl::StatusOr<mlir::MlirOp> ScaleAvgPoolOutput(
+    mlir::MlirOp dividend, const mlir::RankedTensorType& input_type,
     const ReduceWindowAttributes& reduce_window_attributes,
     bool count_include_pad, std::optional<int64_t> divisor_override) {
-  mlir::Type element_type = input_type.getElementType();
-  auto sum_shape = sum_type.getShape();
+  auto& builder = dividend.getBuilder();
+  const mlir::RankedTensorType dividend_type = GetTensorTypeOrDie(dividend);
+  const mlir::Type element_type = dividend_type.getElementType();
+
+  // Helper to scale dividend by a constant integer divisor.
+  auto scale_by_constant_divisor =
+      [&](int64_t divisor_val) -> absl::StatusOr<mlir::MlirOp> {
+    if (divisor_val == 1) {
+      return dividend;
+    }
+    if (llvm::isa<mlir::FloatType>(element_type)) {
+      const double reciprocal = 1.0 / static_cast<double>(divisor_val);
+      auto scale_const = MakeConstantLike(dividend, reciprocal);
+      return mlir::stablehlo::Mul(dividend, scale_const);
+    }
+    auto divisor_const = MakeConstantLike(dividend, divisor_val);
+    return mlir::stablehlo::Div(dividend, divisor_const);
+  };
 
   // Case A: Divisor is specified
   if (divisor_override.has_value()) {
-    return MakeConstant(builder, divisor_override.value(), element_type,
-                        sum_shape);
+    return scale_by_constant_divisor(divisor_override.value());
   }
 
   // Case B: Count includes padding, so divisor is the product of window
@@ -102,11 +112,11 @@ absl::StatusOr<mlir::MlirOp> ComputeAvgPoolDivisor(
 
     if (!has_extra_padding) {
       // Fast path: Symmetric padding, window size is constant.
-      int64_t window_size = std::accumulate(
+      const int64_t window_size = std::accumulate(
           reduce_window_attributes.window_dimensions.asArrayRef().begin(),
           reduce_window_attributes.window_dimensions.asArrayRef().end(),
           int64_t{1}, std::multiplies<int64_t>());
-      return MakeConstant(builder, window_size, element_type, sum_shape);
+      return scale_by_constant_divisor(window_size);
     }
 
     // Dynamically compute divisor: explicitly padded regions count as 1s,
@@ -158,7 +168,7 @@ absl::StatusOr<mlir::MlirOp> ComputeAvgPoolDivisor(
                              builder.getOpBuilder().getI64Type()),
         reduce_padding);
 
-    return mlir::stablehlo::ReduceWindow(
+    mlir::MlirOp divisor = mlir::stablehlo::ReduceWindow(
         builder,
         /*inputs=*/{padded_ones},
         /*init_values=*/{zero_scalar},
@@ -166,6 +176,7 @@ absl::StatusOr<mlir::MlirOp> ComputeAvgPoolDivisor(
         reduce_window_attributes.window_strides,
         reduce_window_attributes.base_dilations,
         reduce_window_attributes.window_dilations, reduce_padding_attr)[0];
+    return mlir::stablehlo::Div(dividend, divisor);
   }
 
   // Case C: Count does not include padding, so divisor is the number of the
@@ -179,7 +190,7 @@ absl::StatusOr<mlir::MlirOp> ComputeAvgPoolDivisor(
         element_type, rb.getRegion(), rb.getOpBuilder());
   };
 
-  return mlir::stablehlo::ReduceWindow(
+  mlir::MlirOp divisor = mlir::stablehlo::ReduceWindow(
       builder,
       /*inputs=*/{ones},
       /*init_values=*/{init_value},
@@ -188,17 +199,13 @@ absl::StatusOr<mlir::MlirOp> ComputeAvgPoolDivisor(
       reduce_window_attributes.base_dilations,
       reduce_window_attributes.window_dilations,
       reduce_window_attributes.padding)[0];
+  return mlir::stablehlo::Div(dividend, divisor);
 }
 
 absl::StatusOr<mlir::MlirOp> BuildAvgPoolShlo(
     mlir::MlirOp input, int64_t spatial_dim_count, Dimensions kernel_size,
     Dimensions stride, Dimensions padding, bool ceil_mode,
     bool count_include_pad, std::optional<int64_t> divisor_override) {
-  const mlir::ElementType orig_dtype = GetElementTypeOrDie(input);
-  TT_ASSIGN_OR_RETURN(const mlir::ElementType compute_dtype,
-                      InferComputationDtype(orig_dtype));
-  TT_ASSIGN_OR_RETURN(input, CastIfNeeded(input, compute_dtype));
-
   auto& builder = input.getBuilder();
 
   // 1. Create a batch input by normalizing the input tensor
@@ -258,17 +265,13 @@ absl::StatusOr<mlir::MlirOp> BuildAvgPoolShlo(
       reduce_window_attributes.base_dilations,
       reduce_window_attributes.window_dilations,
       reduce_window_attributes.padding)[0];
-  auto sum_type = GetTensorTypeOrDie(sum_output);
 
   TT_ASSIGN_OR_RETURN(
-      auto divisor, ComputeAvgPoolDivisor(builder, input_type, sum_type,
-                                          reduce_window_attributes,
-                                          count_include_pad, divisor_override));
-  auto final_output = mlir::stablehlo::Div(sum_output, divisor);
+      auto final_output,
+      ScaleAvgPoolOutput(sum_output, input_type, reduce_window_attributes,
+                         count_include_pad, divisor_override));
 
-  auto result =
-      RemoveTrivialBatch(final_output, original_dim_size, spatial_dim_count);
-  return CastIfNeeded(result, orig_dtype);
+  return RemoveTrivialBatch(final_output, original_dim_size, spatial_dim_count);
 }
 
 // Mathematically, average pooling is a linear transformation that can be
@@ -317,12 +320,6 @@ absl::StatusOr<mlir::MlirOp> BuildAvgPoolBackwardShlo(
     const Dimensions& kernel_size, const Dimensions& stride,
     const Dimensions& padding, bool ceil_mode, bool count_include_pad,
     std::optional<int64_t> divisor_override) {
-  const mlir::ElementType orig_dtype = GetElementTypeOrDie(grad_output);
-  TT_ASSIGN_OR_RETURN(const mlir::ElementType compute_dtype,
-                      InferComputationDtype(orig_dtype));
-  TT_ASSIGN_OR_RETURN(grad_output, CastIfNeeded(grad_output, compute_dtype));
-  TT_ASSIGN_OR_RETURN(input, CastIfNeeded(input, compute_dtype));
-
   auto& builder = grad_output.getBuilder();
 
   // 1. Create batch inputs for both input and grad_output
@@ -334,8 +331,6 @@ absl::StatusOr<mlir::MlirOp> BuildAvgPoolBackwardShlo(
   mlir::MlirOp batch_grad_output = batch_grad_output_info.batch_input;
 
   const mlir::RankedTensorType input_type = GetTensorTypeOrDie(batch_input);
-  const mlir::RankedTensorType grad_output_type =
-      GetTensorTypeOrDie(batch_grad_output);
   const mlir::Type element_type = input_type.getElementType();
   const int64_t num_dims = input_type.getRank();
 
@@ -365,12 +360,10 @@ absl::StatusOr<mlir::MlirOp> BuildAvgPoolBackwardShlo(
       spatial_dim_count, num_dims);
 
   // 5. Normalize grad_output by the divisor.
-  TT_ASSIGN_OR_RETURN(
-      auto divisor, ComputeAvgPoolDivisor(builder, input_type, grad_output_type,
-                                          reduce_window_attributes,
-                                          count_include_pad, divisor_override));
-  auto normalized_grad_output =
-      mlir::stablehlo::Div(batch_grad_output, divisor);
+  TT_ASSIGN_OR_RETURN(auto normalized_grad_output,
+                      ScaleAvgPoolOutput(batch_grad_output, input_type,
+                                         reduce_window_attributes,
+                                         count_include_pad, divisor_override));
 
   // 6. Perform transposed convolution with interior/edge padding
   auto bw_window_dimensions = reduce_window_attributes.window_dimensions;
@@ -462,9 +455,8 @@ absl::StatusOr<mlir::MlirOp> BuildAvgPoolBackwardShlo(
   auto sliced_grad = mlir::stablehlo::Slice(slicable_result, start_indices,
                                             limit_indices, slice_strides);
 
-  auto result = RemoveTrivialBatch(
-      sliced_grad, batch_input_info.original_dim_size, spatial_dim_count);
-  return CastIfNeeded(result, orig_dtype);
+  return RemoveTrivialBatch(sliced_grad, batch_input_info.original_dim_size,
+                            spatial_dim_count);
 }
 
 auto GetAvgPoolOpBuilder(at::IntArrayRef kernel_size, at::IntArrayRef stride,
@@ -650,13 +642,13 @@ at::Tensor& AtenAvgPool3dOut(const at::Tensor& self,
             << "not implemented for "
             << torch_tpu::ToString(self.scalar_type());
         TT_CHECK_THROW(self.scalar_type() != at::ScalarType::Bool &&
-                           self.scalar_type() != at::ScalarType::BFloat16 &&
-                           self.scalar_type() != at::ScalarType::Half &&
                            self.scalar_type() != at::ScalarType::Byte &&
                            self.scalar_type() != at::ScalarType::Char &&
                            self.scalar_type() != at::ScalarType::Short &&
                            self.scalar_type() != at::ScalarType::Int &&
-                           self.scalar_type() != at::ScalarType::ComplexFloat,
+                           self.scalar_type() != at::ScalarType::ComplexFloat &&
+                           self.scalar_type() != at::ScalarType::BFloat16 &&
+                           self.scalar_type() != at::ScalarType::Half,
                        error::kInvalidArgument)
             << "expected input dtype to be none of (bool, uint8, int8, "
                "int16, int32, complex64), got "

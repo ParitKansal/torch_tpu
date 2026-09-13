@@ -184,6 +184,13 @@ def _get_tpu_version(tag):
     """Extracts the TPU version from a requires- tag, sanitized for target names."""
     return tag[len("requires-"):].replace(":", "_")
 
+def _fail_on_generic_requires_tpu_tag(tags):
+    """Fails if the generic 'requires-tpu' is present in the tags."""
+    if "requires-tpu" in tags:
+        fail(
+            "The generic 'requires-tpu' tag is disallowed. Please specify a TPU generation.",
+        )
+
 # Exported for build_defs_test.bzl.
 is_backend_dep_for_testing = is_backend_dep
 get_tpu_version_for_testing = _get_tpu_version
@@ -208,6 +215,8 @@ def torch_tpu_cc_library(name, srcs = [], hdrs = [], copts = None, features = No
     if len(hdrs) > 1:
         fail("torch_tpu_cc_library must contain at most one hdrs file. This reduces build bloat " +
              "and prevents circular dependencies between files.")
+
+    _fail_on_generic_requires_tpu_tag(kwargs.get("tags", []))
 
     kwargs["deps"] = _route_backend_deps_through_fixed(name, kwargs.get("deps", []))
 
@@ -679,6 +688,7 @@ def torch_tpu_cc_test(
     if not is_oss():
         args = ["--suppress_failure_output"] + args
     tags = tags or []
+    _fail_on_generic_requires_tpu_tag(tags)
     data = kwargs.pop("data", [])
     if is_oss():
         data.append("@bazel_tools//tools/bash/runfiles")
@@ -820,6 +830,8 @@ def torch_tpu_py_library(name, srcs = [], allow_multiple_srcs = False, **kwargs)
     if len(srcs) > 1 and not allow_multiple_srcs:
         fail("torch_tpu_py_library must contain at most one srcs file. This prevents build bloat " +
              "and circular dependencies between files.")
+
+    _fail_on_generic_requires_tpu_tag(kwargs.get("tags", []))
 
     deps = kwargs.pop("deps", [])
     if not is_oss():
@@ -969,6 +981,7 @@ def torch_tpu_py_test(
         # internal build.
         args = ["--suppress_failure_output"] + args
     tags = tags or []
+    _fail_on_generic_requires_tpu_tag(tags)
     data = kwargs.pop("data", [])
     if is_wheel_test:
         if ":torch_tpu_wheel" not in data:

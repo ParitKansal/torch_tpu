@@ -51,15 +51,6 @@ absl::Status InitializeAsDistributedWorker(
 absl::StatusOr<DistributedWorkerConfiguration>
 GetDistributedWorkerConfiguration();
 
-// Returns the world size from the WORLD_SIZE environment variable.
-//
-// Launcher utilities like torchrun typically set WORLD_SIZE, which we can
-// piggyback on to determine if we're running in single-device mode or
-// distributed mode when it is set.
-//
-// This function is memoized, so the environment variable is only read once.
-const absl::StatusOr<int>& GetWorldSizeFromEnvOnce();
-
 }  // namespace torch_tpu
 
 #endif  // TORCH_TPU_CSRC_DISTRIBUTED_SLICEBUILDER_DISCOVERY_H_

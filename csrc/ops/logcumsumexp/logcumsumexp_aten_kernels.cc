@@ -97,11 +97,12 @@ absl::StatusOr<ScanBodyResults> LogaddexpScanBody(mlir::OpBuilder& op_builder,
 absl::StatusOr<mlir::MlirOp> BuildLogcumsumexpShlo(const int64_t normalized_dim,
                                                    mlir::MlirOp input) {
   const mlir::RankedTensorType input_type = GetTensorTypeOrDie(input);
-  // logcumsumexp of a 0-dim (scalar) tensor is the scalar itself. Return the
-  // input directly so the lowering stays pure SHLO; routing the scalar case
-  // through an aten clone/copy would trip the composite-op check for this
-  // non-whitelisted op.
-  if (input_type.getRank() == 0) {
+  // logcumsumexp of a 0-dim (scalar) tensor or a 0-element empty tensor is the
+  // tensor itself. Return the input directly so the lowering stays pure SHLO;
+  // routing the scalar case through an aten clone/copy would trip the
+  // composite-op check for this non-whitelisted op.
+  if (input_type.getRank() == 0 ||
+      (input_type.hasStaticShape() && input_type.getNumElements() == 0)) {
     return input;
   }
   const mlir::ElementType input_elem_type = GetElementTypeOrDie(input);
@@ -148,7 +149,7 @@ absl::StatusOr<mlir::MlirOp> BuildLogcumsumexpShlo(const int64_t normalized_dim,
 
 at::Tensor AtenLogcumsumexp(const at::Tensor& self, const int64_t dim) {
   TT_KERNEL(OpName::kLogcumsumexp, param_keys, (self, dim), {
-    if (self.dim() > 0) {
+    if (self.dim() > 0 && self.numel() > 0) {
       TT_CHECK_THROW(self.is_floating_point(), error::kInvalidArgument)
           << "expected the input dtype to be floating point, got "
           << ToString(self.scalar_type());
@@ -174,7 +175,7 @@ at::Tensor& AtenLogcumsumexpOut(const at::Tensor& self, const int64_t dim,
     // _logcumsumexp.out into the functional _logcumsumexp plus a copy, so the
     // identical check in AtenLogcumsumexp fires first. Kept as a defensive
     // check for non-functionalized paths.
-    if (self.dim() > 0) {
+    if (self.dim() > 0 && self.numel() > 0) {
       TT_CHECK_THROW(  // ERROR_COV_INFEASIBLE=functionalization rewrites .out
                        // to the functional _logcumsumexp, whose identical check
                        // fires first

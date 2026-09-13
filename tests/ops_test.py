@@ -565,6 +565,8 @@ ACCURACY_OVERRIDES_VS_CPU: dict[str, dict[torch.dtype, dict[str, float]]] = {
         torch.bfloat16: {"rtol": 1.0, "atol": 2.5e-5},
         torch.float16: {"rtol": 6.9e-3, "atol": 3.0e-3},
     },
+    # Tolerance overrides justified for performance: native bfloat16/float16
+    # pooling computations avoid costly intermediate upcasts to float32.
     "nn.functional.adaptive_avg_pool2d": {
         torch.bfloat16: {"rtol": 2, "atol": 3e-2},
         torch.float16: {"rtol": 1.9e-1, "atol": 4e-3},
@@ -1062,6 +1064,20 @@ ACCURACY_OVERRIDES_VS_GPU = {
         torch.float16: {"rtol": 4.8e-2},
         torch.float32: {"rtol": 5.2e-2},
     },
+    # Tolerance overrides justified for performance: native bfloat16/float16
+    # pooling computations avoid costly intermediate upcasts to float32.
+    "nn.functional.adaptive_avg_pool2d": {
+        torch.bfloat16: {"rtol": 1.8e-2, "atol": 2.5e-2},
+        torch.float16: {"rtol": 2.5e-3, "atol": 4.5e-3},
+    },
+    "nn.functional.adaptive_avg_pool3d": {
+        torch.bfloat16: {"rtol": 1.8e-2, "atol": 2.0e-2},
+        torch.float16: {"rtol": 3.5e-3, "atol": 3.0e-3},
+    },
+    "nn.functional.avg_pool2d": {
+        torch.bfloat16: {"rtol": 3.1e-2, "atol": 4.5e-2},
+        torch.float16: {"rtol": 3.1e-3, "atol": 4.1e-3},
+    },
     "nn.functional.binary_cross_entropy": {
         torch.bfloat16: {"rtol": 9e-3, "atol": 5.9e-3},
         torch.float16: {"rtol": 8.5e-3, "atol": 4.4e-4},
@@ -1085,6 +1101,12 @@ ACCURACY_OVERRIDES_VS_GPU = {
         torch.float16: {"rtol": 2.2e-1, "atol": 6.6e-2},
         torch.float32: {"rtol": 3e-1, "atol": 9.4e-2},
     },
+    "nn.functional.embedding": {
+        torch.float16: {
+            "rtol": 3.9e-3,
+            "atol": 2.4e-3,
+        },  # TOLERANCE_OVERRIDE_OK
+    },
     "nn.functional.embedding_bag": {
         torch.bfloat16: {"atol": 3.2e-2},
         torch.float16: {"atol": 4e-3},
@@ -1099,17 +1121,11 @@ ACCURACY_OVERRIDES_VS_GPU = {
     "nn.functional.group_norm": {
         torch.bfloat16: {"rtol": 3.3e-2, "atol": 8e-2},
     },
-    "nn.functional.hardsigmoid": {
-        torch.bfloat16: {"atol": 4.7e-3},
-    },
     "nn.functional.logsigmoid": {
         torch.float32: {"rtol": 3.2e-5},
     },
     "nn.functional.mse_loss": {
         torch.float32: {"rtol": 2.3e-6},
-    },
-    "nn.functional.nll_loss": {
-        torch.float16: {"rtol": 3e-3, "atol": 2.4e-3},
     },
     "nn.functional.silu": {
         torch.bfloat16: {"atol": 7.4e-5},
@@ -1353,6 +1369,20 @@ ACCURACY_OVERRIDES_VS_GPU_COMPILED = {
     "mm": {
         torch.complex64: {"rtol": 3.8e-2},
     },
+    # Tolerance overrides justified for performance: native bfloat16/float16
+    # pooling computations avoid costly intermediate upcasts to float32.
+    "nn.functional.adaptive_avg_pool2d": {
+        torch.bfloat16: {"rtol": 1.8e-2, "atol": 2.5e-2},
+        torch.float16: {"rtol": 2.5e-3, "atol": 4.5e-3},
+    },
+    "nn.functional.adaptive_avg_pool3d": {
+        torch.bfloat16: {"rtol": 1.8e-2, "atol": 2.0e-2},
+        torch.float16: {"rtol": 3.5e-3, "atol": 3.0e-3},
+    },
+    "nn.functional.avg_pool2d": {
+        torch.bfloat16: {"rtol": 3.1e-2, "atol": 4.5e-2},
+        torch.float16: {"rtol": 3.1e-3, "atol": 4.1e-3},
+    },
     "nn.functional.binary_cross_entropy": {
         torch.bfloat16: {"rtol": 9e-3, "atol": 5.9e-3},
         torch.float16: {"rtol": 8.5e-3, "atol": 4.4e-4},
@@ -1377,16 +1407,18 @@ ACCURACY_OVERRIDES_VS_GPU_COMPILED = {
         torch.float16: {"rtol": 2.2e-1, "atol": 6.7e-2},
         torch.float32: {"rtol": 3e-1, "atol": 9.4e-2},
     },
+    "nn.functional.embedding": {
+        torch.float16: {
+            "rtol": 3.9e-3,
+            "atol": 2.4e-3,
+        },  # TOLERANCE_OVERRIDE_OK
+    },
     "nn.functional.embedding_bag": {
         torch.bfloat16: {"atol": 6.5e-2},
         torch.float16: {"atol": 2.5e-1},
     },
     "nn.functional.mse_loss": {
         torch.float32: {"rtol": 2.3e-6},
-    },
-    "nn.functional.nll_loss": {
-        torch.bfloat16: {"rtol": 2.3e-2, "atol": 5.9e-3},
-        torch.float16: {"rtol": 3e-3, "atol": 2.4e-3},
     },
     "norm": {
         torch.complex64: {"rtol": 5.7e-6},
@@ -1550,6 +1582,12 @@ ACCURACY_OVERRIDES_GRAD: dict[str, dict[torch.dtype, dict[str, float]]] = (
             },
             "mul": {
                 torch.float16: {"rtol": 1.1e-3, "atol": 4e-3},
+            },
+            # Tolerance overrides justified for performance: native bfloat16/float16
+            # pooling computations avoid costly intermediate upcasts to float32.
+            "nn.functional.avg_pool2d": {
+                torch.bfloat16: {"rtol": 3.1e-2, "atol": 4.5e-2},
+                torch.float16: {"rtol": 3.1e-3, "atol": 4.1e-3},
             },
             "nn.functional.batch_norm": {
                 torch.float16: {"rtol": 1, "atol": 2.6e-3},
@@ -1812,7 +1850,15 @@ class TestOps(op_testing.OpInfoTestBase):
     self.do_test_op(
         "nn.functional.adaptive_avg_pool3d",
         exclude_dtypes={
-            "gpu": INTEGRAL_DTYPES + COMPLEX_DTYPES,
+            "gpu": (
+                COMPLEX_DTYPES
+                + (
+                    torch.uint8,
+                    torch.int8,
+                    torch.int16,
+                    torch.int32,
+                )
+            ),
         },
     )
 
@@ -1943,8 +1989,8 @@ class TestOps(op_testing.OpInfoTestBase):
         check_out_variant=False,
         # TODO: fix arange() succeeding for bool and complex types (it should
         # fail).
-        # TODO: fix arange() returning wrong results for uint8 and int64.
-        exclude_dtypes=(torch.bool, torch.uint8, torch.int64) + COMPLEX_DTYPES,
+        # TODO: fix arange() returning wrong results for uint8.
+        exclude_dtypes=(torch.bool, torch.uint8) + COMPLEX_DTYPES,
         # NOTE: the test sample contains torch.arange(5), which *should*
         # return a tensor on CPU. Therefore we don't check that the result
         # is on TPU.
@@ -3159,7 +3205,6 @@ class TestOps(op_testing.OpInfoTestBase):
                 torch.int8,
                 torch.int16,
                 torch.int32,
-                torch.int64,
             )
         ),
     )
@@ -3243,6 +3288,35 @@ class TestOps(op_testing.OpInfoTestBase):
   # That might be the cause.
   def test_maximum(self):
     self.do_test_op("maximum")
+
+  @op_testing.skip_if_torch_tpu_vs_gpu_mode
+  def test_max_pool1d(self):
+    self.do_test_op(
+        "nn.functional.max_pool1d",
+        check_dynamism=False,
+        # TODO: complex64, float64, and int64 dtypes are not supported on TPU.
+        exclude_dtypes={
+            "cpu": (
+                torch.complex64,
+                torch.float64,
+                torch.int32,
+                torch.int64,
+            ),
+            "gpu": (
+                (
+                    torch.complex64,
+                    torch.float64,
+                )
+                # TODO: b/476417319 reject integer dtypes in TPU implementation,
+                # so that it matches the GPU implementation.
+                + (
+                    torch.uint8,
+                    torch.int8,
+                    torch.int16,
+                )
+            ),
+        },
+    )
 
   def test_max_pool2d(self):
     self.do_test_op(
@@ -3600,7 +3674,6 @@ class TestOps(op_testing.OpInfoTestBase):
             torch.int8,
             torch.int16,
             torch.int32,
-            torch.int64,
         )
         + COMPLEX_DTYPES,
     )

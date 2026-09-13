@@ -23,7 +23,6 @@ from torch import distributed as dist
 from torch.distributed import tensor
 import torch.multiprocessing as mp
 from torch_tpu._internal import compile as tt_compile
-from torch_tpu._internal.compile import torch_tpu_compiled_executable
 from torch_tpu._internal.device import _device_module as tpu_device
 from torch_tpu._internal.distributed.launchers import singlehost_wrapper
 from torch_tpu._internal.utils import test_utils as utils
@@ -32,24 +31,17 @@ from tests import oss_utils
 from tests import seed_test_utils
 from tests.distributed import distributed_utils
 
-TorchTpuCompiledExecutable = (
-    torch_tpu_compiled_executable.TorchTpuCompiledExecutable
-)
 
-
-def get_all_compiled_executables(execs) -> list[TorchTpuCompiledExecutable]:
-  flat_execs = []
-  for exe in execs:
-    for leaf in exe.compiled_executables:
-      if isinstance(leaf, TorchTpuCompiledExecutable):
-        flat_execs.append(leaf)
-  return flat_execs
-
-
-def compile_and_assert_outputs(func, inputs, expected_outputs=None):
-  """Compiles a function, runs it, and returns compiled executables."""
-  backend = tt_compile.TpuBackend(debug=True)
-  compiled = torch.compile(func, backend=backend)
+def compile_and_assert_outputs(
+    func, inputs, expected_outputs=None
+) -> list[tt_compile.TpuCompileDebug]:
+  """Compiles a function, runs it, and returns debug objects."""
+  debugs: list[tt_compile.TpuCompileDebug] = []
+  compiled = torch.compile(
+      func,
+      backend="tpu",
+      options={"serializable": False, "debug_callback": debugs.append},
+  )
   output_compiled = compiled(*inputs)
 
   if expected_outputs is not None:
@@ -58,7 +50,7 @@ def compile_and_assert_outputs(func, inputs, expected_outputs=None):
     for actual, expected in zip(output_compiled, expected_outputs):
       utils.assert_close(actual.to("cpu"), expected.to("cpu"))
 
-  return get_all_compiled_executables(backend._compiled_executables)
+  return debugs
 
 
 def run_all_reduce_with_torch_compile() -> None:
@@ -81,26 +73,31 @@ def run_all_reduce_with_torch_compile() -> None:
       [0.0, 1.0, float(rank), float(rank**2)], device="tpu"
   )
   expected = torch.tensor([1.0, 17.0, 57.0, 281.0])
-  execs = compile_and_assert_outputs(
-      func, inputs=(input_tpu,), expected_outputs=(expected,)
+  debugs = compile_and_assert_outputs(
+      func,
+      inputs=(input_tpu,),
+      expected_outputs=(expected,),
   )
-  assert len(execs) == 3, f"Expected 3 graphs, got {len(execs)}"
 
   # debug mode enabled so expect graphs to be set and in plaintext
-  assert "torch.ops.aten.abs" not in execs[0].graph_module_debug_str
-  assert "stablehlo.abs" not in execs[0].mlir_text
+  assert len(debugs) == 1
+  assert len(debugs[0].stablehlo_forward_text) == 3
 
   assert (
-      "torch.ops._c10d_functional.all_reduce" in execs[1].graph_module_debug_str
+      "torch.ops._c10d_functional.all_reduce"
+      in debugs[0].post_autograd_fx_forward_code[0]
   )
 
-  assert "stablehlo.all_reduce" in execs[1].mlir_text
+  assert "stablehlo.abs" not in debugs[0].stablehlo_forward_text[0]
+  assert "stablehlo.all_reduce" not in debugs[0].stablehlo_forward_text[0]
 
-  assert "torch.ops.aten.abs" in execs[2].graph_module_debug_str
-  assert "stablehlo.abs" in execs[2].mlir_text
+  assert "stablehlo.all_reduce" in debugs[0].stablehlo_forward_text[1]
+  assert "stablehlo.abs" not in debugs[0].stablehlo_forward_text[1]
 
-  assert len({e.graph_module_debug_str for e in execs}) == 3
-  assert len({e.mlir_text for e in execs}) == 3
+  assert "stablehlo.abs" in debugs[0].stablehlo_forward_text[2]
+  assert "stablehlo.all_reduce" not in debugs[0].stablehlo_forward_text[2]
+
+  assert len(set(debugs[0].stablehlo_forward_text)) == 3
 
 
 def run_all_gather_into_tensor_with_torch_compile() -> None:
@@ -122,12 +119,14 @@ def run_all_gather_into_tensor_with_torch_compile() -> None:
     return output
 
   expected = torch.tensor([float(2 * i + 1) for i in range(world_size)])
-  execs = compile_and_assert_outputs(
+  debugs = compile_and_assert_outputs(
       func,
       inputs=(torch.tensor([float(rank)], device="tpu"),),
       expected_outputs=(expected,),
   )
-  assert len(execs) == 3, f"Expected 3 graphs, got {len(execs)}"
+  assert (
+      len(debugs[0].stablehlo_forward_text) == 3
+  ), f"Expected 3 graphs, got {len(debugs[0].stablehlo_forward_text)}"
 
 
 def run_all_gather_with_torch_compile() -> None:
@@ -148,12 +147,14 @@ def run_all_gather_with_torch_compile() -> None:
     return output
 
   expected = torch.tensor([float(2 * i + 1) for i in range(world_size)])
-  execs = compile_and_assert_outputs(
+  debugs = compile_and_assert_outputs(
       func,
       inputs=(torch.tensor([float(rank)], device="tpu"),),
       expected_outputs=(expected,),
   )
-  assert len(execs) == 3, f"Expected 3 graphs, got {len(execs)}"
+  assert (
+      len(debugs[0].stablehlo_forward_text) == 3
+  ), f"Expected 3 graphs, got {len(debugs[0].stablehlo_forward_text)}"
 
 
 def run_all_to_all_single_with_torch_compile() -> None:
@@ -175,7 +176,7 @@ def run_all_to_all_single_with_torch_compile() -> None:
       [float(j * world_size + rank) for j in range(world_size)]
   )
   expected = expected + torch.abs(expected)
-  execs = compile_and_assert_outputs(
+  debugs = compile_and_assert_outputs(
       func,
       inputs=(
           (
@@ -185,7 +186,9 @@ def run_all_to_all_single_with_torch_compile() -> None:
       ),
       expected_outputs=(expected,),
   )
-  assert len(execs) == 3, f"Expected 3 graphs, got {len(execs)}"
+  assert (
+      len(debugs[0].stablehlo_forward_text) == 3
+  ), f"Expected 3 graphs, got {len(debugs[0].stablehlo_forward_text)}"
 
 
 def run_all_to_all_with_torch_compile() -> None:
@@ -208,10 +211,10 @@ def run_all_to_all_with_torch_compile() -> None:
   expected = torch.tensor(
       [float(j * world_size + rank) for j in range(world_size)]
   )
-  execs = compile_and_assert_outputs(
+  debugs = compile_and_assert_outputs(
       func, inputs=(inputs,), expected_outputs=(expected,)
   )
-  assert len(execs) == 2, f"Expected 2 graphs, got {len(execs)}"
+  assert len(debugs) == 2, f"Expected 2 graphs, got {len(debugs)}"
 
 
 def run_reduce_scatter_with_torch_compile() -> None:
@@ -246,10 +249,12 @@ def run_reduce_scatter_with_torch_compile() -> None:
   ])
   expected = expected + torch.abs(expected)
 
-  execs = compile_and_assert_outputs(
+  debugs = compile_and_assert_outputs(
       func, inputs=(inputs,), expected_outputs=(expected,)
   )
-  assert len(execs) == 3, f"Expected 3 graphs, got {len(execs)}"
+  assert (
+      len(debugs[0].stablehlo_forward_text) == 3
+  ), f"Expected 3 graphs, got {len(debugs[0].stablehlo_forward_text)}"
 
 
 def run_gather_with_torch_compile() -> None:
@@ -274,10 +279,10 @@ def run_gather_with_torch_compile() -> None:
   input_tpu = torch.tensor([float(rank)], device="tpu")
   expected = torch.tensor([float(rank) + 2.0])
 
-  execs = compile_and_assert_outputs(
+  debugs = compile_and_assert_outputs(
       func, inputs=(input_tpu,), expected_outputs=(expected,)
   )
-  assert len(execs) == 2, f"Expected 2 graphs, got {len(execs)}"
+  assert len(debugs) == 2, f"Expected 2 graphs, got {len(debugs)}"
 
 
 def run_barrier_with_torch_compile() -> None:
@@ -294,10 +299,10 @@ def run_barrier_with_torch_compile() -> None:
     return x
 
   input_tpu = torch.tensor([1.0], device="tpu")
-  execs = compile_and_assert_outputs(
+  debugs = compile_and_assert_outputs(
       func, inputs=(input_tpu,), expected_outputs=(torch.tensor([0.6143]),)
   )
-  assert len(execs) == 3, f"Expected 3 graphs, got {len(execs)}"
+  assert len(debugs) == 3, f"Expected 3 graphs, got {len(debugs)}"
 
 
 def run_reduce_scatter_tensor_with_torch_compile() -> None:
@@ -317,10 +322,12 @@ def run_reduce_scatter_tensor_with_torch_compile() -> None:
     return output
 
   input_tpu = torch.tensor([float(rank)] * world_size, device="tpu")
-  execs = compile_and_assert_outputs(
+  debugs = compile_and_assert_outputs(
       func, inputs=(input_tpu,), expected_outputs=(torch.tensor([57.0]),)
   )
-  assert len(execs) == 3, f"Expected 3 graphs, got {len(execs)}"
+  assert (
+      len(debugs[0].stablehlo_forward_text) == 3
+  ), f"Expected 3 graphs, got {len(debugs[0].stablehlo_forward_text)}"
 
 
 def run_broadcast_with_torch_compile() -> None:
@@ -338,10 +345,10 @@ def run_broadcast_with_torch_compile() -> None:
     return x
 
   input_tpu = torch.tensor([float(rank)], device="tpu")
-  execs = compile_and_assert_outputs(
+  debugs = compile_and_assert_outputs(
       func, inputs=(input_tpu,), expected_outputs=(torch.tensor([1.0]),)
   )
-  assert len(execs) == 2, f"Expected 2 graphs, got {len(execs)}"
+  assert len(debugs) == 2, f"Expected 2 graphs, got {len(debugs)}"
 
 
 def run_fake_tensor_side_effect_pruning_with_torch_compile() -> None:
@@ -357,8 +364,12 @@ def run_fake_tensor_side_effect_pruning_with_torch_compile() -> None:
     dt_repl = dt.redistribute(mesh, [tensor.Replicate()])
     return dt_repl.to_local()
 
-  backend = tt_compile.TpuBackend(debug=True)
-  compiled_func = torch.compile(my_func, backend=backend, fullgraph=True)
+  compiled_func = torch.compile(
+      my_func,
+      backend="tpu",
+      options={"serializable": False},
+      fullgraph=True,
+  )
 
   input_tpu = torch.tensor([float(rank)], dtype=torch.float32, device="tpu")
 

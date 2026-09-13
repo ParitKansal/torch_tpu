@@ -193,7 +193,6 @@ torch_tpu_py_test(
         "//examples/benchmarks/e2e/harness:step_lib",
         "//examples/benchmarks/e2e/harness:target",
         "//examples/benchmarks/e2e/harness:torch_device_ops",
-        "//examples/benchmarks/e2e/harness/models",
         "//examples/benchmarks/e2e/harness/steps",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",

@@ -83,17 +83,14 @@ torch_tpu_py_test(
     srcs = ["api_registry_test.py"],
     # Route to OSS TPU runners and exclude from OSS CPU runners
     # (running on CPU took 600+ sec due to emulated device init).
-    tags = if_oss([
-        "presubmit-v5",
-        "presubmit-v7",
-        "requires-tpu",
-    ]),
+    tags = if_oss(["requires-tpu-v5lite"]),
     deps = [
         ":seed_test_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu:_loader",
+        "//src/torch_tpu/_internal/pallas:pallas_lib",
         "//src/torch_tpu/_internal/profiler:profiler_config",
         "//src/torch_tpu/_internal/utils:annotations",
     ],
@@ -958,6 +955,7 @@ torch_tpu_py_test(
     deps = [
         ":op_testing",
         ":ops_test_data",
+        ":oss_utils",
         ":quantize_utils",
         ":seed_test_utils",
         "//csrc/eager:tpu_aten_kernels",
@@ -968,6 +966,7 @@ torch_tpu_py_test(
         "//shims/torch:testing_internal",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/compile:tpu_torch_compile",
+        "//src/torch_tpu/_internal/dynamism",
         "//src/torch_tpu/_internal/execution_mode",
         "//src/torch_tpu/_internal/sync",
         "//src/torch_tpu/_internal/utils:test_utils",
@@ -1073,6 +1072,7 @@ torch_tpu_py_test(
     deps = [
         ":op_testing",
         ":ops_test_data",
+        ":oss_utils",
         ":quantize_utils",
         ":seed_test_utils",
         "//csrc/eager:tpu_aten_kernels",
@@ -1083,6 +1083,7 @@ torch_tpu_py_test(
         "//shims/torch:testing_internal",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/compile:tpu_torch_compile",
+        "//src/torch_tpu/_internal/dynamism",
         "//src/torch_tpu/_internal/execution_mode",
         "//src/torch_tpu/_internal/sync",
         "//src/torch_tpu/_internal/utils:test_utils",
@@ -1110,6 +1111,7 @@ torch_tpu_py_test(
     deps = [
         ":op_testing",
         ":ops_test_data",
+        ":oss_utils",
         ":quantize_utils",
         ":seed_test_utils",
         "//csrc/eager:tpu_aten_kernels",
@@ -1120,6 +1122,7 @@ torch_tpu_py_test(
         "//shims/torch:testing_internal",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/compile:tpu_torch_compile",
+        "//src/torch_tpu/_internal/dynamism",
         "//src/torch_tpu/_internal/execution_mode",
         "//src/torch_tpu/_internal/sync",
         "//src/torch_tpu/_internal/utils:test_utils",

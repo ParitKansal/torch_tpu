@@ -218,7 +218,6 @@
 #include "csrc/ops/where/where_aten_kernels.h"
 #include "csrc/ops/xlogy/xlogy_aten_kernels.h"
 #include "torch/library.h"
-#include "xla/xla_data.pb.h"
 
 namespace torch_tpu {
 namespace {
@@ -469,10 +468,12 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   ImplStable<OpName::kEfficientZeroTensor>(m, AtenEfficientZeroTensor);
   ImplStable<OpName::kEluBackwardGradInput>(m, AtenEluBackwardGradInput);
   ImplStable<OpName::kEluOut>(m, AtenEluOut);
+  ImplStable<OpName::kEmbedding>(m, AtenEmbedding);
   ImplStable<OpName::kEmbeddingBag>(m, AtenEmbeddingBag);
   ImplStable<OpName::kEmbeddingBagBackward>(m, AtenEmbeddingBagBackward);
   ImplStable<OpName::kEmbeddingBagForwardOnly>(m, AtenEmbeddingBagForwardOnly);
   ImplStable<OpName::kEmbeddingDenseBackward>(m, AtenEmbeddingDenseBackward);
+  ImplStable<OpName::kEmbeddingOut>(m, AtenEmbeddingOut);
   ImplStable<OpName::kEmbeddingRenorm_>(m, AtenEmbeddingRenorm_);
   ImplStable<OpName::kEmptyMemoryFormat>(m, AtenEmptyMemoryFormat);
   ImplStable<OpName::kEmptyStrided>(m, AtenEmptyStrided);
@@ -1116,18 +1117,6 @@ TORCH_LIBRARY_IMPL(aten, AutogradPrivateUse1, m) {
   // ctc_loss to our custom forward/backward autograd implementation.
   ImplStable<OpName::kCtcLossPublic>(m, AtenCtcLossPublicAutograd);
   ImplStable<OpName::kCtcLossPublicTensor>(m, AtenCtcLossPublicTensorAutograd);
-  // MaxPool is by default a CompositeImplicitAutograd op. The decomposition
-  // replaces it with MaxPool2dWithIndices (even when return_indices=False).
-  // Intuitively, the with-indices variant would be helpful for training,
-  // because the indices are needed to compute the gradient. This is NOT the
-  // case on tpu however, re-computing the indices via SelectAndScatter is much
-  // faster.
-  //
-  // Therefore the optimal lowering of max_pool2d uses the non-indices variant
-  // for both forward and backward, the latter leveraging SelectAndScatter.
-  // SelectAndScatter does not support dilations however, so we fallback to the
-  // indices variant and preserve the default composite behavior in this case.
-  ImplStable<OpName::kMaxPool2d>(m, AtenMaxPool2d);
   // go/keep-sorted end
 }
 
@@ -1138,10 +1127,22 @@ TORCH_LIBRARY(tpu, m) {
   // these are just signatures. The actual stages of the ops are marked in
   // TORCH_LIBRARY_IMPL(tpu, PrivateUse1, m).
   m.def(
+      "max_pool1d(Tensor self, int[] kernel_size, int[] stride, int[] padding, "
+      "int[] dilation, bool ceil_mode) -> Tensor");
+  m.def(
+      "max_pool1d_backward(Tensor grad_output, Tensor self, int[] kernel_size, "
+      "int[] stride, int[] padding, int[] dilation, bool ceil_mode) -> Tensor");
+  m.def(
       "max_pool2d(Tensor self, int[] kernel_size, int[] stride, int[] padding, "
       "int[] dilation, bool ceil_mode) -> Tensor");
   m.def(
       "max_pool2d_backward(Tensor grad_output, Tensor self, int[] kernel_size, "
+      "int[] stride, int[] padding, int[] dilation, bool ceil_mode) -> Tensor");
+  m.def(
+      "max_pool3d(Tensor self, int[] kernel_size, int[] stride, int[] padding, "
+      "int[] dilation, bool ceil_mode) -> Tensor");
+  m.def(
+      "max_pool3d_backward(Tensor grad_output, Tensor self, int[] kernel_size, "
       "int[] stride, int[] padding, int[] dilation, bool ceil_mode) -> Tensor");
   m.def("ragged_dot(Tensor lhs, Tensor rhs, Tensor group_sizes) -> Tensor");
   m.def(
@@ -1304,6 +1305,23 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
   // We always use ImplStable here as these are just meta implementations.
   // The actual stages of the ops are marked in TORCH_LIBRARY_IMPL(tpu,
   // PrivateUse1, m).
+  ImplStable<OpName::kMaxPool1d>(
+      m,
+      [](const at::Tensor& self, at::IntArrayRef kernel_size,
+         at::IntArrayRef stride, at::IntArrayRef padding,
+         at::IntArrayRef dilation, bool ceil_mode) -> at::Tensor {
+        TT_ASSIGN_OR_THROW(
+            auto output_size,
+            GetPoolingOutputSize(self.sizes(), kernel_size, stride, padding,
+                                 dilation, ceil_mode, 1));
+        return at::empty(output_size, self.options());
+      });
+  ImplStable<OpName::kMaxPool1dBackward>(
+      m, [](const at::Tensor& grad_output, const at::Tensor& self,
+            at::IntArrayRef kernel_size, at::IntArrayRef stride,
+            at::IntArrayRef padding, at::IntArrayRef dilation, bool ceil_mode) {
+        return at::empty(self.sizes(), self.options());
+      });
   ImplStable<OpName::kMaxPool2d>(
       m,
       [](const at::Tensor& self, at::IntArrayRef kernel_size,
@@ -1316,6 +1334,23 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
         return at::empty(output_size, self.options());
       });
   ImplStable<OpName::kMaxPool2dBackward>(
+      m, [](const at::Tensor& grad_output, const at::Tensor& self,
+            at::IntArrayRef kernel_size, at::IntArrayRef stride,
+            at::IntArrayRef padding, at::IntArrayRef dilation, bool ceil_mode) {
+        return at::empty(self.sizes(), self.options());
+      });
+  ImplStable<OpName::kMaxPool3d>(
+      m,
+      [](const at::Tensor& self, at::IntArrayRef kernel_size,
+         at::IntArrayRef stride, at::IntArrayRef padding,
+         at::IntArrayRef dilation, bool ceil_mode) -> at::Tensor {
+        TT_ASSIGN_OR_THROW(
+            auto output_size,
+            GetPoolingOutputSize(self.sizes(), kernel_size, stride, padding,
+                                 dilation, ceil_mode, 3));
+        return at::empty(output_size, self.options());
+      });
+  ImplStable<OpName::kMaxPool3dBackward>(
       m, [](const at::Tensor& grad_output, const at::Tensor& self,
             at::IntArrayRef kernel_size, at::IntArrayRef stride,
             at::IntArrayRef padding, at::IntArrayRef dilation, bool ceil_mode) {
@@ -1451,8 +1486,12 @@ TORCH_LIBRARY_IMPL(tpu, PrivateUse1, m) {
       m, TorchTpuExperimentalSend);
   ImplExperimental<OpName::kDistributedExperimentalRecv>(
       m, TorchTpuExperimentalRecv);
+  ImplExperimental<OpName::kMaxPool1d>(m, TpuMaxPool1d);
+  ImplExperimental<OpName::kMaxPool1dBackward>(m, TpuMaxPool1dBackward);
   ImplExperimental<OpName::kMaxPool2d>(m, TpuMaxPool2d);
   ImplExperimental<OpName::kMaxPool2dBackward>(m, TpuMaxPool2dBackward);
+  ImplExperimental<OpName::kMaxPool3d>(m, TpuMaxPool3d);
+  ImplExperimental<OpName::kMaxPool3dBackward>(m, TpuMaxPool3dBackward);
   ImplExperimental<OpName::kRaggedDot>(m, AtenRaggedDot);
   ImplExperimental<OpName::kRaggedDotOut>(m, AtenRaggedDotOut);
   ImplExperimental<OpName::kRaggedDotWeightGrad>(m, AtenRaggedDotWeightGrad);

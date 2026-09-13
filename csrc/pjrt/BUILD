@@ -36,8 +36,8 @@ torch_tpu_cc_library(
         "pjrt_client.h",
     ],
     deps = [
+        "//csrc/common:env_vars",
         "//csrc/common:error_utils",
-        "//csrc/distributed/slicebuilder:discovery",
         "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/status:statusor",
         "@xla//xla/pjrt:pjrt_client",

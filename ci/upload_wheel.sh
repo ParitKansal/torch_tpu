@@ -20,7 +20,7 @@
 #
 # Arguments:
 #   WHEEL_PATTERN: Required. Filename glob/pattern of wheels in dist/ to upload
-#                  (e.g., "torch_tpu-*.whl", "tpu_raiden_torch-*.whl").
+#                  (e.g., "torch_tpu-*.whl", "tpu_sync_torch-*.whl").
 #
 # Environment Variables:
 #   UPLOAD_WHEEL_TO_AR: Optional. Whether to upload wheels to Artifact Registry.
@@ -30,7 +30,7 @@
 #
 # Examples:
 #   ./upload_wheel.sh "torch_tpu-*.whl"
-#   ./upload_wheel.sh "tpu_raiden_torch-*.whl"
+#   ./upload_wheel.sh "tpu_sync_torch-*.whl"
 
 set -exu -o history -o allexport
 

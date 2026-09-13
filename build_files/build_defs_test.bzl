@@ -269,9 +269,9 @@ def _test_py_test_non_tpu_requires_tags(name):
 # We verify this behavior using analysis tests that inspect the target's rule_kind via tags_aspect.
 
 def _test_requires_libtpu_inferred_impl(env, targets):
-    """Verifies that requires_libtpu defaults to True in OSS when 'requires-tpu' tag is present."""
+    """Verifies that requires_libtpu defaults to True in OSS when a TPU tag is present."""
 
-    # In OSS, because the target has 'requires-tpu' in its tags, requires_libtpu is inferred as True,
+    # In OSS, because the target has 'requires-tpu-*', requires_libtpu is inferred as True,
     # emitting an sh_test top-level rule. In internal builds, it emits a cc_test.
     rule_kind = targets.subject[_TagsInfo].rule_kind
     env.expect.that_str(rule_kind).equals("sh_test" if is_oss() else "cc_test")
@@ -280,7 +280,7 @@ def _test_requires_libtpu_inferred(name):
     torch_tpu_cc_test(
         name = name + "_subject",
         srcs = [],
-        tags = ["requires-tpu"],
+        tags = ["requires-tpu-v5lite"],
         nobuild = "Analysis test subject",
         nolocal = "Analysis test subject",
         notap = "Analysis test subject",
@@ -327,7 +327,7 @@ def _test_requires_libtpu_explicit_true(name):
     )
 
 def _test_requires_libtpu_explicit_false_impl(env, targets):
-    """Verifies that explicitly passing requires_libtpu = False disables wrapping even when 'requires-tpu' is tagged."""
+    """Verifies that explicitly passing requires_libtpu = False disables wrapping even when a TPU tag is present."""
 
     # When requires_libtpu = False is explicitly passed, it overrides any 'requires-tpu' tag inference,
     # ensuring the top-level rule remains a cc_test across both OSS and internal builds.
@@ -339,7 +339,7 @@ def _test_requires_libtpu_explicit_false(name):
         name = name + "_subject",
         srcs = [],
         requires_libtpu = False,
-        tags = ["requires-tpu"],
+        tags = ["requires-tpu-v5lite"],
         nobuild = "Analysis test subject",
         nolocal = "Analysis test subject",
         notap = "Analysis test subject",

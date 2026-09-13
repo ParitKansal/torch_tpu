@@ -17,7 +17,6 @@
 #include "csrc/ops/sort/sort.h"
 
 #include <cstdint>
-#include <limits>
 #include <optional>
 
 #include "csrc/ops/op_builder_utils.h"
@@ -38,40 +37,29 @@ SortShloOutputs BuildSortShlo(mlir::MlirOp input_op, bool stable, int64_t dim,
                               bool descending) {
   const mlir::RankedTensorType inputType = GetTensorTypeOrDie(input_op);
   mlir::MlirBuilder& builder = input_op.getBuilder();
-
-  // Track indices in i32 when the sorted dimension fits in int32,
-  // otherwise fall back to i64 to preserve correctness for very large dims.
-  // i32 indices are widened back to i64 to match PyTorch's convention.
-  const bool fits_i32 =
-      inputType.getShape()[dim] <= std::numeric_limits<int32_t>::max();
-  const mlir::ElementType index_type =
-      fits_i32 ? mlir::ElementType::I32 : mlir::ElementType::I64;
-
   mlir::MlirOp indices = stablehlo::Iota(
       builder,
-      makeTensorType(builder.getContext(), inputType.getShape(), index_type),
+      makeTensorType(
+          builder.getContext(), inputType.getShape(),
+          // Per https://pytorch.org/docs/stable/generated/torch.sort.html, the
+          // output indices are of type LongTensor, i.e. 64-bit integer tensor.
+          mlir::ElementType::I64),
       dim);
-  auto comparator = [inputType, descending, fits_i32](mlir::RegionBuilder& rb) {
+  auto comparator = [inputType, descending](mlir::RegionBuilder& rb) {
     mlir::OpBuilder& op_builder = rb.getOpBuilder();
-    const mlir::Type cmp_index_type =
-        fits_i32 ? op_builder.getI32Type() : op_builder.getI64Type();
     std::optional<llvm::StringRef> compare_type = std::nullopt;
     if (mlir::isa<mlir::FloatType>(inputType.getElementType())) {
       compare_type = "TOTALORDER";
     }
     stablehlo::buildSortComparisonBody(
-        {inputType.getElementType(), cmp_index_type},
+        {inputType.getElementType(), op_builder.getI64Type()},
         descending ? stablehlo::ComparisonDirection::GT
                    : stablehlo::ComparisonDirection::LT,
         compare_type, &rb.getRegion(), &op_builder);
   };
   auto outputs =
       stablehlo::Sort(builder, {input_op, indices}, comparator, dim, stable);
-  const mlir::MlirOp result_indices =
-      fits_i32
-          ? stablehlo::ConvertElementType(outputs[1], mlir::ElementType::I64)
-          : outputs[1];
-  return SortShloOutputs{.values = outputs[0], .indices = result_indices};
+  return SortShloOutputs{.values = outputs[0], .indices = outputs[1]};
 }
 
 }  // namespace torch_tpu

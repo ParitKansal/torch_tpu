@@ -28,7 +28,10 @@ package(
     default_visibility = PACKAGE_DEFAULT_VISIBILITY,
 )
 
-exports_files(["README.md"])
+exports_files([
+    ".bazelrc",
+    "README.md",
+])
 
 alias(
     name = "license",
@@ -38,6 +41,17 @@ alias(
 filegroup(
     name = "pyproject",
     srcs = ["pyproject.toml"],
+)
+
+# The GitHub Actions workflow definitions. //ci/tools:list_ci_tests parses these
+# to map each CI job to its runner and machine type, so they must travel with it
+# in runfiles rather than be read out of the source tree.
+filegroup(
+    name = "github_workflows",
+    srcs = glob([
+        ".github/workflows/*.yaml",
+        ".github/workflows/*.yml",
+    ]),
 )
 
 exports_files(["README.md"])

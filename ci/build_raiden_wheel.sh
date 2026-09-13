@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Kokoro orchestration for the tpu_raiden wheel build, located in the OSS repo.
+# Kokoro orchestration for the tpu_sync torch wheel build, located in the OSS repo.
 
 set -exu -o history -o allexport
 
-echo "===> Starting tpu_raiden Python wheel build in Kokoro..."
+echo "===> Starting tpu_sync torch wheel build in Kokoro..."
 
 # Prepare wheel version string with metadata date suffix (similar to GitHub)
 WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS:-.dev$(date +%Y%m%d%H%M%S)}"
@@ -38,8 +38,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RAIDEN_DIR="${RAIDEN_DIR:-${SCRIPT_DIR}/../../tpu_raiden}"
 
 if [[ ! -d "${RAIDEN_DIR}" ]]; then
-  echo "===> tpu_raiden directory not found at '${RAIDEN_DIR}'. Cloning from GitHub..."
-  git clone https://github.com/google/tpu-raiden.git "${RAIDEN_DIR}"
+  echo "===> tpu_sync directory not found at '${RAIDEN_DIR}'. Cloning from GitHub..."
+  git clone https://github.com/google/tpu-sync.git "${RAIDEN_DIR}"
 fi
 
 if [[ ! -f "${RAIDEN_DIR}/ci/build_wheel.sh" ]]; then
@@ -47,23 +47,23 @@ if [[ ! -f "${RAIDEN_DIR}/ci/build_wheel.sh" ]]; then
   exit 1
 fi
 
-echo "===> Invoking tpu_raiden wheel build: ${RAIDEN_DIR}/ci/build_wheel.sh..."
+echo "===> Invoking tpu_sync wheel build: ${RAIDEN_DIR}/ci/build_wheel.sh..."
 bash "${RAIDEN_DIR}/ci/build_wheel.sh" torch
 
 # Check that the wheel was created
-if ! ls "${WHEEL_DIR}"/tpu_raiden_torch-*.whl >/dev/null 2>&1; then
-  echo "ERROR: tpu_raiden wheel build failed - No tpu_raiden_torch-*.whl files found in ${WHEEL_DIR}" >&2
+if ! ls "${WHEEL_DIR}"/tpu_sync_torch-*.whl >/dev/null 2>&1; then
+  echo "ERROR: tpu_sync wheel build failed - No tpu_sync_torch-*.whl files found in ${WHEEL_DIR}" >&2
   exit 1
 fi
 
 # Perform inline Twine checks to ensure metadata meets general quality rules
-echo "===> Running Twine check over tpu_raiden wheels..."
+echo "===> Running Twine check over tpu_sync wheels..."
 docker run --rm \
   -v "${WHEEL_DIR}:/dist" \
   "${CONTAINER_IMAGE}" \
-  bash -c "uv run --isolated --with twine twine check /dist/tpu_raiden_torch-*.whl"
+  bash -c "uv run --isolated --with twine twine check /dist/tpu_sync_torch-*.whl"
 
-echo "===> Kokoro tpu_raiden wheel build successful!"
+echo "===> Kokoro tpu_sync wheel build successful!"
 
-echo "===> Uploading tpu_raiden wheels via upload_wheel.sh..."
-bash "${SCRIPT_DIR}/upload_wheel.sh" "tpu_raiden_torch-*.whl"
+echo "===> Uploading tpu_sync wheels via upload_wheel.sh..."
+bash "${SCRIPT_DIR}/upload_wheel.sh" "tpu_sync_torch-*.whl"

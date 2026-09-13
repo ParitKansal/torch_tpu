@@ -36,6 +36,7 @@
 #include "csrc/common/fixed_size_span.h"
 #include "csrc/common/static_shape_check.h"
 #include "csrc/common/to_string.h"
+#include "csrc/common/utils.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/tensor_to_buffer.h"
@@ -43,8 +44,9 @@
 #include "csrc/ops/macros/kernel.h"
 #include "csrc/ops/op_builder_utils.h"
 #include "csrc/ops/op_names.h"
+#include "csrc/ops/resize/resize_aten_kernels.h"
+#include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
 #include "stablehlo/integrations/cpp/builder/MlirBuilder.h"
-#include "torch/headeronly/core/ScalarType.h"
 
 namespace torch_tpu {
 namespace {
@@ -64,7 +66,107 @@ absl::Status ValidateStaticShape(const at::Tensor& tensor,
   return ValidateStaticShape(tensor, buffer_ref, arg_name);
 }
 
+absl::Status ValidateEmbeddingArgs(const at::Tensor& weight,
+                                   const at::Tensor& indices, bool sparse) {
+  TT_RET_CHECK(weight.dim() == 2, error::kInvalidArgument)
+      << "expected weight to be 2-D, got " << ToString(weight.sizes());
+  TT_RET_CHECK(
+      indices.scalar_type() == at::kLong || indices.scalar_type() == at::kInt,
+      error::kInvalidArgument)
+      << "expected indices to be int64 or int32, got "
+      << ToString(indices.scalar_type());
+  TT_RET_CHECK(!sparse, error::kPythonNotImplementedError)
+      << "sparse is not yet supported";
+  TT_RETURN_IF_ERROR(ValidateStaticShape(weight, "weight"));
+  TT_RETURN_IF_ERROR(ValidateStaticShape(indices, "indices"));
+  return absl::OkStatus();
+}
+
+Dimensions GetEmbeddingOutputDims(const at::Tensor& weight,
+                                  const at::Tensor& indices) {
+  if (indices.dim() == 0) {
+    return {weight.size(1)};
+  }
+  Dimensions out_dims = CopyIntVector(indices.sizes());
+  out_dims.push_back(weight.size(1));
+  return out_dims;
+}
+
+absl::StatusOr<DeviceBufferRef> BuildAndDispatchEmbedding(
+    const at::Tensor& weight, const at::Tensor& indices,
+    const Dimensions& out_dims, OpParamCacheKeys&& pk) {
+  TT_ASSIGN_OR_RETURN(const auto result_dtype,
+                      ConvertTo<mlir::ElementType>(weight.scalar_type()));
+
+  auto builder_fn = [](FixedSizeSpan<mlir::MlirOp, 2> inputs) {
+    return BuildEmbeddingShlo(inputs[0], inputs[1]);
+  };
+
+  return DispatchOp<2, 1>(builder_fn, {weight, indices},
+                          {.out_dtype = result_dtype,
+                           .out_dims = out_dims,
+                           .op_param_cache_keys = std::move(pk)});
+}
+
 }  // namespace
+
+// Note: `padding_idx`, `scale_grad_by_freq`, and `sparse` are wrapped in
+// `IgnoreInCacheKey` because they are backward/autograd directives that do not
+// affect forward pass execution or the generated StableHLO graph:
+//   - `padding_idx`: In the forward pass, PyTorch looks up the row at
+//     `padding_idx` normally. It only affects backward by zeroing out the
+//     gradient for that entry in `embedding_dense_backward`.
+//   - `scale_grad_by_freq`: Gradients do not exist in the forward pass; this
+//     flag is only used during backward to scale gradients by inverse
+//     frequency.
+//   - `sparse`: Directs autograd to generate a sparse COO gradient tensor
+//     during backward; the forward pass always produces a dense tensor.
+// Excluding these arguments from the cache key prevents redundant graph
+// recompilations when the same embedding table is queried with different
+// backward settings.
+at::Tensor AtenEmbedding(const at::Tensor& weight, const at::Tensor& indices,
+                         at::SymInt padding_idx, bool scale_grad_by_freq,
+                         bool sparse) {
+  TT_KERNEL(
+      OpName::kEmbedding, pk,
+      (weight, indices, IgnoreInCacheKey(padding_idx, "Unused in forward"),
+       IgnoreInCacheKey(scale_grad_by_freq, "Unused in forward"),
+       IgnoreInCacheKey(sparse, "Unused in forward")),
+      {
+        TT_THROW_IF_ERROR(ValidateEmbeddingArgs(weight, indices, sparse));
+        Dimensions out_dims = GetEmbeddingOutputDims(weight, indices);
+        TT_ASSIGN_OR_THROW(auto result,
+                           BuildAndDispatchEmbedding(weight, indices, out_dims,
+                                                     std::move(pk)));
+        return MakeTensor(std::move(result));
+      });
+}
+
+at::Tensor& AtenEmbeddingOut(const at::Tensor& weight,
+                             const at::Tensor& indices, at::SymInt padding_idx,
+                             bool scale_grad_by_freq, bool sparse,
+                             at::Tensor& out) {
+  TT_KERNEL(
+      OpName::kEmbeddingOut, pk,
+      (weight, indices, IgnoreInCacheKey(padding_idx, "Unused in forward"),
+       IgnoreInCacheKey(scale_grad_by_freq, "Unused in forward"),
+       IgnoreInCacheKey(sparse, "Unused in forward"), out),
+      {
+        TT_THROW_IF_ERROR(ValidateEmbeddingArgs(weight, indices, sparse));
+        TT_CHECK_THROW(out.scalar_type() == weight.scalar_type(),
+                       error::kInvalidArgument)
+            << "expected out tensor to have dtype "
+            << ToString(weight.scalar_type()) << ", got "
+            << ToString(out.scalar_type());
+        Dimensions out_dims = GetEmbeddingOutputDims(weight, indices);
+        TT_THROW_IF_ERROR(ResizeTensorIfShapeDiffers(out, out_dims));
+        TT_ASSIGN_OR_THROW(auto result,
+                           BuildAndDispatchEmbedding(weight, indices, out_dims,
+                                                     std::move(pk)));
+        TT_THROW_IF_ERROR(AssignBufferToAtTensor(std::move(result), out));
+        return out;
+      });
+}
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> AtenEmbeddingBag(
     const at::Tensor& weight, const at::Tensor& indices,

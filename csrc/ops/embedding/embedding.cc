@@ -32,6 +32,7 @@
 #include "csrc/ops/reductions/sum.h"
 #include "csrc/ops/unary.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/Casting.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -291,6 +292,39 @@ absl::StatusOr<mlir::MlirOp> BuildRenormRow(mlir::MlirBuilder& builder,
 }
 
 }  // namespace
+
+absl::StatusOr<mlir::MlirOp> BuildEmbeddingShlo(mlir::MlirOp weight,
+                                                mlir::MlirOp indices) {
+  mlir::MlirBuilder& builder = weight.getBuilder();
+  const auto weight_type = GetTensorTypeOrDie(weight);
+  const auto indices_type = GetTensorTypeOrDie(indices);
+  const int64_t num_embeddings = weight_type.getDimSize(0);
+  const int64_t embedding_dim = weight_type.getDimSize(1);
+  const int64_t indices_rank = indices_type.getRank();
+  if (num_embeddings == 0) {
+    Dimensions out_shape;
+    if (indices_rank == 0) {
+      out_shape = {embedding_dim};
+    } else {
+      out_shape = Dimensions(indices_type.getShape().begin(),
+                             indices_type.getShape().end());
+      out_shape.push_back(embedding_dim);
+    }
+    const auto out_type =
+        mlir::RankedTensorType::get(out_shape, weight_type.getElementType());
+    return mlir::stablehlo::Constant(
+        builder, mlir::DenseElementsAttr::get(
+                     out_type, builder.getOpBuilder().getZeroAttr(
+                                   weight_type.getElementType())));
+  }
+  if (indices_rank == 0) {
+    TT_ASSIGN_OR_RETURN(const mlir::MlirOp unsqueezed, Unsqueeze(indices, 0));
+    TT_ASSIGN_OR_RETURN(const mlir::MlirOp gathered,
+                        BuildEmbeddingGather(builder, weight, unsqueezed));
+    return Squeeze(gathered, {0});
+  }
+  return BuildEmbeddingGather(builder, weight, indices);
+}
 
 absl::StatusOr<MlirOpResults<4>> BuildEmbeddingBagShlo(
     mlir::MlirOp weight, mlir::MlirOp indices, mlir::MlirOp offsets,
@@ -762,7 +796,8 @@ absl::StatusOr<mlir::MlirOp> BuildEmbeddingDenseBackwardShlo(
 
 absl::StatusOr<mlir::MlirOp> BuildEmbeddingRenormShlo(mlir::MlirOp weight,
                                                       mlir::MlirOp indices,
-                                                      double mn, double nt) {
+                                                      double max_norm,
+                                                      double norm_type) {
   const auto wt = GetTensorTypeOrDie(weight);
   const int64_t ed = wt.getDimSize(1);
   const auto it = GetTensorTypeOrDie(indices);
@@ -772,14 +807,14 @@ absl::StatusOr<mlir::MlirOp> BuildEmbeddingRenormShlo(mlir::MlirOp weight,
     mlir::MlirOp st[] = {indices, z};
     int64_t sz[] = {1, ed};
     TT_ASSIGN_OR_RETURN(
-        auto row,
-        BuildRenormRow(weight.getBuilder(),
-                       mlir::stablehlo::DynamicSlice(weight, st, sz), mn, nt));
+        auto row, BuildRenormRow(weight.getBuilder(),
+                                 mlir::stablehlo::DynamicSlice(weight, st, sz),
+                                 max_norm, norm_type));
     return mlir::stablehlo::Reshape(row, {ed});
   }
   TT_ASSIGN_OR_RETURN(
       auto rs, BuildEmbeddingGather(weight.getBuilder(), weight, indices));
-  return BuildRenormRow(weight.getBuilder(), rs, mn, nt);
+  return BuildRenormRow(weight.getBuilder(), rs, max_norm, norm_type);
 }
 
 }  // namespace torch_tpu

@@ -109,16 +109,22 @@ def actionlint(session: nox.Session) -> None:
   session.run("ci/tools/actionlint.sh", external=True)
 
 
-@nox.session(venv_backend="none")
+# These scripts need PyYAML (see ci/tools/list_ci_tests.py) on top of the
+# Python standard library, so this session runs in a managed virtual env
+# instead of on the host interpreter: the GitHub-hosted runner images do not
+# guarantee PyYAML for the system Python, and PEP 668 forbids installing it
+# there.
+@nox.session
 def test_ci_tools(session: nox.Session) -> None:
   """Run unit tests for CI base SHA resolution and diff isolation scripts."""
+  session.install("pyyaml")
   session.run(
-      "python3",
+      "python",
       "-m",
       "unittest",
       "ci/tools/test_resolve_base_sha.py",
       "ci/tools/test_check_directory_layout.py",
-      external=True,
+      "ci/tools/list_ci_tests_test.py",
   )
 
 

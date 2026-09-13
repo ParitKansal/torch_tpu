@@ -400,6 +400,27 @@ class CompileTest(seed_test_utils.RepeatableTest):
     expected = x1.to("cpu").sum() + y1.to("cpu").sum()
     utils.assert_close(out1.to("cpu"), expected)
 
+  def test_static_tensor_with_has_symbolic_sizes_strides_set(self):
+    class Model(torch.nn.Module):
+
+      def forward(self, x, y):
+        torch._check(y.shape[0] == 4)
+        scale = y.shape[0]
+        return x * scale
+
+    compiled = torch.compile(
+        Model(), backend="tpu", options={"bounded_dynamism": True}
+    )
+
+    x = torch.ones((2, 2), dtype=torch.float32, device="tpu")
+    y = torch.ones((4, 2), dtype=torch.float32, device="tpu")
+    torch._dynamo.mark_dynamic(x, 0)
+    torch._dynamo.maybe_mark_dynamic(y, 0)
+
+    out = compiled(x, y)
+    expected = x.to("cpu") * 4
+    utils.assert_close(out, expected)
+
   def test_concat_attention(self):
     def decode_step(full_attention_cache, new_token_key):
       new_full = torch.cat([full_attention_cache, new_token_key], dim=-2)
@@ -1167,8 +1188,10 @@ class DynamicDropoutTest(seed_test_utils.RepeatableTest):
       out = compiled(x)
       self.assertEqual(out.shape, (dim_size, 16))
       scale = 1.0 / (1.0 - 0.4)
-      mask = out != 0
-      utils.assert_close(out[mask], (x * scale)[mask])
+      out_cpu = out.cpu()
+      x_cpu = x.cpu()
+      mask = out_cpu != 0
+      utils.assert_close(out_cpu[mask], (x_cpu * scale)[mask])
 
   def test_native_dropout_dynamic_shape(self):
     class Model(torch.nn.Module):
@@ -1315,8 +1338,10 @@ class DynamicDropoutTest(seed_test_utils.RepeatableTest):
       out = compiled(x)
       self.assertEqual(out.shape, (b, s, 32))
       scale = 1.0 / (1.0 - 0.3)
-      mask = out != 0
-      utils.assert_close(out[mask], (x * scale)[mask])
+      out_cpu = out.cpu()
+      x_cpu = x.cpu()
+      mask = out_cpu != 0
+      utils.assert_close(out_cpu[mask], (x_cpu * scale)[mask])
 
 
 class DynamicErrorHandlingTest(seed_test_utils.RepeatableTest):

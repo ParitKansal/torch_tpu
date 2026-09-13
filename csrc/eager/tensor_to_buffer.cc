@@ -21,6 +21,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -59,6 +60,7 @@
 #include "csrc/common/dtype.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/layout_utils.h"
+#include "csrc/common/libtpu_version.h"
 #include "csrc/common/to_string.h"
 #include "csrc/common/utils.h"
 #include "csrc/eager/device_buffer.h"
@@ -81,6 +83,8 @@
 namespace torch_tpu {
 
 namespace {
+
+constexpr std::string_view kMinLibtpuVersionWithPeakAllocatedBytes = "0.0.43";
 
 // Records that a DeviceBufferRef has one more c10::DataPtr using it.
 void AddDataPtrAlias(const DeviceBufferRef& buffer_ref) {
@@ -424,13 +428,20 @@ class TpuAllocator final : public c10::DeviceAllocator {
     // Map available stats
     using StatType = c10::CachingAllocator::StatType;
 
-    // Both allocated_bytes and active_bytes are fulfilled by bytes in use by
-    // PjRt. There is no differentiation between the two in the underlying stats
-    // implementation.
-    stats.allocated_bytes[static_cast<size_t>(StatType::AGGREGATE)].current =
-        pjrt_stats.bytes_in_use;
-    stats.allocated_bytes[static_cast<size_t>(StatType::AGGREGATE)].peak =
-        pjrt_stats.peak_bytes_in_use;
+    if (IsLibtpuVersionAtLeast(kMinLibtpuVersionWithPeakAllocatedBytes)) {
+      stats.allocated_bytes[static_cast<size_t>(StatType::AGGREGATE)].current =
+          pjrt_stats.bytes_in_use + pjrt_stats.bytes_reserved;
+      stats.allocated_bytes[static_cast<size_t>(StatType::AGGREGATE)].peak =
+          pjrt_stats.peak_allocated_bytes;
+    } else {
+      // Both allocated_bytes and active_bytes are fulfilled by bytes in use by
+      // PjRt. There is no differentiation between the two in the underlying
+      // stats implementation.
+      stats.allocated_bytes[static_cast<size_t>(StatType::AGGREGATE)].current =
+          pjrt_stats.bytes_in_use;
+      stats.allocated_bytes[static_cast<size_t>(StatType::AGGREGATE)].peak =
+          pjrt_stats.peak_bytes_in_use;
+    }
 
     stats.active_bytes[static_cast<size_t>(StatType::AGGREGATE)].current =
         pjrt_stats.bytes_in_use;

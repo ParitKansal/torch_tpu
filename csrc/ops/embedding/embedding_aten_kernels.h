@@ -26,6 +26,15 @@
 
 namespace torch_tpu {
 
+at::Tensor AtenEmbedding(const at::Tensor& weight, const at::Tensor& indices,
+                         at::SymInt padding_idx, bool scale_grad_by_freq,
+                         bool sparse);
+
+at::Tensor& AtenEmbeddingOut(const at::Tensor& weight,
+                             const at::Tensor& indices, at::SymInt padding_idx,
+                             bool scale_grad_by_freq, bool sparse,
+                             at::Tensor& out);
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> AtenEmbeddingBag(
     const at::Tensor& weight, const at::Tensor& indices,
     const at::Tensor& offsets, bool scale_grad_by_freq, int64_t mode,

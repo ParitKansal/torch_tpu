@@ -17,6 +17,7 @@
 #ifndef TORCH_TPU_CSRC_OPS_RMS_NORM_RMS_NORM_H_
 #define TORCH_TPU_CSRC_OPS_RMS_NORM_RMS_NORM_H_
 
+#include <array>
 #include <optional>
 
 #include "ATen/core/ATen_fwd.h"
@@ -37,7 +38,8 @@ struct RmsNormBackwardShloResults {
 
 absl::StatusOr<RmsNormBackwardShloResults> BuildRmsNormBackwardShlo(
     mlir::MlirOp dy, mlir::MlirOp x, mlir::MlirOp rstd,
-    std::optional<mlir::MlirOp> weight, at::IntArrayRef normalized_shape);
+    std::optional<mlir::MlirOp> weight, at::IntArrayRef normalized_shape,
+    std::array<bool, 2> output_mask = {true, true});
 
 }  // namespace torch_tpu
 

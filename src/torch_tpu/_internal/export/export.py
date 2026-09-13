@@ -510,13 +510,8 @@ def fx_to_mlir(
     FX output reconstruction information.
   """
   with xprof_adapter.TraceMe("export.fx_to_mlir"):
-    # Filter out non-tensor arguments and snapshot their initial placeholder handles
-    # so in-place mutations during tracing don't alter the argument tensors passed to traversal.
-    argument_tensors = [
-        tpu_torch_compile.clone_placeholder(a)
-        for a in args
-        if isinstance(a, torch.Tensor)
-    ]
+    # Filter out non-tensor arguments.
+    argument_tensors = [a for a in args if isinstance(a, torch.Tensor)]
     if argument_layouts is not None:
       assert len(argument_layouts) == len(argument_tensors), (
           f"argument_layouts size mismatch: expected {len(argument_tensors)},"
@@ -559,8 +554,15 @@ def fx_to_mlir(
 
       try:
         with execution_mode.set_eager_mode(EagerMode.INTERNAL_COMPILE_FX_GRAPH):
+          # We clone the args so that inplace updates do not overwrite the
+          # placeholder args. These copies will be removed in the compiled code so
+          # there is no performance impact.
+          # Remove once b/491716758 is implemented.
+          cloned_args = (
+              x.clone() if isinstance(x, torch.Tensor) else x for x in args
+          )
           with xprof_adapter.TraceMe("EagerLikeFxInterpreter.run"):
-            fx_outputs = EagerLikeFxInterpreter(module).run(*args)
+            fx_outputs = EagerLikeFxInterpreter(module).run(*cloned_args)
 
         (
             result_tensors,

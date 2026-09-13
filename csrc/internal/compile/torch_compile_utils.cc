@@ -16,30 +16,21 @@
 
 #include "csrc/internal/compile/torch_compile_utils.h"
 
-#include "absl/strings/match.h"
 #include "csrc/common/env_vars.h"
 
 namespace torch_tpu {
 
 bool PyGetMaterializeCollectiveTensorsEnvVarOnce() {
-  static const bool env_value = []() {
-    const auto& raw_env_value =
-        GetEnvOnce<kTorchTpuInternalMaterializeCollectiveTensorsEnvVar>();
-    return !raw_env_value.has_value() ||
-           (*raw_env_value != "0" &&
-            !absl::EqualsIgnoreCase(*raw_env_value, "false"));
-  }();
+  static const bool env_value =
+      GetBooleanEnvOnce<kTorchTpuInternalMaterializeCollectiveTensorsEnvVar>()
+          .value_or(true);
   return env_value;
 }
 
 bool PyGetReassociateNormWeightsEnvVarOnce() {
-  static const bool env_value = []() {
-    const auto& raw_env_value =
-        GetEnvOnce<kTorchTpuInternalEnableReassociateNormWeightsEnvVar>();
-    return !raw_env_value.has_value() ||
-           (*raw_env_value != "0" &&
-            !absl::EqualsIgnoreCase(*raw_env_value, "false"));
-  }();
+  static const bool env_value =
+      GetBooleanEnvOnce<kTorchTpuInternalEnableReassociateNormWeightsEnvVar>()
+          .value_or(true);
   return env_value;
 }
 

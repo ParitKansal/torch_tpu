@@ -138,6 +138,7 @@ class BenchmarkCategory(enum.Enum):
   GEMMA_RAGGED_MOE = "gemma_ragged_moe"
   TORCHAUDIO = "torchaudio"
   INTERNAL_MODEL = "internal_model"
+  FLUX = "flux"
 
 
 class XprofContext:

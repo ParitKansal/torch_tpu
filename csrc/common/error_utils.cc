@@ -584,10 +584,11 @@ std::string AdaptExternalErrorMessage(const std::string_view message) {
 }
 
 bool GetEnableDebugChecks() {
-  const auto& env_var = GetEnvOnce<kTorchTpuInternalEnableDebugChecksEnvVar>();
+  const auto env_var =
+      GetBooleanEnvOnce<kTorchTpuInternalEnableDebugChecksEnvVar>();
   // If the env var is set, respect the user's choice.
   if (env_var.has_value()) {
-    return *env_var == "1";
+    return *env_var;
   }
   // Otherwise, enable debug checks if we are in debug eager mode.
   return GetEagerMode() == EagerMode::kDeferNeverAndLaunchBlocking;

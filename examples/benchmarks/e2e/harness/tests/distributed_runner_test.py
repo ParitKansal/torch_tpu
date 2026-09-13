@@ -32,7 +32,6 @@ from examples.benchmarks.e2e.harness import step_lib
 from examples.benchmarks.e2e.harness import steps
 from examples.benchmarks.e2e.harness import target as target_lib
 from examples.benchmarks.e2e.harness import torch_device_ops
-from examples.benchmarks.e2e.harness.models import llama
 from torch_tpu._internal.distributed import multiprocessing
 from tests import seed_test_utils
 

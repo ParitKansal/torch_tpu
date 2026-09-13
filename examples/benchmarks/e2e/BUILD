@@ -209,6 +209,7 @@ torch_tpu_py_test(
     linking_mode = "static",
     main = "model_performance_benchmarks.py",
     notap = "Tested on guitar workflow.",
+    notest_oss = "Benchmarks have a separate workflow.",
     shard_count = 4,
     strict = True,
     tags = [
@@ -233,6 +234,7 @@ torch_tpu_py_test(
     linking_mode = "static",
     main = "model_performance_benchmarks.py",
     notap = "Tested on guitar workflow.",
+    notest_oss = "Benchmarks have a separate workflow.",
     shard_count = 4,
     strict = True,
     tags = [
@@ -287,6 +289,7 @@ torch_tpu_py_test(
     linking_mode = "static",
     main = "model_quality_benchmarks.py",
     notap = "Tested on guitar workflow.",
+    notest_oss = "Benchmarks have a separate workflow.",
     shard_count = 4,
     strict = True,
     tags = [
@@ -355,6 +358,7 @@ torch_tpu_py_test(
     srcs = ["layer_performance_benchmarks.py"],
     main = "layer_performance_benchmarks.py",
     notap = "Tested on guitar workflow.",
+    notest_oss = "Benchmarks have a separate workflow.",
     shard_count = 8,
     strict = True,
     tags = [
@@ -407,6 +411,7 @@ torch_tpu_py_test(
     },
     main = "layer_performance_benchmarks.py",
     notap = "Tested on guitar workflow.",
+    notest_oss = "Benchmarks have a separate workflow.",
     platform = "//buildenv/platforms/forge/gpu/b200_full",
     shard_count = 2,
     strict = True,
@@ -444,6 +449,7 @@ torch_tpu_py_test(
     autoload = False,
     main = "layer_performance_benchmarks.py",
     notap = "Tested on guitar workflow.",
+    notest_oss = "Benchmarks have a separate workflow.",
     shard_count = 9,
     strict = True,
     tags = [
@@ -479,6 +485,7 @@ torch_tpu_py_test(
     linking_mode = "static",
     main = "model_performance_benchmarks.py",
     notap = "Tested on guitar workflow.",
+    notest_oss = "Benchmarks have a separate workflow.",
     tags = [
         "cpu:4",
         # This makes sure that we have enough host RAM to load weights from host to device HBM.
@@ -505,6 +512,7 @@ torch_tpu_py_test(
     },
     main = "model_performance_benchmarks.py",
     notap = "Frequently causes Forge OOM.",
+    notest_oss = "Benchmarks have a separate workflow.",
     platform = "//buildenv/platforms/forge/gpu/b200_full",
     shard_count = 2,
     tags = [
@@ -657,6 +665,7 @@ torch_tpu_py_test(
 torch_tpu_py_test(
     name = "model_utils_test",
     srcs = ["model_utils_test.py"],
+    env = {"TORCH_TPU_INTERNAL_ALLOW_XLA_BACKEND": "1"},
     deps = [
         ":model_utils",
         "//shims/absl_py/testing:absltest",
@@ -677,6 +686,7 @@ torch_tpu_py_library(
 torch_tpu_py_test(
     name = "mamba3_test",
     srcs = ["mamba3_test.py"],
+    env = {"TORCH_TPU_INTERNAL_ALLOW_XLA_BACKEND": "1"},
     deps = [
         ":mamba3",
         "//shims/absl_py/testing:absltest",

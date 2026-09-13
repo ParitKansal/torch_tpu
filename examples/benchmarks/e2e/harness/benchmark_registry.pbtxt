@@ -1,0 +1,77 @@
+# proto-file: https://github.com/google-ml-infra/bap/blob/main/bap_proto/benchmark_registry.proto
+# proto-message: BenchmarkSuite
+
+
+benchmarks {
+  name: "llama_1b_forward_eager_default"
+  description: "Llama 3.2 1B forward pass"
+  owner: "TorchTPU"
+
+  workload {
+    action: "./user_repo/.github/actions/run-benchmark"
+    action_inputs { key: "script" value: "examples/benchmarks/e2e/harness/torch_benchmark_test.py" }
+    action_inputs { key: "runtime_flags" value: "--run_scope=full" }
+    action_inputs { key: "env_vars" value: "TESTBRIDGE_TEST_ONLY=test_benchmark_imports test_benchmark_llama_1b_forward_eager_default" }
+  }
+
+  environment_configs {
+    id: "tpu-v7"
+    runner_label: "linux-x86-tpu7x-224-4tpu"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest@sha256:43c523372c4b7f7ce649a1ff204b908727bd338353303c0444af34cb305e5832"
+    workload_action_inputs { key: "torch_index" value: "https://download.pytorch.org/whl/cpu" }
+    workload_action_inputs { key: "env_vars_hw" value: "BENCHMARK_PLATFORM=v7_1x1x1" }
+  }
+  environment_configs {
+    id: "tpu-v7-torch-2-13"
+    runner_label: "linux-x86-tpu7x-224-4tpu"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest@sha256:43c523372c4b7f7ce649a1ff204b908727bd338353303c0444af34cb305e5832"
+    workload_action_inputs { key: "torch_index" value: "https://download.pytorch.org/whl/cpu" }
+    workload_action_inputs { key: "torch_spec" value: "torch==2.13.0" }
+    workload_action_inputs { key: "env_vars_hw" value: "BENCHMARK_PLATFORM=v7_1x1x1" }
+  }
+  environment_configs {
+    id: "gpu-b200-torch-2-13"
+    runner_label: "linux-x86-a4-224-b200-8gpu"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-cuda13.2-cudnn9.15:latest"
+    workload_action_inputs { key: "torch_spec" value: "torch==2.13.0" }
+    workload_action_inputs { key: "env_vars_hw" value: "BENCHMARK_PLATFORM=b200_1,TORCH_DEVICE_BACKEND_AUTOLOAD=0" }
+  }
+}
+
+benchmarks {
+  name: "llama_1b_training_eager_default"
+  description: "Llama 3.2 1B training step."
+  owner: "TorchTPU"
+
+  workload {
+    action: "./user_repo/.github/actions/run-benchmark"
+    action_inputs { key: "script" value: "examples/benchmarks/e2e/harness/torch_benchmark_test.py" }
+    action_inputs { key: "runtime_flags" value: "--run_scope=full" }
+    action_inputs { key: "env_vars" value: "TESTBRIDGE_TEST_ONLY=test_benchmark_imports test_benchmark_llama_1b_training_eager_default" }
+  }
+
+  environment_configs {
+    id: "tpu-v7"
+    runner_label: "linux-x86-tpu7x-224-4tpu"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest@sha256:43c523372c4b7f7ce649a1ff204b908727bd338353303c0444af34cb305e5832"
+    workload_action_inputs { key: "torch_index" value: "https://download.pytorch.org/whl/cpu" }
+    workload_action_inputs { key: "env_vars_hw" value: "BENCHMARK_PLATFORM=v7_1x1x1" }
+  }
+
+  environment_configs {
+    id: "tpu-v7-torch-2-13"
+    runner_label: "linux-x86-tpu7x-224-4tpu"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest@sha256:43c523372c4b7f7ce649a1ff204b908727bd338353303c0444af34cb305e5832"
+    workload_action_inputs { key: "torch_index" value: "https://download.pytorch.org/whl/cpu" }
+    workload_action_inputs { key: "torch_spec" value: "torch==2.13.0" }
+    workload_action_inputs { key: "env_vars_hw" value: "BENCHMARK_PLATFORM=v7_1x1x1" }
+  }
+
+  environment_configs {
+    id: "gpu-b200-torch-2-13"
+    runner_label: "linux-x86-a4-224-b200-8gpu"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build-cuda13.2-cudnn9.15:latest"
+    workload_action_inputs { key: "torch_spec" value: "torch==2.13.0" }
+    workload_action_inputs { key: "env_vars_hw" value: "BENCHMARK_PLATFORM=b200_1,TORCH_DEVICE_BACKEND_AUTOLOAD=0" }
+  }
+}

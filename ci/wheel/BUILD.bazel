@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 load("@torch_tpu_deps//:dependencies.bzl", "WHEEL_REQUIRES")
 load("@torch_tpu_version//:version.bzl", "WHEEL_VERSION")
 load("//:visibility.bzl", "PACKAGE_DEFAULT_VISIBILITY")
 load("//bazel:pytorch_versions.bzl", "NIGHTLY_TORCH_VERSION", "WHEEL_TORCH_VERSIONS")
 load("//bazel:supported_python_versions.bzl", "SUPPORTED_PYTHON_VERSIONS")
+load("//bazel:xla_revision.bzl", "XLA_COMMIT")
 load("//build_files:build_defs.bzl", "torch_tpu_py_library", "torch_tpu_py_test")
 load("//build_files:entry_points.bzl", "ENTRY_POINTS")
 load("//ci/wheel:pywrap_mapper.bzl", "remap_pywrap_binaries")
@@ -148,6 +150,55 @@ py_package(
     ],
 )
 
+# Header of the tensor_buffer interface that tpu_sync's torch extension
+# compiles against, shipped under torch_tpu/include/ so that extension builds
+# from the installed wheel and binds the symbols at import to the per-torch
+# glue library, which exports them. This is not a supported public interface:
+# it exists for tpu_sync only and changes without notice, so the shipped copy
+# starts with a guard that refuses compilation unless the consumer defines
+# TORCH_TPU_USER_UNSUPPORTED_PRIVATE_HEADERS. Staged under api_headers_pkg/
+# and re-rooted by strip_path_prefixes, like the glue libraries.
+write_file(
+    name = "api_header_guard",
+    out = "api_header_guard.txt",
+    content = [
+        "// Shipped for tpu_sync's torch extension only. Not a supported",
+        "// interface: it changes without notice and must be compiled against",
+        "// the XLA revision in ../../XLA_COMMIT.",
+        "#ifndef TORCH_TPU_USER_UNSUPPORTED_PRIVATE_HEADERS",
+        "#error \"These private headers are unsupported and not intended for common use.\"",
+        "#endif",
+        "",
+        "",
+    ],
+)
+
+genrule(
+    name = "api_header_tensor_buffer",
+    srcs = [
+        ":api_header_guard",
+        "//csrc/api:tensor_buffer.h",
+    ],
+    outs = ["api_headers_pkg/torch_tpu/include/csrc/api/tensor_buffer.h"],
+    cmd = "cat $(location :api_header_guard) $(location //csrc/api:tensor_buffer.h) > $@",
+)
+
+# The XLA commit this build compiled against; the extension must use the same
+# revision.
+write_file(
+    name = "api_header_xla_commit",
+    out = "api_headers_pkg/torch_tpu/include/XLA_COMMIT",
+    content = [XLA_COMMIT],
+)
+
+filegroup(
+    name = "api_headers",
+    srcs = [
+        ":api_header_tensor_buffer",
+        ":api_header_xla_commit",
+    ],
+)
+
 py_wheel(
     name = "torch_tpu_wheel",
     abi = select({
@@ -183,6 +234,7 @@ py_wheel(
     }),
     requires = FILTERED_REQUIRES + TORCH_REQ,
     strip_path_prefixes = [
+        "ci/wheel/api_headers_pkg",
         "ci/wheel/remapped_pywrap_binaries_pkg",
         "src",
     ],
@@ -197,6 +249,7 @@ py_wheel(
     version = WHEEL_VERSION,
     visibility = ["//visibility:public"],
     deps = [
+        ":api_headers",
         ":remapped_pywrap_binaries",
         ":torch_tpu_package_end",
     ],

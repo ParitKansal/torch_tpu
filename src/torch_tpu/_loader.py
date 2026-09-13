@@ -147,6 +147,13 @@ def _patch_dtensor() -> None:
   from_local.patch_from_local()
 
 
+def _patch_max_pool() -> None:
+  """Patches PyTorch max pooling operations with TPU-optimized variants."""
+  from torch_tpu._internal.pooling import patch as pooling_patch  # pylint: disable=g-import-not-at-top
+
+  pooling_patch.patch_max_pool()
+
+
 def _init_device_impl(device: str) -> torch.device:
   """Initializes a lazy pytorch device.
 
@@ -257,6 +264,13 @@ def _init_device_impl(device: str) -> torch.device:
   sys.modules["torch.tpu.profiler"] = profiler
   setattr(device_module, "profiler", profiler)
 
+  # Expose the public pallas module under 'torch.tpu.pallas' in sys.modules
+  # and attach it to the 'torch.tpu' device module for attribute access.
+  from torch_tpu import pallas  # pylint: disable=g-import-not-at-top
+
+  sys.modules["torch.tpu.pallas"] = pallas
+  setattr(device_module, "pallas", pallas)
+
   # Pass installed libtpu version to C++ runtime if available.
   _set_libtpu_version()
 
@@ -265,6 +279,9 @@ def _init_device_impl(device: str) -> torch.device:
 
   # Override DTensor.from_local to warn when shape/stride are omitted.
   _patch_dtensor()
+
+  # Patch max pooling operations with TPU-optimized variants.
+  _patch_max_pool()
 
   # Monkey patch torch.set_float32_matmul_precision and
   # torch.get_float32_matmul_precision to maintain global precision state.

@@ -37,7 +37,7 @@ struct LayerNormBackwardShloResults {
   mlir::MlirOp grad_bias;
 };
 
-// Welford's single reduction implementation.
+// Two-moment reduction implementation.
 absl::StatusOr<LayerNormShloResults> BuildLayerNormShlo(
     mlir::MlirOp input_op, std::optional<mlir::MlirOp> weight_op,
     std::optional<mlir::MlirOp> bias_op, int normalized_num_dims, double eps);

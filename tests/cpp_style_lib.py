@@ -57,11 +57,14 @@ def _is_ignored_dir(name: str) -> bool:
   test runfiles directory (e.g. tests/_<target>.venv/lib/.../site-packages/).
   These directories pull in external third-party C/C++ files (such as
   lxml/etree.h) that are not part of the TorchTPU repository and must be
-  skipped.
+  skipped. Wheel tests unpack the built torch_tpu wheel into a
+  <target>_unpacked_wheel/ directory; the public headers it ships are copies
+  of source files that are linted at their source location.
   Hidden directories (starting with '.') are also ignored.
   """
   return (
       name.endswith(".venv")
+      or name.endswith("_unpacked_wheel")
       or name in _NON_REPO_DIR_NAMES
       or name.startswith(".")
   )

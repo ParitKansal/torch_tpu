@@ -57,6 +57,7 @@ torch_tpu_cc_library(
     srcs = ["nll_loss.cc"],
     hdrs = ["nll_loss.h"],
     deps = [
+        "//csrc/common:aten_utils",
         "//csrc/common:error_utils",
         "//csrc/ops:binary",
         "//csrc/ops:op_builder_utils",

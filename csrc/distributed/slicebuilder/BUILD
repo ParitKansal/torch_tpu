@@ -31,7 +31,6 @@ torch_tpu_cc_library(
         "//csrc/common:env_vars",
         "//csrc/common:error_utils",
         "//shims/torch:torch_headers",
-        "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

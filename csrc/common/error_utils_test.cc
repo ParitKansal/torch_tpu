@@ -1611,5 +1611,19 @@ TEST(ErrorMessageGuidelinesDeathTest, MultipleViolationsIncludingEnforced) {
 
 #endif  // TT_CHECKS_ERROR_FORMAT
 
+TEST(ErrorUtilsTest, GetRequiredEnvOnceReturnsValueWhenSet) {
+  setenv(kTorchTpuTopologyEnvVar, "2x2x1", 1);
+  TT_ASSERT_OK_AND_ASSIGN(const auto val,
+                          GetRequiredEnvOnce<kTorchTpuTopologyEnvVar>());
+  EXPECT_EQ(val, "2x2x1");
+}
+
+TEST(ErrorUtilsTest, GetRequiredIntegerEnvOnceReturnsValueWhenSet) {
+  setenv(kWorldSizeEnvVar, "8", 1);
+  TT_ASSERT_OK_AND_ASSIGN(const auto val,
+                          (GetRequiredIntegerEnvOnce<int, kWorldSizeEnvVar>()));
+  EXPECT_EQ(val, 8);
+}
+
 }  // namespace
 }  // namespace torch_tpu

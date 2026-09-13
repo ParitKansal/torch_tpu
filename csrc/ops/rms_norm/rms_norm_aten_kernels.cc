@@ -26,6 +26,7 @@
 
 #include "ATen/core/ATen_fwd.h"
 #include "ATen/core/TensorBase.h"
+#include "ATen/ops/zeros.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -34,9 +35,11 @@
 #include "csrc/common/dtype.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/to_string.h"
+#include "csrc/common/utils.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/tensor_to_buffer.h"
+#include "csrc/ops/copy_from/cpu_to_tpu.h"
 #include "csrc/ops/layer_norm/layer_norm.h"
 #include "csrc/ops/macros/kernel.h"
 #include "csrc/ops/op_builder_utils.h"
@@ -44,6 +47,7 @@
 #include "csrc/ops/rms_norm/rms_norm.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
 #include "stablehlo/integrations/cpp/builder/MlirBuilder.h"
+#include "torch/headeronly/core/DeviceType.h"
 #include "torch/headeronly/core/ScalarType.h"
 
 namespace torch_tpu {
@@ -66,7 +70,7 @@ absl::Status ValidateFusedRmsNormInputs(const at::Tensor& input,
                  // the caller op `rms_norm()`.
       normalized_shape.size() <= input.dim(), error::kInvalidArgument)
       << "expected the normalized shape to have <= " << input.dim()
-      << " dimensions, got " << normalized_shape.size() << ".";
+      << " dimensions, got " << normalized_shape.size();
 
   return absl::OkStatus();
 }
@@ -78,7 +82,7 @@ std::tuple<at::Tensor, at::Tensor> AtenFusedRmsNorm(
     const std::optional<at::Tensor>& weight, const std::optional<double> eps) {
   // _fused_rms_norm(Tensor input, int[] normalized_shape, Tensor? weight,
   // float? eps) -> (Tensor, Tensor)
-  double epsilon = eps.has_value() ? eps.value() : 1e-5;
+  const double epsilon = eps.value_or(1e-5);
   TT_KERNEL(
       OpName::kFusedRmsNorm, param_keys,
       (input, normalized_shape, weight, epsilon), {
@@ -175,6 +179,17 @@ std::tuple<at::Tensor, at::Tensor> AtenFusedRmsNormBackward(
   TT_KERNEL(
       OpName::kFusedRmsNormBackward, param_keys,
       (grad_out, input, normalized_shape, rstd, weight, output_mask), {
+        TT_THROW_IF_ERROR(ValidateFusedRmsNormInputs(input, normalized_shape));
+
+        // PyTorch's autograd engine passes an output_mask where output_mask[0]
+        // indicates if grad_input is required and output_mask[1] indicates if
+        // grad_weight is required. If neither gradient is requested,
+        // short-circuit early and return undefined tensors without performing
+        // any TPU allocation or kernel dispatch.
+        if (!output_mask[0] && !output_mask[1]) {
+          return {at::Tensor(), at::Tensor()};
+        }
+
         // When an optional Tensor (like weight) is None (or nullopt) in the
         // forward pass, PyTorch's autograd engine saves an undefined Tensor for
         // the backward pass. It does not strip the argument from the backward
@@ -182,10 +197,7 @@ std::tuple<at::Tensor, at::Tensor> AtenFusedRmsNormBackward(
         // false. Thus, it's insufficient to only rely on weight.has_value() to
         // determine presence of the weight Tensor, we must also call
         // weight->defined().
-        bool has_weight = false;
-        if (weight.has_value() && weight->defined()) {
-          has_weight = true;
-        }
+        const bool has_weight = weight.has_value() && weight->defined();
 
         const auto input_sizes = input.sizes();
         Dimensions input_dims = CopyIntVector(input_sizes);
@@ -197,6 +209,16 @@ std::tuple<at::Tensor, at::Tensor> AtenFusedRmsNormBackward(
           weight_dims = CopyIntVector(normalized_shape);
         }
 
+        const at::ScalarType w_dtype =
+            has_weight ? weight.value().scalar_type() : input.scalar_type();
+
+        // For zero-element inputs (e.g. empty batch dimension), grad_input is
+        // an empty tensor with 0 elements. However, weight is a non-empty
+        // parameter vector (normalized_shape), and its gradient is
+        // mathematically defined as the sum over batch dimensions. The sum over
+        // zero elements evaluates to zeros. We populate grad_w with zeros on
+        // CPU and transfer it to TPU via DMA to fulfill PyTorch autograd
+        // semantics without triggering XLA compilation for degenerate shapes.
         if (input.numel() == 0) {
           at::Tensor grad_in;  // UNINITIALIZED_TENSOR_OK
           if (output_mask[0]) {
@@ -206,18 +228,33 @@ std::tuple<at::Tensor, at::Tensor> AtenFusedRmsNormBackward(
           }
           at::Tensor grad_w;  // UNINITIALIZED_TENSOR_OK
           if (output_mask[1]) {
-            at::ScalarType w_dtype =
-                has_weight ? weight.value().scalar_type() : input.scalar_type();
+            // Allocate the zeros on CPU and DMA transfer to TPU rather than
+            // calling at::zeros(..., device=kXLA) or grad_w.zero_(), which
+            // would build and execute an XLA constant kernel on TPU. For small
+            // 1D parameter shapes, host allocation and DMA take
+            // sub-microseconds.
+            at::Tensor cpu_zeros =
+                at::zeros(weight_dims,
+                          at::TensorOptions().dtype(w_dtype).device(at::kCPU));
             TT_ASSIGN_OR_THROW(
-                grad_w, MakeEmptyTensor(weight_dims, w_dtype, input.device()));
+                DeviceBufferRef tpu_buf,
+                CopyCpuToTpuBuffer(cpu_zeros, /*non_blocking=*/false));
+            grad_w = MakeTensor(std::move(tpu_buf));
           }
           return std::make_tuple(std::move(grad_in), std::move(grad_w));
         }
 
+        const Dimensions empty_dims = {0};
+        const Dimensions grad_in_dims =
+            output_mask[0] ? input_dims : empty_dims;
+        const Dimensions grad_w_dims =
+            output_mask[1] ? weight_dims : empty_dims;
+
         Dimensions normalized_shape_vec = CopyIntVector(normalized_shape);
-        auto op_builder = [normalized_shape_vec](
-                              absl::Span<const mlir::MlirOp> inputs,
-                              mlir::MlirBuilder& builder)
+        auto op_builder = [normalized_shape_vec =
+                               std::move(normalized_shape_vec),
+                           output_mask](absl::Span<const mlir::MlirOp> inputs,
+                                        mlir::MlirBuilder& builder)
             -> absl::StatusOr<MlirOpResults<2>> {
           TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=The inputs sequence is always
                          // constructed with the output grad, this op's input,
@@ -234,10 +271,10 @@ std::tuple<at::Tensor, at::Tensor> AtenFusedRmsNormBackward(
             weight_op = inputs[3];
           }
 
-          TT_ASSIGN_OR_RETURN(
-              RmsNormBackwardShloResults results,
-              BuildRmsNormBackwardShlo(grad_out_op, input_op, rstd_op,
-                                       weight_op, normalized_shape_vec));
+          TT_ASSIGN_OR_RETURN(RmsNormBackwardShloResults results,
+                              BuildRmsNormBackwardShlo(
+                                  grad_out_op, input_op, rstd_op, weight_op,
+                                  normalized_shape_vec, output_mask));
           return MlirOpResults<2>{results.grad_input, results.grad_weight};
         };
 
@@ -248,13 +285,15 @@ std::tuple<at::Tensor, at::Tensor> AtenFusedRmsNormBackward(
 
         TT_ASSIGN_OR_THROW(const auto elem_dtype,
                            ConvertTo<mlir::ElementType>(input.scalar_type()));
+        TT_ASSIGN_OR_THROW(const auto weight_dtype,
+                           ConvertTo<mlir::ElementType>(w_dtype));
 
         TT_ASSIGN_OR_THROW(
             auto output_bufs,
             (DispatchOp<kDynamicSize, 2>(
                 std::move(op_builder), inputs,
-                {.out_dtypes = {elem_dtype, elem_dtype},
-                 .out_dims_list = {input_dims, weight_dims},
+                {.out_dtypes = {elem_dtype, weight_dtype},
+                 .out_dims_list = {grad_in_dims, grad_w_dims},
                  .op_param_cache_keys = std::move(param_keys)})));
 
         return {output_mask[0] ? MakeTensor(std::move(output_bufs[0]))

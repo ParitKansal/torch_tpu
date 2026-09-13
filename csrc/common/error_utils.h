@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "ATen/core/ATen_fwd.h"
+#include "absl/base/no_destructor.h"
 #include "absl/base/optimization.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/absl_log.h"
@@ -41,6 +42,7 @@
 #include "c10/core/Device.h"
 #include "c10/util/Optional.h"
 #include "c10/util/StringUtil.h"
+#include "csrc/common/env_vars.h"
 #include "csrc/common/macro_utils.h"  // IWYU pragma: keep
 #include "csrc/common/status_builder.h"
 #include "csrc/common/to_string.h"
@@ -1214,6 +1216,41 @@ struct is_status_or_ref<absl::StatusOr<T&>> : std::true_type {};
 // to work around that (b/110959038).
 #define TT_IS_EMPTY_INNER_HELPER_(args) TT_IS_EMPTY_INNER_I_ args
 #define TT_IS_EMPTY_INNER_I_(e0, e1, is_empty, ...) is_empty
+
+// Returns the value of the environment variable with the given name, or an
+// error if it is not set.
+//
+// This function is memoized, so the environment variable is only read once.
+template <const char* env_name>
+[[nodiscard]] const absl::StatusOr<std::string>& GetRequiredEnvOnce() {
+  static const absl::NoDestructor<absl::StatusOr<std::string>> env_var(
+      []() -> absl::StatusOr<std::string> {
+        const auto& env_val = GetEnvOnce<env_name>();
+        TT_RET_CHECK(env_val.has_value(), error::kFailedPrecondition)
+            << "the " << env_name << " environment variable is not set";
+        return *env_val;
+      }());
+  return *env_var;
+}
+
+// Returns the integer value of the environment variable with the given name, or
+// an error if it is not set or cannot be parsed as an integer.
+//
+// This function is memoized, so the environment variable is only read once.
+template <typename IntType, const char* env_name>
+[[nodiscard]] const absl::StatusOr<IntType>& GetRequiredIntegerEnvOnce() {
+  static const absl::NoDestructor<absl::StatusOr<IntType>> env_var(
+      []() -> absl::StatusOr<IntType> {
+        const auto& raw_val = GetEnvOnce<env_name>();
+        TT_RET_CHECK(raw_val.has_value(), error::kFailedPrecondition)
+            << "the " << env_name << " environment variable is not set";
+        const auto int_val = GetIntegerEnvOnce<IntType, env_name>();
+        TT_RET_CHECK(int_val.has_value(), error::kFailedPrecondition)
+            << "Failed to parse " << env_name << ": " << *raw_val;
+        return *int_val;
+      }());
+  return *env_var;
+}
 
 }  // namespace torch_tpu
 

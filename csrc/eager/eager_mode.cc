@@ -26,22 +26,26 @@
 namespace torch_tpu {
 
 [[nodiscard]] static EagerMode GetDefaultEagerMode() {
-  const auto& launch_blocking_public =
-      GetEnvOnce<kTorchTpuLaunchBlockingEnvVar>();
-  const auto& launch_blocking = launch_blocking_public.has_value()
-                                    ? launch_blocking_public
-                                    : GetEnvOnce<kTpuLaunchBlocking>();
-  if (launch_blocking == "1") {
-    return EagerMode::kDeferNeverAndLaunchBlocking;
-  }
-  const auto& defer_and_fuse_public = GetEnvOnce<kTorchTpuDeferAndFuseEnvVar>();
-  const auto& defer_and_fuse = defer_and_fuse_public.has_value()
-                                   ? defer_and_fuse_public
-                                   : GetEnvOnce<kTpuDeferAndFuse>();
-  if (defer_and_fuse == "1") {
-    return EagerMode::kDeferAndFuse;
-  }
-  return EagerMode::kDeferNever;
+  // Compute the mode once and memoize it.
+  static const EagerMode mode = [] {
+    const auto launch_blocking_public =
+        GetBooleanEnvOnce<kTorchTpuLaunchBlockingEnvVar>();
+    const auto launch_blocking = launch_blocking_public.has_value()
+                                     ? launch_blocking_public
+                                     : GetBooleanEnvOnce<kTpuLaunchBlocking>();
+    if (launch_blocking.value_or(false)) {
+      return EagerMode::kDeferNeverAndLaunchBlocking;
+    }
+
+    const auto defer_and_fuse_public =
+        GetBooleanEnvOnce<kTorchTpuDeferAndFuseEnvVar>();
+    const auto defer_and_fuse = defer_and_fuse_public.has_value()
+                                    ? defer_and_fuse_public
+                                    : GetBooleanEnvOnce<kTpuDeferAndFuse>();
+    return defer_and_fuse.value_or(false) ? EagerMode::kDeferAndFuse
+                                          : EagerMode::kDeferNever;
+  }();
+  return mode;
 }
 
 // Returns the global base eager mode.
@@ -61,12 +65,13 @@ void SetEagerMode(const EagerMode mode) {
 }
 
 [[nodiscard]] static bool GetDefaultInplaceBufferDonation() {
-  const auto& env_var =
-      GetEnvOnce<kTorchTpuInternalDisableInplaceBufferDonationEnvVar>();
-  if (env_var.has_value() && (*env_var == "1" || *env_var == "true")) {
-    return false;
-  }
-  return true;
+  // Compute the value once and memoize it.
+  static const bool value = [] {
+    const auto env_var = GetBooleanEnvOnce<
+        kTorchTpuInternalDisableInplaceBufferDonationEnvVar>();
+    return !env_var.value_or(false);
+  }();
+  return value;
 }
 
 // Returns the global base in-place buffer donation setting.

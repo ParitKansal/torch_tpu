@@ -38,12 +38,14 @@ from absl.testing import parameterized
 from scipy import stats
 import torch
 from torch.testing._internal import common_methods_invocations
+from torch_tpu._internal import dynamism
 from torch_tpu._internal import execution_mode
 from torch_tpu._internal import sync
 from torch_tpu._internal.compile import tpu_torch_compile
 from torch_tpu._internal.utils import test_utils as utils
 from tests import op_testing
 from tests import ops_test_data
+from tests import oss_utils
 from tests import quantize_utils
 from tests import seed_test_utils
 
@@ -92,6 +94,90 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
   If a bug is found that's not covered by do_test_op() in ops_test.py, please
   add it here.
   """
+
+  @parameterized.product(
+      dtype=[torch.float32, torch.float64],
+      op_fn=[
+          ("add", lambda s, t1, t2: torch.add(t1, t2)),
+          ("div", lambda s, t1, t2: torch.div(t1, t2)),
+          ("addcdiv", lambda s, t1, t2: torch.addcdiv(s, t1, t2, value=3.14)),
+          ("addcmul", lambda s, t1, t2: torch.addcmul(s, t1, t2, value=3.14)),
+      ],
+  )
+  @oss_utils.skip_if_cloud_and_libtpu_older_than("0.0.47")
+  def test_dynamic_float64_elementwise_and_fused_ops(self, dtype, op_fn):
+    """Tests dynamic shapes for float64 (and f32 baseline) ops.
+
+    Covers add, div, addcdiv, and addcmul ops (X64 split layout handling).
+    """
+    torch.manual_seed(42)
+
+    # Case 1: 2D tensors (2, 4) with dimension 0 dynamic
+    with self.subTest(op=op_fn[0], dtype=dtype, case="2x4_dim0_dynamic"):
+      s_tpu = torch.tensor(
+          [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+          dtype=dtype,
+          device="tpu",
+      )
+      t1_tpu = torch.tensor(
+          [[2.0, 8.0, 1.0, 4.0], [1.0, 0.0, 3.0, 4.0]],
+          dtype=dtype,
+          device="tpu",
+      )
+      t2_tpu = torch.tensor(
+          [[1.0, 3.0, 3.0, 1.0], [1.0, 0.0, 0.0, 2.0]],
+          dtype=dtype,
+          device="tpu",
+      )
+
+      s_cpu = s_tpu.cpu()
+      t1_cpu = t1_tpu.cpu()
+      t2_cpu = t2_tpu.cpu()
+
+      dynamism.mark_dynamic(s_tpu, dimension=1, lower_bound=2, upper_bound=15)
+      dynamism.mark_dynamic(t1_tpu, dimension=1, lower_bound=2, upper_bound=15)
+      dynamism.mark_dynamic(t2_tpu, dimension=1, lower_bound=2, upper_bound=15)
+
+      out_tpu = op_fn[1](s_tpu, t1_tpu, t2_tpu)
+      out_cpu = op_fn[1](s_cpu, t1_cpu, t2_cpu)
+
+      utils.assert_close(actual=out_tpu.cpu(), expected=out_cpu)
+
+    # Case 2: Broadcast dynamic (5, 1) with static (1, 4) -> output (5, 4)
+    with self.subTest(op=op_fn[0], dtype=dtype, case="broadcast_5x1_with_1x4"):
+      s_tpu = torch.rand(5, 4, dtype=dtype, device="tpu") + 0.5
+      t1_tpu = torch.rand(5, 1, dtype=dtype, device="tpu") + 0.5
+      t2_tpu = torch.rand(1, 4, dtype=dtype, device="tpu") + 0.5
+
+      s_cpu = s_tpu.cpu()
+      t1_cpu = t1_tpu.cpu()
+      t2_cpu = t2_tpu.cpu()
+
+      dynamism.mark_dynamic(s_tpu, dimension=0, lower_bound=2, upper_bound=15)
+      dynamism.mark_dynamic(t1_tpu, dimension=0, lower_bound=2, upper_bound=15)
+
+      out_tpu = op_fn[1](s_tpu, t1_tpu, t2_tpu)
+      out_cpu = op_fn[1](s_cpu, t1_cpu, t2_cpu)
+
+      utils.assert_close(actual=out_tpu.cpu(), expected=out_cpu)
+
+    # Case 3: Broadcast dynamic (5, 1) with 1D static (4,) -> output (5, 4)
+    with self.subTest(op=op_fn[0], dtype=dtype, case="broadcast_5x1_with_1d_4"):
+      s_tpu = torch.rand(5, 4, dtype=dtype, device="tpu") + 0.5
+      t1_tpu = torch.rand(5, 1, dtype=dtype, device="tpu") + 0.5
+      t2_tpu = torch.rand(4, dtype=dtype, device="tpu") + 0.5
+
+      s_cpu = s_tpu.cpu()
+      t1_cpu = t1_tpu.cpu()
+      t2_cpu = t2_tpu.cpu()
+
+      dynamism.mark_dynamic(s_tpu, dimension=0, lower_bound=2, upper_bound=15)
+      dynamism.mark_dynamic(t1_tpu, dimension=0, lower_bound=2, upper_bound=15)
+
+      out_tpu = op_fn[1](s_tpu, t1_tpu, t2_tpu)
+      out_cpu = op_fn[1](s_cpu, t1_cpu, t2_cpu)
+
+      utils.assert_close(actual=out_tpu.cpu(), expected=out_cpu)
 
   def test_clone_inplace_mutation_preserves_original(self):
     """Verifies that an in-place mutation on a cloned tensor does not mutate or
@@ -1249,6 +1335,50 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
             stride=(2, 1),
             padding=1,
             dilation=(1, 2),
+            ceil_mode=True,
+            return_indices=False,
+        )
+    )
+
+  def test_max_pool1d_no_indices(self):
+    """Tests nn.functional.max_pool1d without indices."""
+    device = torch.device("tpu")
+    maxpool_input = torch.tensor(
+        [[
+            [-7.7435, -8.8254, 7.2097, 4.3371, 2.8040, -3.4491, 5.1234, -1.23],
+            [2.8523, -5.7473, 2.1480, -0.3480, 2.5668, -8.3042, 3.456, 0.789],
+        ]],
+        dtype=torch.float32,
+        device=device,
+    )
+
+    self.assert_close_tpu_vs_cpu(
+        lambda device: torch.nn.functional.max_pool1d(
+            maxpool_input.to(device),
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            dilation=1,
+            ceil_mode=True,
+            return_indices=False,
+        )
+    )
+
+  def test_max_pool3d_no_indices(self):
+    """Tests nn.functional.max_pool3d without indices."""
+    maxpool_input = torch.randn(
+        (2, 3, 4, 6, 6),
+        dtype=torch.float32,
+        generator=torch.manual_seed(42),
+    )
+
+    self.assert_close_tpu_vs_cpu(
+        lambda device: torch.nn.functional.max_pool3d(
+            maxpool_input.to(device),
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            dilation=1,
             ceil_mode=True,
             return_indices=False,
         )
@@ -5605,7 +5735,7 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
       self.assertEqual(res.dtype, torch.float32)
 
   def test_embedding_scalar_index(self):
-    """Tests that embedding works with a scalar index."""
+    """Tests that embedding works with a scalar index in forward and backward."""
     with set_default_dtype(torch.float32):
       vocab_size = 3
       embedding_size = 7
@@ -5617,6 +5747,16 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
               to(embedding_table, device=device),
           )
       )
+
+      def compute_grad(device):
+        w = to(embedding_table.clone(), device=device).requires_grad_(True)
+        idx = to(index, device=device)
+        out = torch.nn.functional.embedding(idx, w)
+        loss = out.sum()
+        loss.backward()
+        return w.grad
+
+      self.assert_close_tpu_vs_cpu(compute_grad)
 
   def test_randn_scalar(self):
     with set_default_dtype(torch.float32):
@@ -5851,6 +5991,193 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
 
     fn(torch.device("tpu"))
     fn_1(torch.device("tpu"))
+
+  @parameterized.named_parameters(
+      ("float32", torch.float32),
+      ("bfloat16", torch.bfloat16),
+  )
+  def test_embedding_aten(self, dtype):
+    """Tests native aten.embedding forward and backward."""
+    vocab_size = 32
+    embedding_dim = 16
+    batch_size = 4
+    seq_len = 8
+
+    indices = torch.randint(0, vocab_size, size=(batch_size, seq_len))
+    weight = torch.randn(vocab_size, embedding_dim, dtype=dtype)
+
+    # Test direct aten.embedding forward
+    self.assert_close_tpu_vs_cpu(
+        lambda device: torch.ops.aten.embedding(
+            to(weight, device=device),
+            to(indices, device=device),
+        )
+    )
+
+    # Test backward gradient
+    def compute_grad(device):
+      w = to(weight.clone(), device=device).requires_grad_(True)
+      idx = to(indices, device=device)
+      out = torch.ops.aten.embedding(w, idx)
+      loss = out.sum()
+      loss.backward()
+      return w.grad
+
+    self.assert_close_tpu_vs_cpu(compute_grad)
+
+  @parameterized.named_parameters(
+      ("float32", torch.float32),
+      ("bfloat16", torch.bfloat16),
+  )
+  def test_embedding_out(self, dtype):
+    """Tests native aten.embedding.out with pre-allocated and resizing out tensor."""
+    vocab_size = 32
+    embedding_dim = 16
+    batch_size = 4
+    seq_len = 8
+
+    indices = torch.randint(0, vocab_size, size=(batch_size, seq_len))
+    weight = torch.randn(vocab_size, embedding_dim, dtype=dtype)
+
+    # 1. Matching pre-allocated out shape
+    def run_preallocated(device):
+      w = to(weight, device=device)
+      idx = to(indices, device=device)
+      out = torch.empty(
+          batch_size, seq_len, embedding_dim, dtype=dtype, device=device
+      )
+      res = torch.ops.aten.embedding.out(w, idx, out=out)
+      self.assertIs(res, out)
+      return out
+
+    self.assert_close_tpu_vs_cpu(run_preallocated)
+
+    # 2. Differing / empty out shape requiring resize
+    def run_resize(device):
+      w = to(weight, device=device)
+      idx = to(indices, device=device)
+      out = torch.empty(0, dtype=dtype, device=device)
+      res = torch.ops.aten.embedding.out(w, idx, out=out)
+      self.assertIs(res, out)
+      return out
+
+    self.assert_close_tpu_vs_cpu(run_resize)
+
+    # 3. 0-D scalar index with out tensor
+    scalar_idx = torch.tensor(3, dtype=torch.long)
+
+    def run_scalar(device):
+      w = to(weight, device=device)
+      idx = to(scalar_idx, device=device)
+      out = torch.empty(embedding_dim, dtype=dtype, device=device)
+      res = torch.ops.aten.embedding.out(w, idx, out=out)
+      self.assertIs(res, out)
+      return out
+
+    self.assert_close_tpu_vs_cpu(run_scalar)
+
+  @parameterized.named_parameters(
+      ("1d_empty_indices", 16, (0,)),
+      ("2d_empty_indices", 16, (2, 0)),
+      ("0_row_weight", 0, (0,)),
+  )
+  def test_embedding_empty_tensors(self, vocab_size, indices_shape):
+    """Tests embedding with 0-element tensors in forward and backward."""
+    embedding_dim = 8
+    weight = torch.randn(vocab_size, embedding_dim)
+    indices = torch.empty(indices_shape, dtype=torch.long)
+
+    self.assert_close_tpu_vs_cpu(
+        lambda device: torch.ops.aten.embedding(
+            to(weight, device=device),
+            to(indices, device=device),
+        )
+    )
+
+    def compute_grad(device):
+      w = to(weight.clone(), device=device).requires_grad_(True)
+      idx = to(indices, device=device)
+      out = torch.ops.aten.embedding(w, idx)
+      out.backward(torch.zeros_like(out))
+      return w.grad
+
+    self.assert_close_tpu_vs_cpu(compute_grad)
+
+  @parameterized.named_parameters(
+      ("float32", torch.float32),
+      ("bfloat16", torch.bfloat16),
+  )
+  def test_embedding_duplicate_indices_and_options(self, dtype):
+    """Tests backward gradient accumulation with duplicate indices, padding_idx, and scale_grad_by_freq."""
+    vocab_size = 8
+    embedding_dim = 4
+    indices = torch.tensor([2, 5, 2, 2, 5, 0, 2, 5, 0, 2], dtype=torch.long)
+    weight = torch.randn(vocab_size, embedding_dim, dtype=dtype)
+
+    def compute_grad(device):
+      w = to(weight.clone(), device=device).requires_grad_(True)
+      idx = to(indices, device=device)
+      out = torch.ops.aten.embedding(
+          w, idx, padding_idx=0, scale_grad_by_freq=True
+      )
+      scale = torch.arange(
+          1, out.numel() + 1, device=device, dtype=dtype
+      ).view_as(out)
+      loss = (out * scale).sum()
+      loss.backward()
+      return w.grad
+
+    self.assert_close_tpu_vs_cpu(compute_grad)
+
+  def test_embedding_multidim_int32(self):
+    """Tests embedding with 3-D indices and int32 index dtype."""
+    vocab_size = 32
+    embedding_dim = 16
+    indices = torch.randint(0, vocab_size, size=(2, 3, 4), dtype=torch.int32)
+    weight = torch.randn(vocab_size, embedding_dim)
+
+    self.assert_close_tpu_vs_cpu(
+        lambda device: torch.ops.aten.embedding(
+            to(weight, device=device),
+            to(indices, device=device),
+        )
+    )
+
+    def compute_grad(device):
+      w = to(weight.clone(), device=device).requires_grad_(True)
+      idx = to(indices, device=device)
+      out = torch.ops.aten.embedding(w, idx)
+      loss = out.sum()
+      loss.backward()
+      return w.grad
+
+    self.assert_close_tpu_vs_cpu(compute_grad)
+
+  def test_embedding_non_contiguous(self):
+    """Tests embedding with non-contiguous weight and indices."""
+    vocab_size = 16
+    embedding_dim = 8
+    weight = torch.randn(vocab_size, embedding_dim * 2)[:, ::2]
+    self.assertFalse(weight.is_contiguous())
+    indices = torch.randint(0, vocab_size, size=(4, 6)).t()
+    self.assertFalse(indices.is_contiguous())
+
+    self.assert_close_tpu_vs_cpu(
+        lambda device: torch.ops.aten.embedding(
+            to(weight, device=device),
+            to(indices, device=device),
+        )
+    )
+
+    def compute_grad(device):
+      w = to(weight.clone(), device=device).requires_grad_(True)
+      idx = to(indices, device=device)
+      out = torch.ops.aten.embedding(w, idx)
+      loss = out.sum()
+      loss.backward()
+      return w.grad
+
+    self.assert_close_tpu_vs_cpu(compute_grad)
 
   def test_embedding_renorm(self):
     """Tests that embedding renorm works."""
@@ -8440,75 +8767,6 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
     self.assert_close_tpu_vs_cpu(run)
 
   @parameterized.product(
-      dim=[-1, 0, 1],
-      descending=[True, False],
-      stable=[True, False],
-      dtype=[torch.float32, torch.bfloat16, torch.int32],
-  )
-  def test_sort_multidim(self, dim, descending, stable, dtype):
-    """Tests that torch.sort returns correct values and int64 indices across dims."""
-    if dtype == torch.int32:
-      x = torch.randint(-100, 100, (4, 8, 16), dtype=dtype)
-    else:
-      x = torch.randn(4, 8, 16, dtype=dtype)
-
-    def run(device):
-      t = x.to(device)
-      values, indices = torch.sort(
-          t, dim=dim, descending=descending, stable=stable
-      )
-      self.assertEqual(indices.dtype, torch.int64)
-      gathered = torch.gather(t, dim, indices)
-      if stable:
-        return values, indices, gathered
-      return values, gathered
-
-    self.assert_close_tpu_vs_cpu(run)
-
-  def test_sort_uses_i32_indices_for_small_dims(self):
-    """Sort tracks indices in i32 (then converts to i64) for small dims.
-
-    torch.sort always returns int64 indices, so the numerics tests above pass
-    whether or not the i32 optimization fires. Like
-    test_scatter_add_broadcast_index_lowers_to_row_scatter, this guards the
-    lowering itself: assert the emitted StableHLO iotas/sorts the indices in
-    i32 and converts them up to i64, rather than iota-ing directly in i64.
-    """
-    x = torch.randn(16, device="tpu")
-    with execution_mode.set_eager_mode(
-        execution_mode.EagerMode.INTERNAL_COMPILE_FX_GRAPH
-    ):
-      values, indices = torch.sort(x)
-    mlir_text = tpu_torch_compile.serialize_mlir_text(
-        tpu_torch_compile.build_mlir([values, indices], [x])
-    )
-    self.assertIn("stablehlo.iota dim = 0 : tensor<16xi32>", mlir_text)
-    self.assertIn("(tensor<16xi32>) -> tensor<16xi64>", mlir_text)
-    self.assertNotIn("stablehlo.iota dim = 0 : tensor<16xi64>", mlir_text)
-
-  def test_sort_uses_i64_indices_for_large_dims(self):
-    """Sort iotas/sorts indices directly in i64 when a dim exceeds int32.
-
-    The i32 optimization must not fire once the sorted dimension exceeds
-    INT32_MAX. Mirroring large_invert_non_strided_slice_test, this uses a 2**31
-    dimension; like the guard above it cannot be distinguished numerically, so
-    it builds the MLIR without executing (the ~16 GB i64 index output is never
-    materialized) and asserts the indices stay i64 with no i32 iota or convert.
-    """
-    # Use int8 to prevent OOM.
-    x = torch.zeros(2**31, dtype=torch.int8, device="tpu")
-    with execution_mode.set_eager_mode(
-        execution_mode.EagerMode.INTERNAL_COMPILE_FX_GRAPH
-    ):
-      values, indices = torch.sort(x)
-    mlir_text = tpu_torch_compile.serialize_mlir_text(
-        tpu_torch_compile.build_mlir([values, indices], [x])
-    )
-    self.assertIn("stablehlo.iota dim = 0 : tensor<2147483648xi64>", mlir_text)
-    self.assertNotIn("xi32", mlir_text)
-    self.assertNotIn("stablehlo.convert", mlir_text)
-
-  @parameterized.product(
       batch_first=[True, False],
       norm_first=[True, False],
       use_gelu=[True, False],
@@ -10702,6 +10960,229 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
 
     self.assert_close_tpu_vs_cpu(fn, rtol=1e-5, atol=1e-5)
 
+  def test_layer_norm_zero_variance(self):
+    """Verifies that constant inputs (zero variance) do not produce NaN."""
+    torch.manual_seed(42)
+    x = torch.full((2, 3, 16), 5.0, dtype=torch.float32)
+    weight = torch.randn(16, dtype=torch.float32)
+    bias = torch.randn(16, dtype=torch.float32)
+
+    def fn(device):
+      return torch.ops.aten.native_layer_norm(
+          x.to(device), [16], weight.to(device), bias.to(device), 1e-5
+      )
+
+    self.assert_close_tpu_vs_cpu(fn, rtol=1e-5, atol=1e-5)
+
+  def test_layer_norm_large_mean(self):
+    """Verifies numerical stability when mean is large relative to variance."""
+    torch.manual_seed(42)
+    x = 100.0 + torch.randn(2, 4, 32, dtype=torch.float32)
+
+    def fn(device):
+      return torch.ops.aten.native_layer_norm(
+          x.to(device), [32], None, None, 1e-5
+      )
+
+    # Two-moment variance calculation (E[x^2] - E[x]^2) on TPU vs Welford on CPU
+    # has expected floating point round-off differences when mean is large.
+    self.assert_close_tpu_vs_cpu(fn, rtol=2e-3, atol=5e-3)
+
+  def test_layer_norm_single_element_normalized_shape(self):
+    """Verifies layer_norm when the normalized dimension size is 1."""
+    torch.manual_seed(42)
+    x = torch.randn(3, 4, 1, dtype=torch.float32)
+
+    def fn(device):
+      return torch.ops.aten.native_layer_norm(
+          x.to(device), [1], None, None, 1e-5
+      )
+
+    self.assert_close_tpu_vs_cpu(fn, rtol=1e-5, atol=1e-5)
+
+  def test_layer_norm_zero_sized_batch(self):
+    """Verifies layer_norm with a zero-sized non-reduction dimension."""
+    x = torch.empty(0, 16, dtype=torch.float32)
+
+    def fn(device):
+      return torch.ops.aten.native_layer_norm(
+          x.to(device), [16], None, None, 1e-5
+      )
+
+    self.assert_close_tpu_vs_cpu(fn)
+
+  def test_layer_norm_non_contiguous(self):
+    """Verifies layer_norm with transposed non-contiguous inputs."""
+    torch.manual_seed(42)
+    x = torch.randn(2, 16, 8, dtype=torch.float32)
+
+    def fn(device):
+      x_transposed = x.to(device).transpose(1, 2)
+      return torch.ops.aten.native_layer_norm(
+          x_transposed, [16], None, None, 1e-5
+      )
+
+    self.assert_close_tpu_vs_cpu(fn, rtol=1e-5, atol=1e-5)
+
+  @parameterized.parameters(
+      (True, False),  # weight only
+      (False, True),  # bias only
+  )
+  def test_layer_norm_partial_affine(self, has_weight, has_bias):
+    """Verifies layer_norm with only weight or only bias provided."""
+    torch.manual_seed(42)
+    x = torch.randn(2, 4, 8, dtype=torch.float32)
+    weight = torch.randn(8, dtype=torch.float32) if has_weight else None
+    bias = torch.randn(8, dtype=torch.float32) if has_bias else None
+
+    def fn(device):
+      w = weight.to(device) if weight is not None else None
+      b = bias.to(device) if bias is not None else None
+      return torch.ops.aten.native_layer_norm(x.to(device), [8], w, b, 1e-5)
+
+    self.assert_close_tpu_vs_cpu(fn, rtol=1e-5, atol=1e-5)
+
+  def test_rms_norm_no_weight(self):
+    """Tests nn.functional.rms_norm forward and backward without weight tensor."""
+
+    def fn(device):
+      x = torch.tensor(
+          [[0.5, -1.2, 2.3, -0.8], [1.1, 0.4, -1.5, 0.9]],
+          dtype=torch.float32,
+          device=device,
+      ).requires_grad_()
+      g = torch.ones_like(x)
+      out = torch.nn.functional.rms_norm(x, (4,), eps=1e-5)
+      out.backward(g)
+      return out, x.grad
+
+    self.assert_close_tpu_vs_cpu(fn, rtol=1e-5, atol=1e-5)
+
+  def test_rms_norm_multidim_normalized_shape(self):
+    """Tests nn.functional.rms_norm with multi-dimensional normalized_shape."""
+
+    def fn(device):
+      x = (
+          torch.arange(24, dtype=torch.float32, device=device).reshape(3, 2, 4)
+          / 10.0
+      ).requires_grad_()
+      w = (
+          torch.arange(8, dtype=torch.float32, device=device).reshape(2, 4)
+          / 5.0
+      ).requires_grad_()
+      g = torch.ones_like(x)
+      out = torch.nn.functional.rms_norm(x, (2, 4), weight=w, eps=1e-5)
+      out.backward(g)
+      return out, x.grad, w.grad
+
+    self.assert_close_tpu_vs_cpu(fn, rtol=1e-5, atol=1e-5)
+
+  def test_rms_norm_1d_input(self):
+    """Tests nn.functional.rms_norm when input rank equals normalized_shape rank."""
+
+    def fn(device):
+      x = (
+          torch.arange(8, dtype=torch.float32, device=device) / 4.0
+      ).requires_grad_()
+      w = (
+          torch.arange(8, dtype=torch.float32, device=device) / 8.0 + 1.0
+      ).requires_grad_()
+      g = torch.ones_like(x)
+      out = torch.nn.functional.rms_norm(x, (8,), weight=w, eps=1e-5)
+      out.backward(g)
+      return out, x.grad, w.grad
+
+    self.assert_close_tpu_vs_cpu(fn, rtol=1e-5, atol=1e-5)
+
+  def test_rms_norm_zero_elements(self):
+    """Tests nn.functional.rms_norm edge case with empty zero-element input."""
+
+    def fn(device):
+      x = torch.empty(0, 8, dtype=torch.float32, device=device).requires_grad_()
+      w = torch.ones(8, dtype=torch.float32, device=device).requires_grad_()
+      g = torch.empty(0, 8, dtype=torch.float32, device=device)
+      out = torch.nn.functional.rms_norm(x, (8,), weight=w, eps=1e-5)
+      out.backward(g)
+      return out, x.grad, w.grad
+
+    self.assert_close_tpu_vs_cpu(fn)
+
+  def test_rms_norm_non_contiguous(self):
+    """Tests nn.functional.rms_norm with non-contiguous strided inputs."""
+
+    def fn(device):
+      x_base = (
+          torch.arange(32, dtype=torch.float32, device=device).reshape(4, 8)
+          / 10.0
+      ).requires_grad_()
+      w_base = (
+          torch.arange(8, dtype=torch.float32, device=device) / 4.0
+      ).requires_grad_()
+      x = x_base[:, ::2]
+      w = w_base[::2]
+      g = torch.ones_like(x)
+      out = torch.nn.functional.rms_norm(x, (4,), weight=w, eps=1e-5)
+      out.backward(g)
+      return out, x_base.grad, w_base.grad
+
+    self.assert_close_tpu_vs_cpu(fn, rtol=1e-5, atol=1e-5)
+
+  def test_rms_norm_bfloat16(self):
+    """Tests nn.functional.rms_norm mixed-precision and upcasting with bfloat16."""
+
+    def fn(device):
+      x = (
+          torch.arange(32, dtype=torch.bfloat16, device=device).reshape(4, 8)
+          / 10.0
+      ).requires_grad_()
+      w = (
+          torch.arange(8, dtype=torch.bfloat16, device=device) / 4.0 + 0.5
+      ).requires_grad_()
+      g = torch.ones_like(x)
+      out = torch.nn.functional.rms_norm(x, (8,), weight=w, eps=1e-5)
+      out.backward(g)
+      return out, x.grad, w.grad
+
+    self.assert_close_tpu_vs_cpu(fn, rtol=1e-2, atol=1e-2)
+
+  def test_rms_norm_grad_input_only(self):
+    """Tests autograd backward when only input gradient is required."""
+
+    def fn(device):
+      x = (
+          torch.arange(16, dtype=torch.float32, device=device).reshape(4, 4)
+          / 5.0
+      ).requires_grad_()
+      w = (
+          torch.arange(4, dtype=torch.float32, device=device) / 2.0
+      ).requires_grad_(False)
+      g = torch.ones_like(x)
+      out = torch.nn.functional.rms_norm(x, (4,), weight=w, eps=1e-5)
+      out.backward(g)
+      self.assertIsNone(w.grad)
+      return out, x.grad
+
+    self.assert_close_tpu_vs_cpu(fn, rtol=1e-5, atol=1e-5)
+
+  def test_rms_norm_grad_weight_only(self):
+    """Tests autograd backward when only weight gradient is required."""
+
+    def fn(device):
+      x = (
+          torch.arange(16, dtype=torch.float32, device=device).reshape(4, 4)
+          / 5.0
+      ).requires_grad_(False)
+      w = (
+          torch.arange(4, dtype=torch.float32, device=device) / 2.0
+      ).requires_grad_()
+      g = torch.ones_like(x)
+      out = torch.nn.functional.rms_norm(x, (4,), weight=w, eps=1e-5)
+      out.backward(g)
+      self.assertIsNone(x.grad)
+      return out, w.grad
+
+    self.assert_close_tpu_vs_cpu(fn, rtol=1e-5, atol=1e-5)
+
   def test_max_pool2d_with_indices(self):
     """Tests nn.functional.max_pool2d_float32_sample54."""
     device = torch.device("tpu")
@@ -10949,6 +11430,74 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
           stride=(2, 1),
           padding=1,
           dilation=(1, 1),
+          ceil_mode=True,
+          return_indices=False,
+      )
+
+      loss = out.sum()
+      loss.backward()
+
+      return maxpool_input.grad
+
+    self.assert_close_tpu_vs_cpu(get_grad)
+
+  def test_max_pool1d_grad(self):
+    """Tests nn.functional.max_pool1d backward without indices."""
+
+    def get_grad(device):
+      maxpool_input = torch.tensor(
+          [[
+              [
+                  -7.7435,
+                  -8.8254,
+                  7.2097,
+                  4.3371,
+                  2.8040,
+                  -3.4491,
+                  5.1234,
+                  -1.23,
+              ],
+              [2.8523, -5.7473, 2.1480, -0.3480, 2.5668, -8.3042, 3.456, 0.789],
+          ]],
+          dtype=torch.float32,
+          device=device,
+          requires_grad=True,
+      )
+
+      out = torch.nn.functional.max_pool1d(
+          maxpool_input,
+          kernel_size=3,
+          stride=2,
+          padding=1,
+          dilation=1,
+          ceil_mode=True,
+          return_indices=False,
+      )
+
+      loss = out.sum()
+      loss.backward()
+
+      return maxpool_input.grad
+
+    self.assert_close_tpu_vs_cpu(get_grad)
+
+  def test_max_pool3d_grad(self):
+    """Tests nn.functional.max_pool3d backward without indices."""
+    input_data = torch.randn(
+        (2, 2, 4, 6, 6),
+        dtype=torch.float32,
+        generator=torch.manual_seed(42),
+    )
+
+    def get_grad(device):
+      maxpool_input = input_data.clone().to(device).requires_grad_(True)
+
+      out = torch.nn.functional.max_pool3d(
+          maxpool_input,
+          kernel_size=3,
+          stride=2,
+          padding=1,
+          dilation=1,
           ceil_mode=True,
           return_indices=False,
       )
@@ -11847,7 +12396,160 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
         kwargs["stride"] = stride
       return torch.nn.functional.avg_pool1d(input_val.to(device), **kwargs)
 
-    self.assert_close_tpu_vs_cpu(compute)
+    atol = 5e-3 if dtype == torch.bfloat16 else None
+    self.assert_close_tpu_vs_cpu(compute, atol=atol)
+
+  def test_avg_pool_corner_cases(self):
+    """Tests corner cases for avg_pool1d, avg_pool2d, and avg_pool3d:
+
+    - kernel_size=1, stride=1, padding=0 (window_size=1 no-op scaling).
+    - divisor_override=1 (no-op scaling with explicit divisor override).
+    - divisor_override > 1 with low-precision dtype (reciprocal multiplication).
+    - Unbatched 2D (C, H, W) and 3D (C, D, H, W) inputs.
+    - count_include_pad=False with padding on borders.
+    """
+    torch.manual_seed(42)
+
+    # 1. Window size == 1 (no-op scaling) on 2D bfloat16
+    x_2d_bf16 = torch.randn(2, 4, 8, 8, dtype=torch.bfloat16)
+    self.assert_close_tpu_vs_cpu(
+        lambda dev: torch.nn.functional.avg_pool2d(
+            x_2d_bf16.to(dev), kernel_size=1, stride=1, padding=0
+        )
+    )
+
+    # 2. Divisor override == 1 (no-op scaling) on 2D float32
+    x_2d_f32 = torch.randn(2, 4, 8, 8, dtype=torch.float32)
+    self.assert_close_tpu_vs_cpu(
+        lambda dev: torch.nn.functional.avg_pool2d(
+            x_2d_f32.to(dev), kernel_size=2, stride=2, divisor_override=1
+        )
+    )
+
+    # 3. Divisor override > 1 on 2D bfloat16 (reciprocal multiplication)
+    self.assert_close_tpu_vs_cpu(
+        lambda dev: torch.nn.functional.avg_pool2d(
+            x_2d_bf16.to(dev), kernel_size=2, stride=2, divisor_override=5
+        ),
+        atol=5e-3,
+    )
+
+    # 4. Unbatched 2D input (C, H, W) and 3D input (C, D, H, W)
+    x_unbatched_2d = torch.randn(3, 10, 10, dtype=torch.float32)
+    self.assert_close_tpu_vs_cpu(
+        lambda dev: torch.nn.functional.avg_pool2d(
+            x_unbatched_2d.to(dev), kernel_size=3, stride=2, padding=1
+        )
+    )
+
+    x_unbatched_3d = torch.randn(3, 6, 6, 6, dtype=torch.float32)
+    self.assert_close_tpu_vs_cpu(
+        lambda dev: torch.nn.functional.avg_pool3d(
+            x_unbatched_3d.to(dev),
+            kernel_size=2,
+            stride=2,
+            divisor_override=3,
+        )
+    )
+
+    # 5. count_include_pad=False with padding on 2D and 3D
+    self.assert_close_tpu_vs_cpu(
+        lambda dev: torch.nn.functional.avg_pool2d(
+            x_2d_f32.to(dev),
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            count_include_pad=False,
+        )
+    )
+
+  def test_adaptive_avg_pool_corner_cases(self):
+    """Tests corner cases for adaptive_avg_pool2d and adaptive_avg_pool3d:
+
+    - Divisible shapes triggering std_avg_pool fast path in forward and
+    backward.
+    - Non-divisible shapes triggering Gather/Scatter with variable window
+    lengths.
+    - Output size equal to input size (max_k == 1 no-op scaling fast path).
+    - Low-precision bfloat16 and float16 dtypes.
+    - 3D adaptive pooling divisible and non-divisible shapes.
+    - Backward gradient checks for both fast-path and scatter paths.
+    """
+    torch.manual_seed(42)
+
+    # 1. Forward + Backward: Divisible shapes (fast path std_avg_pool)
+    x_2d_div = torch.randn(2, 3, 8, 8, dtype=torch.float32, requires_grad=True)
+
+    def run_divisible_2d(dev):
+      x = x_2d_div.detach().clone().to(dev).requires_grad_(True)
+      out = torch.nn.functional.adaptive_avg_pool2d(x, (4, 4))
+      out.backward(torch.ones_like(out))
+      return out, x.grad
+
+    self.assert_close_tpu_vs_cpu(run_divisible_2d)
+
+    # 2. Forward + Backward: max_k == 1 (out_size == in_size, identity scaling)
+    x_2d_same = torch.randn(2, 3, 5, 5, dtype=torch.float32, requires_grad=True)
+
+    def run_same_size_2d(dev):
+      x = x_2d_same.detach().clone().to(dev).requires_grad_(True)
+      out = torch.nn.functional.adaptive_avg_pool2d(x, (5, 5))
+      out.backward(torch.ones_like(out))
+      return out, x.grad
+
+    self.assert_close_tpu_vs_cpu(run_same_size_2d)
+
+    # 3. Forward + Backward: Non-divisible shapes (GatherPool / ScatterAdd path)
+    x_2d_nondiv = torch.randn(
+        2, 2, 7, 10, dtype=torch.float32, requires_grad=True
+    )
+
+    def run_nondivisible_2d(dev):
+      x = x_2d_nondiv.detach().clone().to(dev).requires_grad_(True)
+      out = torch.nn.functional.adaptive_avg_pool2d(x, (3, 4))
+      out.backward(torch.ones_like(out))
+      return out, x.grad
+
+    self.assert_close_tpu_vs_cpu(run_nondivisible_2d)
+
+    # 4. Native low-precision bfloat16 with divisible shape (fast path)
+    x_2d_bf16 = torch.randn(
+        2, 3, 6, 6, dtype=torch.bfloat16, requires_grad=True
+    )
+
+    def run_bf16_divisible_2d(dev):
+      x = x_2d_bf16.detach().clone().to(dev).requires_grad_(True)
+      out = torch.nn.functional.adaptive_avg_pool2d(x, (3, 3))
+      out.backward(torch.ones_like(out))
+      return out, x.grad
+
+    self.assert_close_tpu_vs_cpu(run_bf16_divisible_2d, rtol=2e-2, atol=2e-2)
+
+    # 5. 3D Adaptive pooling: Divisible shape (fast path std_avg_pool)
+    x_3d_div = torch.randn(
+        1, 2, 4, 6, 8, dtype=torch.float32, requires_grad=True
+    )
+
+    def run_divisible_3d(dev):
+      x = x_3d_div.detach().clone().to(dev).requires_grad_(True)
+      out = torch.nn.functional.adaptive_avg_pool3d(x, (2, 3, 4))
+      out.backward(torch.ones_like(out))
+      return out, x.grad
+
+    self.assert_close_tpu_vs_cpu(run_divisible_3d)
+
+    # 6. 3D Adaptive pooling: Non-divisible shape
+    x_3d_nondiv = torch.randn(
+        1, 2, 5, 5, 5, dtype=torch.float32, requires_grad=True
+    )
+
+    def run_nondivisible_3d(dev):
+      x = x_3d_nondiv.detach().clone().to(dev).requires_grad_(True)
+      out = torch.nn.functional.adaptive_avg_pool3d(x, (2, 2, 2))
+      out.backward(torch.ones_like(out))
+      return out, x.grad
+
+    self.assert_close_tpu_vs_cpu(run_nondivisible_3d)
 
   def test_ldexp_large_exponent(self):
     def compute(device):
@@ -12240,6 +12942,56 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
           q, k, v, attn_mask=mask
       ).cpu()
       self.assertFalse(torch.isnan(result).any())
+
+  def test_scaled_dot_product_efficient_attention_compute_log_sumexp(self):
+    """Tests torch.ops.aten._scaled_dot_product_efficient_attention with compute_log_sumexp."""
+    batch_size, num_heads, seq_len, head_dim = 2, 4, 16, 32
+    device = torch.device("tpu")
+    q = torch.randn(
+        batch_size,
+        num_heads,
+        seq_len,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    k = torch.randn(
+        batch_size,
+        num_heads,
+        seq_len,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    v = torch.randn(
+        batch_size,
+        num_heads,
+        seq_len,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+
+    # Test with compute_log_sumexp=True
+    out, lse, _, _ = torch.ops.aten._scaled_dot_product_efficient_attention(
+        q, k, v, None, True, 0.0, False
+    )
+    self.assertEqual(out.shape, q.shape)
+    self.assertEqual(lse.shape, (batch_size, num_heads, seq_len))
+    self.assertEqual(lse.dtype, torch.float32)
+    self.assertFalse(torch.isnan(out).any())
+    self.assertFalse(torch.isnan(lse).any())
+
+    # Test with compute_log_sumexp=False
+    out_no_lse, lse_empty, _, _ = (
+        torch.ops.aten._scaled_dot_product_efficient_attention(
+            q, k, v, None, False, 0.0, False
+        )
+    )
+    self.assertEqual(out_no_lse.shape, q.shape)
+    self.assertEqual(lse_empty.shape, (batch_size, num_heads, seq_len))
+    self.assertFalse(torch.isnan(out_no_lse).any())
+    utils.assert_close(out, out_no_lse, atol=1e-2, rtol=1e-2)
 
   def test_pointwise_op_dtype_promotion(self):
     """Ensure that pointwise ops promote as expected.

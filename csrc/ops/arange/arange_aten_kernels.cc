@@ -109,7 +109,9 @@ absl::Status ValidateArangeInputs(const RangeBound start, const RangeBound end,
 int64_t ComputeArangeNumElements(const at::Scalar& start, const at::Scalar& end,
                                  const at::Scalar& step,
                                  const at::ScalarType output_dtype) {
-  if (output_dtype == at::kLong) {
+  if (output_dtype == at::kLong && start.isIntegral(/*includeBool=*/false) &&
+      end.isIntegral(/*includeBool=*/false) &&
+      step.isIntegral(/*includeBool=*/false)) {
     // Special case for kLong (64-bit integer).
     //
     // Due to the higher precision of kLong, we need to handle this case

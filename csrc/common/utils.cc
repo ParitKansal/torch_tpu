@@ -80,8 +80,9 @@ std::string PercAsStr(uint64_t num, uint64_t den) {
 }
 
 bool TensorHasTrivialLayout(const at::Tensor& tensor) {
-  return tensor.is_contiguous() && tensor.storage_offset() == 0 &&
-         tensor.numel() > 0;
+  return tensor.is_contiguous() &&
+         tensor.sym_storage_offset().expect_int() == 0 &&
+         tensor.sym_numel().expect_int() > 0;
 }
 
 }  // namespace torch_tpu

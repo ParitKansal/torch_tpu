@@ -281,13 +281,12 @@ std::tuple<at::Tensor, at::Tensor> AtenSparseDenseMatmulGradWithAdagrad(
             mlir::ElementType acc_dtype,
             torch_tpu::ConvertTo<mlir::ElementType>(accumulator.scalar_type()));
 
-        TT_ASSIGN_OR_THROW(auto results,
-                           (torch_tpu::DispatchOp<8, 2>(
-                               builder_fn, inputs,
-                               {.out_dtypes = {out_dtype, acc_dtype},
-                                .out_dims_list = {out_dims, acc_dims},
-                                .op_param_cache_keys = std::move(param_keys),
-                                .donated_indices = {4, 5}})));
+        TT_ASSIGN_OR_THROW(
+            auto results, (torch_tpu::DispatchOp<8, 2>(
+                              builder_fn, inputs,
+                              {.out_dtypes = {out_dtype, acc_dtype},
+                               .out_dims_list = {out_dims, acc_dims},
+                               .op_param_cache_keys = std::move(param_keys)})));
 
         return std::make_tuple(torch_tpu::MakeTensor(std::move(results[0])),
                                torch_tpu::MakeTensor(std::move(results[1])));

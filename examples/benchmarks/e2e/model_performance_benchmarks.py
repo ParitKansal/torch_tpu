@@ -1352,12 +1352,20 @@ class BenchmarkTest(test_utils.BenchmarkTest):
     self.run_performance_benchmark_test(config, _HF_GPT_OSS_20B_BENCHMARK_NAME)
 
   @parameterized.named_parameters(test_utils.generate_run_mode_configs())
-  def test_gpt_oss_20b_train(self, run_mode):
-    """Tests the train pass of GPT-OSS-20B."""
-    # Training pass enabled on TPU and GPU following the _assert_async stub in CL 912363687.
+  def test_gpt_oss_20b_4_layers_train(self, run_mode):
+    """Tests the train pass of GPT-OSS-20B (4 Layers)."""
+    # Training pass enabled on TPU and GPU following the _assert_async stub in
+    # CL 912363687.
+    # Pruned to 4 layers and seq_len=512 to fit single-chip TPU HBM.
     # Skipped on TorchAX due to missing grouped_mm op lowering.
     if self._is_torchax_backend():
       self.skipTest("Missing grouped_mm op for torchax backend.")
+
+    def modify_config_hook(config):
+      config.num_hidden_layers = 4
+      if hasattr(config, "layer_types"):
+        config.layer_types = config.layer_types[:4]
+      return config
 
     config = performance_utils.PerformanceBenchmarkConfig(
         supported_platforms=[
@@ -1369,8 +1377,9 @@ class BenchmarkTest(test_utils.BenchmarkTest):
         is_training=True,
         model_and_input_args=performance_utils.ModelAndInputArgs(
             model_name="openai/gpt-oss-20b",
-            sequence_length=4096,
+            sequence_length=512,
             batch_size=1,
+            custom_kwargs={"modify_config_hook": modify_config_hook},
         ),
         model_and_input_factory=model_utils.huggingface_llm_model_builder,
         train_factory=benchmark_function_db.get_train_factory(
@@ -1382,7 +1391,7 @@ class BenchmarkTest(test_utils.BenchmarkTest):
 
   @parameterized.named_parameters(test_utils.generate_run_mode_configs())
   def test_gpt_oss_120b_4_layers_forward(self, run_mode):
-    """Tests the forward pass of GPT-OSS-20B."""
+    """Tests the forward pass of GPT-OSS-120B (4 Layers)."""
     if self._is_torchax_backend():
       self.skipTest("Not supported on TorchAX")
 
@@ -1410,15 +1419,21 @@ class BenchmarkTest(test_utils.BenchmarkTest):
     self.run_performance_benchmark_test(config, _HF_GPT_OSS_120B_BENCHMARK_NAME)
 
   @parameterized.named_parameters(test_utils.generate_run_mode_configs())
-  def test_gpt_oss_120b_4_layers_train(self, run_mode):
-    """Tests the train pass of GPT-OSS-20B."""
-    # Training pass enabled on TPU and GPU following the _assert_async stub in CL 912363687.
+  def test_gpt_oss_120b_2_layers_train(self, run_mode):
+    """Tests the train pass of GPT-OSS-120B (2 Layers)."""
+    # Training pass enabled on TPU and GPU following the _assert_async stub in
+    # CL 912363687.
+    # Pruned to 2 layers and scaled hidden/intermediate dimensions to fit
+    # single-chip TPU HBM.
     # Skipped on TorchAX due to missing grouped_mm op lowering.
     if self._is_torchax_backend():
       self.skipTest("Missing grouped_mm op for torchax backend.")
 
     def modify_config_hook(config):
-      config.num_hidden_layers = 4
+      config.num_hidden_layers = 2
+      config.layer_types = ["sliding_attention", "full_attention"]
+      config.hidden_size = 1440
+      config.intermediate_size = 1440
       return config
 
     config = performance_utils.PerformanceBenchmarkConfig(

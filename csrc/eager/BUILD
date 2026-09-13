@@ -64,11 +64,7 @@ torch_tpu_cc_test(
     requires_libtpu = True,
     # Route to OSS TPU runners and exclude from OSS CPU runners
     # (running on CPU took 600+ sec due to emulated device init).
-    tags = if_oss([
-        "presubmit-v5",
-        "presubmit-v7",
-        "requires-tpu",
-    ]),
+    tags = if_oss(["requires-tpu-v5lite"]),
     deps = [
         ":device_buffer",
         ":structured_log_buffer",
@@ -245,6 +241,7 @@ torch_tpu_cc_library(
         "//csrc/common:dtype",
         "//csrc/common:error_utils",
         "//csrc/common:layout_utils",
+        "//csrc/common:libtpu_version",
         "//csrc/common:to_string",
         "//csrc/common:utils",
         "//csrc/ops:op_names",
@@ -404,6 +401,7 @@ torch_tpu_cc_library(
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/base:nullability",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:absl_check",

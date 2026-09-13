@@ -67,6 +67,7 @@ torch_tpu_py_library(
         ":tpu_torch_pallas",
         "//shims/absl_py/logging",
         "//shims/torch:pytorch",
+        "//src/torch_tpu/_internal/utils:annotations",
         "@pypi//frozendict",
         "@pypi//jax",
     ],

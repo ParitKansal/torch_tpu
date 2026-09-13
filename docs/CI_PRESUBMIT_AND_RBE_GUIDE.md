@@ -237,7 +237,7 @@ materialise.
 
 ---
 
-## 6. SSH Relay Architecture
+## 7. SSH Relay Architecture
 
 We use a Bazel `--run_under` wrapper (`ci/tools/relay_test_runner.sh`) that intercepts test actions on the host, leases a Cloud TPU v5e VM from a pool via `flock`, and runs the test in a sandbox on the remote VM (`ci/tools/remote_tpu_executor.sh`).
 

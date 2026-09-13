@@ -2189,7 +2189,11 @@ class TestFleetAttach(FleetAttachTestCase):
     listings = [c for c in self.gcloud_calls() if " list " in f" {c} "]
     self.assertTrue(listings, self.gcloud_calls())
     for call in listings:
-      self.assertIn("--filter=name~spot-tpu-v5e- AND state:READY", call)
+      self.assertIn(
+          "--filter=name~spot-tpu-v5e- AND acceleratorType~v5litepod-1$"
+          " AND state:READY",
+          call,
+      )
 
   def test_attaching_twice_does_not_hand_out_a_vm_under_two_slots(self):
     self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"])
@@ -2254,6 +2258,123 @@ class TestFleetAttach(FleetAttachTestCase):
     proc = self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
     self.assertNotEqual(proc.returncode, 0)
     self.assertIn("Bring a fleet up first", proc.stdout + proc.stderr)
+
+
+class TestFleetAttachToReservedCapacity(FleetAttachTestCase):
+  """`attach` has to reach reserved VMs, which nobody named `spot-tpu-v5e-`.
+
+  The fleet this tooling creates is on-demand or Spot and gets a generated
+  name. A permanent reservation is named by whoever reserved it, so a hardcoded
+  prefix makes the whole fleet invisible to `attach` and the job reports "no
+  VMs" while the hardware sits idle.
+  """
+
+  def listing_filters(self):
+    return [
+        call
+        for call in self.gcloud_calls()
+        if " list " in f" {call} " and "--filter=" in call
+    ]
+
+  def test_a_custom_prefix_replaces_the_default_one(self):
+    self.fake_gcloud_with_addresses(["reserved-v5e-alpha"])
+    proc = self.run_fleet(
+        "attach",
+        "--pool",
+        self.pool,
+        "--zone",
+        self.ZONE,
+        "--name-prefix",
+        "reserved-v5e-",
+    )
+
+    self.assertEqual(proc.returncode, 0, proc.stderr)
+    filters = self.listing_filters()
+    self.assertTrue(filters, self.gcloud_calls())
+    for call in filters:
+      self.assertIn("name~reserved-v5e-", call)
+      self.assertNotIn("name~spot-tpu-v5e-", call)
+
+  def test_an_empty_prefix_drops_the_name_clause_entirely(self):
+    self.fake_gcloud_with_addresses(["anything-at-all"])
+    proc = self.run_fleet(
+        "attach", "--pool", self.pool, "--zone", self.ZONE, "--name-prefix", ""
+    )
+
+    self.assertEqual(proc.returncode, 0, proc.stderr)
+    for call in self.listing_filters():
+      self.assertNotIn("name~", call)
+      self.assertIn("state:READY", call)
+
+  def test_the_accelerator_guard_survives_a_widened_name(self):
+    """Widening the name must not let a v5p or an 8-chip host in.
+
+    The relay leases one chip per test action. A multi-chip host accepts the
+    lease and then fails every test on it, which reads as a broken change
+    rather than a wrong VM.
+    """
+    self.fake_gcloud_with_addresses(["anything-at-all"])
+    self.run_fleet(
+        "attach", "--pool", self.pool, "--zone", self.ZONE, "--name-prefix", ""
+    )
+
+    for call in self.listing_filters():
+      self.assertIn("acceleratorType~v5litepod-1$", call)
+
+  def test_the_accelerator_match_is_anchored(self):
+    """`v5litepod-1` must not also match `v5litepod-16`."""
+    self.fake_gcloud_with_addresses(["reserved-1"])
+    self.run_fleet(
+        "attach",
+        "--pool",
+        self.pool,
+        "--zone",
+        self.ZONE,
+        "--name-prefix",
+        "reserved-",
+    )
+
+    for call in self.listing_filters():
+      self.assertIn("v5litepod-1$", call)
+
+  def test_the_accelerator_type_is_overridable(self):
+    self.fake_gcloud_with_addresses(["reserved-1"])
+    self.run_fleet(
+        "attach",
+        "--pool",
+        self.pool,
+        "--zone",
+        self.ZONE,
+        "--accelerator-type",
+        "v5litepod-4",
+    )
+
+    for call in self.listing_filters():
+      self.assertIn("acceleratorType~v5litepod-4$", call)
+
+  def test_widening_attach_never_widens_what_down_deletes(self):
+    """The one combination that could destroy somebody else's reservation.
+
+    `down` sweeps orphans by name. If --name-prefix reached that sweep, an
+    operator who attached with an empty prefix and then ran `down` would delete
+    every TPU VM in the project.
+    """
+    proc = self.run_fleet(
+        "down", "--pool", self.pool, "--zone", self.ZONE, "--name-prefix", ""
+    )
+
+    self.assertNotEqual(proc.returncode, 0)
+    self.assertIn("only applies to 'attach'", proc.stdout + proc.stderr)
+    self.assertEqual(self.delete_calls(), [])
+
+  def test_down_still_sweeps_on_the_creation_prefix(self):
+    self.fake_gcloud(["spot-tpu-v5e-111-1"])
+    self.run_fleet("down", "--pool", self.pool, "--zone", self.ZONE)
+
+    listings = [c for c in self.gcloud_calls() if " list " in f" {c} "]
+    self.assertTrue(listings, self.gcloud_calls())
+    for call in listings:
+      self.assertIn("name~spot-tpu-v5e-", call)
 
 
 class TestFleetDetach(FleetAttachTestCase):

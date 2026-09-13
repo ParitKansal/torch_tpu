@@ -24,6 +24,7 @@
 #   scripts/spot_tpu_fleet.sh down [--pool DIR]
 #   scripts/spot_tpu_fleet.sh attach [--pool DIR] [--zone ZONE] [--ssh-user USER]
 #                                    [--ssh-identity PATH] [--no-key-push]
+#                                    [--name-prefix PREFIX] [--accelerator-type TYPE]
 #   scripts/spot_tpu_fleet.sh detach [--pool DIR]
 #   scripts/spot_tpu_fleet.sh status [--pool DIR]
 #
@@ -36,6 +37,23 @@
 # creates or deletes a VM and never arms a deadline. `detach` drops the session
 # files again and leaves the VMs running. Use that pair from CI against a
 # long-lived pool, so a finished job cannot delete hardware another job is using.
+#
+# By default `attach` only picks up VMs this script created, whose names start
+# with spot-tpu-v5e-. Reserved capacity is usually named something else, so
+# --name-prefix widens the search; pass an empty prefix to consider every VM in
+# the zone. Widening the name never widens what `down` deletes: the orphan sweep
+# is pinned to the creation prefix on purpose.
+#
+#   # Borrow a reserved fleet named reserved-v5e-*.
+#   scripts/spot_tpu_fleet.sh attach --name-prefix reserved-v5e- --zone us-east5-b
+#
+#   # Borrow every single-chip v5e in the zone, whatever it is called.
+#   scripts/spot_tpu_fleet.sh attach --name-prefix '' --zone us-east5-b
+#
+# --accelerator-type guards the widened search. The relay leases one chip per
+# test action, so attaching a v5p or a multi-chip host would burn a full timeout
+# per test and report as an ordinary failure. It defaults to v5litepod-1.
+
 
 set -uo pipefail
 
@@ -43,8 +61,9 @@ readonly ALLOWED_PROJECT="rbe-tpu-oss"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SPOT_MANAGER="${SCRIPT_DIR}/spot_tpu_manager.sh"
 readonly DEFAULT_POOL="/tmp/torch_tpu_relay/pool"
-# Matches the names spot_tpu_manager.sh generates. The orphan sweep filters on
-# this so it can never touch a TPU VM someone else in the project created.
+# Matches the names spot_tpu_manager.sh generates. `down`'s orphan sweep filters
+# on this and nothing else, so a widened `attach` search can never turn into a
+# widened delete.
 readonly VM_NAME_PREFIX="spot-tpu-v5e-"
 
 # Spot capacity moves around between zones, so spread the fleet rather than
@@ -66,6 +85,15 @@ REAPER_PID_FILE=""
 SSH_IDENTITY_PATH="${SSH_IDENTITY:-${HOME}/.ssh/google_compute_engine}"
 ATTACH_SSH_USER=""
 ATTACH_PUSH_KEY=true
+# Which VMs `attach` will consider. Defaults to the ones this script creates;
+# --name-prefix widens it to reserved capacity, which is named by whoever
+# reserved it. Empty means every VM in the zone.
+ATTACH_NAME_PREFIX="$VM_NAME_PREFIX"
+ATTACH_NAME_PREFIX_SET=false
+# The relay hands one chip to one test action, so a multi-chip or non-v5e host
+# cannot pass. This is the guard that makes a widened --name-prefix safe.
+ATTACH_ACCELERATOR_TYPE="v5litepod-1"
+
 
 die() {
   echo "ERROR [spot_tpu_fleet]: $*" >&2
@@ -111,8 +139,15 @@ parse_args() {
       --no-key-push)
         ATTACH_PUSH_KEY=false
         shift ;;
+      --name-prefix|--name-prefix=*)
+        [[ "$1" == *=* ]] && ATTACH_NAME_PREFIX="${1#*=}" || { ATTACH_NAME_PREFIX="${2:-}"; shift; }
+        ATTACH_NAME_PREFIX_SET=true
+        shift ;;
+      --accelerator-type|--accelerator-type=*)
+        [[ "$1" == *=* ]] && ATTACH_ACCELERATOR_TYPE="${1#*=}" || { ATTACH_ACCELERATOR_TYPE="${2:-}"; shift; }
+        shift ;;
       -h|--help)
-        sed -n '16,38p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+        sed -n '16,55p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
         exit 0 ;;
       *)
         die "Unknown option '$1'." ;;
@@ -336,6 +371,27 @@ EOF
   log "vm_${index} attached to ${name} in ${zone}"
 }
 
+# The gcloud filter `attach` uses to decide which VMs it may borrow.
+#
+# The accelerator clause is not decoration. Once --name-prefix is widened past
+# the names this script creates, it is the only thing standing between the relay
+# and a v5p or an 8-chip host, either of which would accept the lease and then
+# fail every test on it. The match is anchored so v5litepod-1 does not also
+# match v5litepod-16.
+attach_filter() {
+  local clauses=()
+  [[ -n "$ATTACH_NAME_PREFIX" ]] && clauses+=("name~${ATTACH_NAME_PREFIX}")
+  [[ -n "$ATTACH_ACCELERATOR_TYPE" ]] \
+    && clauses+=("acceleratorType~${ATTACH_ACCELERATOR_TYPE}\$")
+  clauses+=("state:READY")
+
+  local filter="${clauses[0]}" i
+  for (( i = 1; i < ${#clauses[@]}; i++ )); do
+    filter+=" AND ${clauses[i]}"
+  done
+  echo "$filter"
+}
+
 cmd_attach() {
   mkdir -p "$POOL_DIR"
 
@@ -369,7 +425,7 @@ cmd_attach() {
       index=$(( index + 1 ))
     done < <(gcloud compute tpus tpu-vm list \
       --zone="$zone" --project="$ALLOWED_PROJECT" \
-      --filter="name~${VM_NAME_PREFIX} AND state:READY" \
+      --filter="$(attach_filter)" \
       --format="value(name.basename())" 2>/dev/null)
   done
 
@@ -441,6 +497,12 @@ main() {
   local subcommand="${1:-}"
   [[ $# -gt 0 ]] && shift
   parse_args "$@"
+
+  # Only `attach` reads the widened search. Refusing it elsewhere means nobody
+  # can pass it to `down` and believe they widened what gets deleted.
+  if [[ "$ATTACH_NAME_PREFIX_SET" == "true" && "$subcommand" != "attach" ]]; then
+    die "--name-prefix only applies to 'attach', not '${subcommand}'."
+  fi
 
   case "$subcommand" in
     up)     cmd_up ;;

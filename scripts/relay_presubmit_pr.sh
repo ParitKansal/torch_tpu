@@ -60,6 +60,11 @@ CLI_NO_REPORT=false
 CLI_ADD_LABEL=false
 CLI_UPLOAD_RESULTS=false
 CLI_BAZEL_FLAGS=()
+# Somebody else's run holds the fleet for about seven minutes. Waiting is
+# almost always what you want; --no-wait is for a scripted run that would
+# rather fail than block.
+CLI_WAIT=true
+CLI_WAIT_TIMEOUT=3600
 
 # Set once the pending status is published, so the exit trap knows it owes the
 # PR a terminal state.
@@ -103,6 +108,11 @@ Options:
   --output-dir DIR      Report destination.
                         Default: relay_reports/pr<N>_<timestamp>
   --add-label           Add the mode's label to the PR before running.
+  --no-wait             Fail instead of queueing when somebody else has the
+                        fleet. By default a run waits its turn and then takes
+                        every VM, because one run on 28 chips finishes faster
+                        than two runs on 14 each.
+  --wait-timeout SECS   How long to stand in line. Default: 3600.
   --skip-head-check     Run even if the working tree is not at the PR head.
   --no-report           Run the suite but leave the PR untouched.
   --dry-run             Print the plan and exit without touching hardware.
@@ -141,6 +151,10 @@ parse_args() {
       --output-dir) [[ $# -ge 2 ]] || die "--output-dir requires an argument."; CLI_OUTPUT_DIR="$2"; shift 2 ;;
       --output-dir=*) CLI_OUTPUT_DIR="${1#*=}"; shift ;;
       --add-label) CLI_ADD_LABEL=true; shift ;;
+      --wait) CLI_WAIT=true; shift ;;
+      --no-wait) CLI_WAIT=false; shift ;;
+      --wait-timeout) [[ $# -ge 2 ]] || die "--wait-timeout requires an argument."; CLI_WAIT_TIMEOUT="$2"; shift 2 ;;
+      --wait-timeout=*) CLI_WAIT_TIMEOUT="${1#*=}"; shift ;;
       --skip-head-check) CLI_SKIP_HEAD_CHECK=true; shift ;;
       --no-report) CLI_NO_REPORT=true; shift ;;
       --dry-run) CLI_DRY_RUN=true; shift ;;
@@ -346,6 +360,11 @@ main() {
   log "mode         ${CLI_MODE} (reports as '${context}')"
   log "pool         ${CLI_POOL}"
   log "zones        ${CLI_ZONES[*]}"
+  if [[ "$CLI_WAIT" == "true" ]]; then
+    log "fleet        wait for all of it, up to ${CLI_WAIT_TIMEOUT}s"
+  else
+    log "fleet        take what is free, fail if none is"
+  fi
   log "output       ${CLI_OUTPUT_DIR}"
 
   if [[ "$CLI_DRY_RUN" == "true" ]]; then
@@ -386,8 +405,17 @@ and this run would report under the same check name. Add it with --add-label."
     zone_args+=(--zone "$zone")
   done
 
+  # Wait for the whole fleet rather than racing for a slice of it. A run is
+  # seven minutes on 28 chips, so queueing costs the second person one run's
+  # worth of waiting and saves both of them a half-speed run.
+  local wait_args=()
+  if [[ "$CLI_WAIT" == "true" ]]; then
+    wait_args+=(--wait --wait-timeout "$CLI_WAIT_TIMEOUT")
+    log "waiting for the fleet if somebody else has it (up to ${CLI_WAIT_TIMEOUT}s)"
+  fi
+
   log "borrowing VMs from the standing fleet"
-  "$FLEET" attach --pool "$CLI_POOL" "${zone_args[@]}"
+  "$FLEET" attach --pool "$CLI_POOL" "${zone_args[@]}" ${wait_args[@]+"${wait_args[@]}"}
   _ATTACHED=true
 
   local attached

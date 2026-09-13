@@ -126,19 +126,34 @@ gh api repos/google-pytorch/torch_tpu/issues/<PR>/labels \
   -f 'labels[]=ci:relay-tpu-v5'
 ```
 
-### One run at a time, per VM
+### One run at a time, on all of it
 
-`attach` takes every READY v5e it can see, so two people starting a run at the
-same time would both take all 28 and put two tests on every chip. Each VM
-therefore carries a claim naming the pool that holds it. A second run walks
-past held VMs and uses what is left; `detach` hands them back.
+The fleet is 28 chips and a run takes seven minutes, so the fastest way through
+two runs is back to back on everything, not side by side on half each. A run
+therefore takes the whole fleet or none of it, and the next person stands in
+line:
+
+```
+[spot_tpu_fleet] Waiting for the fleet: 1 run(s) ahead of you
+[spot_tpu_fleet] Attached 28/28 VM(s) in /tmp/tpu_pool_you
+```
+
+Each VM carries a claim naming the pool that holds it, and the line itself is a
+set of tickets on one VM, ordered by arrival. `relay_presubmit_pr.sh` waits by
+default.
 
 | Situation | What happens |
 | :--- | :--- |
-| Somebody else is mid-run | Your attach skips their VMs and reports `held by <owner>` |
-| Nothing is left to borrow | The driver stops rather than running on zero VMs |
-| A run crashed and left claims | They age out after 4 hours (`--claim-ttl`) |
-| You know the holder is gone | `--force-claim` takes them anyway |
+| Somebody else is mid-run | You queue, and go when they detach |
+| You got half the fleet | It is handed straight back. Two runs each holding half would wait on each other forever |
+| A waiter is killed | Its ticket goes stale after two minutes and the line moves on |
+| A run crashed holding VMs | Claims age out after 4 hours (`--claim-ttl`), or `--force-claim` takes them now |
+| You would rather fail than wait | `--no-wait` on the driver, or plain `attach` without `--wait` |
+
+> [!NOTE]
+> This is the right shape only while the fleet is small. Once there is enough
+> capacity for several suites at once, stop queueing and split the fleet
+> instead: run N suites on M VMs each.
 
 ---
 

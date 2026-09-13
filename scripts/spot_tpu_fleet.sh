@@ -59,6 +59,17 @@
 # both take the whole fleet and run two tests on every chip. `detach` drops the
 # marker; a claim nobody released ages out after --claim-ttl seconds (4h).
 # --force-claim takes a VM anyway, --no-claim turns the whole thing off.
+#
+# With --wait, `attach` takes the whole fleet or none of it, and stands in line
+# when somebody else has it. A run is seven minutes, so waiting your turn on all
+# 28 chips beats splitting them and both going slowly. The line lives on one VM
+# and is ordered by arrival:
+#
+#   scripts/spot_tpu_fleet.sh attach --wait --zone europe-west4-b
+#   [spot_tpu_fleet] Waiting for the fleet: 1 run ahead of you
+#
+# --wait-timeout caps the wait (default 1h). A waiter that walks away loses its
+# place after two minutes of silence, so nobody holds the line by crashing.
 
 
 set -uo pipefail
@@ -108,6 +119,27 @@ ATTACH_CLAIM_FORCE=false
 # day without ever cutting a live one loose.
 ATTACH_CLAIM_TTL=14400
 readonly REMOTE_CLAIM_PATH="${TORCH_TPU_REMOTE_CLAIM_PATH:-/tmp/torch_tpu_relay/claim}"
+# --wait turns "take what is free" into "take all of it or stand in line". The
+# line lives on one VM of the fleet, so it needs no storage the relay does not
+# already reach, and it survives nothing: if every VM goes away there is nothing
+# left to queue for.
+ATTACH_WAIT=false
+ATTACH_WAIT_TIMEOUT=3600
+ATTACH_WAIT_POLL=20
+# Which VM holds the line. Empty means the first candidate by name, which every
+# caller computes the same way.
+QUEUE_HOST=""
+QUEUE_HOST_ZONE=""
+# A waiter touches its ticket every poll. Six polls of silence and the others
+# assume it walked away, so a killed run cannot hold the line.
+readonly QUEUE_STALE=120
+readonly REMOTE_QUEUE_PATH="${TORCH_TPU_REMOTE_QUEUE_PATH:-/tmp/torch_tpu_relay/queue}"
+# Set once a ticket exists, so the exit trap knows what to take back out.
+QUEUE_TICKET=""
+# What the last attach attempt managed: taken, seen, and held by someone else.
+ATTACH_READY=0
+ATTACH_FOUND=0
+ATTACH_HELD=0
 
 
 die() {
@@ -170,8 +202,23 @@ parse_args() {
       --claim-ttl|--claim-ttl=*)
         [[ "$1" == *=* ]] && ATTACH_CLAIM_TTL="${1#*=}" || { ATTACH_CLAIM_TTL="${2:-}"; shift; }
         shift ;;
+      --wait)
+        ATTACH_WAIT=true
+        shift ;;
+      --no-wait)
+        ATTACH_WAIT=false
+        shift ;;
+      --wait-timeout|--wait-timeout=*)
+        [[ "$1" == *=* ]] && ATTACH_WAIT_TIMEOUT="${1#*=}" || { ATTACH_WAIT_TIMEOUT="${2:-}"; shift; }
+        shift ;;
+      --wait-poll|--wait-poll=*)
+        [[ "$1" == *=* ]] && ATTACH_WAIT_POLL="${1#*=}" || { ATTACH_WAIT_POLL="${2:-}"; shift; }
+        shift ;;
+      --queue-host|--queue-host=*)
+        [[ "$1" == *=* ]] && QUEUE_HOST="${1#*=}" || { QUEUE_HOST="${2:-}"; shift; }
+        shift ;;
       -h|--help)
-        sed -n '16,61p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+        sed -n '16,72p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
         exit 0 ;;
       *)
         die "Unknown option '$1'." ;;
@@ -410,7 +457,9 @@ attach_one() {
     holder=$(printf '%s\n' "$remote_out" | sed -n 's/^CLAIMED_BY://p' | head -n 1)
     if [[ -n "$holder" ]]; then
       log "${name} is held by ${holder}, skipping"
-      return 1
+      # 2, not 1: a held VM frees up, a broken one does not, and --wait has to
+      # tell those apart to know whether standing in line will help.
+      return 2
     fi
     if [[ "$ATTACH_PUSH_KEY" == "true" ]]; then
       local detected
@@ -463,8 +512,26 @@ attach_filter() {
   echo "$filter"
 }
 
-cmd_attach() {
-  mkdir -p "$POOL_DIR"
+# Every VM `attach` may borrow, as "name<TAB>zone" lines, sorted by name so that
+# two callers looking at the same fleet agree on the order and therefore on who
+# holds the queue.
+discover_candidates() {
+  local zone name
+  for zone in "${ZONES[@]}"; do
+    while read -r name; do
+      [[ -n "$name" ]] || continue
+      printf '%s\t%s\n' "$name" "$zone"
+    done < <(gcloud compute tpus tpu-vm list \
+      --zone="$zone" --project="$ALLOWED_PROJECT" \
+      --filter="$(attach_filter)" \
+      --format="value(name.basename())" 2>/dev/null)
+  done | sort
+}
+
+# One pass over the candidates. Sets ATTACH_READY, ATTACH_FOUND and ATTACH_HELD;
+# the caller decides whether that is good enough or worth retrying.
+attach_attempt() {
+  local candidates="$1"
 
   local attached=()
   local session
@@ -475,39 +542,39 @@ cmd_attach() {
 
   local index=0 pids=() found=0
   local zone name
-  for zone in "${ZONES[@]}"; do
-    while read -r name; do
-      [[ -n "$name" ]] || continue
-      # Re-attaching must not hand the same VM out twice under two slots.
-      local already=false entry
-      for entry in ${attached[@]+"${attached[@]}"}; do
-        [[ "$entry" == "$name" ]] && { already=true; break; }
-      done
-      if [[ "$already" == "true" ]]; then
-        log "${name} is already in the pool"
-        continue
-      fi
-      while [[ -s "${POOL_DIR}/vm_${index}.env" ]]; do
-        index=$(( index + 1 ))
-      done
-      found=$(( found + 1 ))
-      attach_one "$index" "$name" "$zone" &
-      pids+=("$!")
+  while IFS=$'\t' read -r name zone; do
+    [[ -n "$name" ]] || continue
+    # Re-attaching must not hand the same VM out twice under two slots.
+    local already=false entry
+    for entry in ${attached[@]+"${attached[@]}"}; do
+      [[ "$entry" == "$name" ]] && { already=true; break; }
+    done
+    if [[ "$already" == "true" ]]; then
+      log "${name} is already in the pool"
+      continue
+    fi
+    while [[ -s "${POOL_DIR}/vm_${index}.env" ]]; do
       index=$(( index + 1 ))
-    done < <(gcloud compute tpus tpu-vm list \
-      --zone="$zone" --project="$ALLOWED_PROJECT" \
-      --filter="$(attach_filter)" \
-      --format="value(name.basename())" 2>/dev/null)
-  done
+    done
+    found=$(( found + 1 ))
+    attach_one "$index" "$name" "$zone" &
+    pids+=("$!")
+    index=$(( index + 1 ))
+  done <<< "$candidates"
 
-  local ready=0 pid
+  local ready=0 held=0 pid rc
   for pid in ${pids[@]+"${pids[@]}"}; do
-    wait "$pid" && ready=$(( ready + 1 ))
+    wait "$pid"
+    rc=$?
+    case "$rc" in
+      0) ready=$(( ready + 1 )) ;;
+      2) held=$(( held + 1 )) ;;
+    esac
   done
 
-  log "Attached ${ready}/${found} VM(s) in ${POOL_DIR}"
-  [[ "$ready" -gt 0 ]] || die "No VMs to attach to. Bring a fleet up first."
-  return 0
+  ATTACH_READY="$ready"
+  ATTACH_FOUND="$found"
+  ATTACH_HELD="$held"
 }
 
 # Drops this pool's claim on one VM. Best effort: a VM that has already gone
@@ -540,13 +607,153 @@ release_claims() {
   done
 }
 
+# Wipes the pool's session files without touching the hardware. Used both by
+# `detach` and by a --wait attempt that has to give back a partial fleet.
+forget_sessions() {
+  rm -f "$POOL_DIR"/*.env "$POOL_DIR"/*.env.lock "$POOL_DIR"/*.quarantine
+}
+
+# The VM that holds the waiting line. Candidates are sorted, so every caller
+# looking at the same fleet picks the same one without talking to the others.
+# Callers who name different zones can pick differently; that costs ordering,
+# not safety, because taking the fleet is still all or nothing.
+queue_pick_host() {
+  local candidates="$1"
+  [[ -n "$QUEUE_HOST" ]] && return 0
+  IFS=$'\t' read -r QUEUE_HOST QUEUE_HOST_ZONE <<< "$(head -n 1 <<< "$candidates")"
+}
+
+queue_ssh() {
+  gcloud compute tpus tpu-vm ssh "$QUEUE_HOST" \
+    --zone="$QUEUE_HOST_ZONE" --project="$ALLOWED_PROJECT" \
+    --command="$1" 2>/dev/null | tr -d '\r'
+}
+
+# Takes a ticket. The name starts with a zero-padded timestamp taken on the
+# queue host, so sorting the directory sorts by arrival and no workstation's
+# clock can jump the line.
+queue_join() {
+  local out
+  out=$(queue_ssh "
+mkdir -p '${REMOTE_QUEUE_PATH}'
+t='${REMOTE_QUEUE_PATH}/'\$(date +%s | awk '{printf \"%012d\", \$1}').\$\$.\$RANDOM
+mkdir \"\$t\" 2>/dev/null || exit 1
+printf '%s\n' '$(claim_owner)' > \"\$t/owner\"
+echo \"TICKET:\$t\"
+")
+  QUEUE_TICKET=$(sed -n 's/^TICKET://p' <<< "$out" | head -n 1)
+  [[ -n "$QUEUE_TICKET" ]]
+}
+
+# Refreshes this ticket, drops tickets nobody has touched in QUEUE_STALE
+# seconds, and prints how many runs are ahead. Prints GONE if this ticket was
+# swept, which means the caller stalled and has to take a new one.
+queue_poll() {
+  local out
+  out=$(queue_ssh "
+t='${QUEUE_TICKET}'
+[ -d \"\$t\" ] || { echo GONE; exit 0; }
+touch \"\$t\"
+now=\$(date +%s)
+for d in ${REMOTE_QUEUE_PATH}/*/; do
+  [ -d \"\$d\" ] || continue
+  n=\${d%/}
+  [ \"\$n\" = \"\$t\" ] && continue
+  age=\$(( now - \$(stat -c %Y \"\$n\" 2>/dev/null || echo \"\$now\") ))
+  [ \"\$age\" -gt ${QUEUE_STALE} ] && rm -rf \"\$n\"
+done
+ls -1 '${REMOTE_QUEUE_PATH}' 2>/dev/null | sort \\
+  | awk -v me=\"\$(basename \"\$t\")\" '\$0==me{exit} {c++} END{print \"AHEAD:\" c+0}'
+")
+  if [[ "$out" == *GONE* ]]; then
+    echo "GONE"
+    return 0
+  fi
+  sed -n 's/^AHEAD://p' <<< "$out" | head -n 1
+}
+
+queue_leave() {
+  [[ -n "$QUEUE_TICKET" ]] || return 0
+  queue_ssh "rm -rf '${QUEUE_TICKET}'" >/dev/null
+  QUEUE_TICKET=""
+}
+
+cmd_attach() {
+  mkdir -p "$POOL_DIR"
+
+  local candidates
+  candidates=$(discover_candidates)
+  [[ -n "$candidates" ]] || die "No VMs to attach to. Bring a fleet up first."
+
+  if [[ "$ATTACH_WAIT" != "true" ]]; then
+    attach_attempt "$candidates"
+    log "Attached ${ATTACH_READY}/${ATTACH_FOUND} VM(s) in ${POOL_DIR}"
+    [[ "$ATTACH_READY" -gt 0 ]] || die "No VMs to attach to. Bring a fleet up first."
+    return 0
+  fi
+
+  queue_pick_host "$candidates"
+  if ! queue_join; then
+    # The line is a convenience, not the lock. Losing it means people go in a
+    # worse order, not that two runs land on one chip.
+    log "WARNING: could not take a ticket on ${QUEUE_HOST}, waiting without one"
+  fi
+  trap 'queue_leave' EXIT
+
+  local deadline=$(( SECONDS + ATTACH_WAIT_TIMEOUT )) announced=""
+  while :; do
+    local ahead="0" rejoined=false
+    if [[ -n "$QUEUE_TICKET" ]]; then
+      ahead=$(queue_poll)
+      if [[ "$ahead" == "GONE" ]]; then
+        # Swept for being quiet too long. Take a new ticket at the back and
+        # read the line again next time round rather than barging in now.
+        queue_join || log "WARNING: lost the queue on ${QUEUE_HOST}, waiting without a ticket"
+        rejoined=true
+      fi
+      [[ -n "$ahead" ]] || ahead="0"
+    fi
+
+    if [[ "$rejoined" == "true" ]]; then
+      : # fall through to the sleep
+    elif [[ "$ahead" == "0" ]]; then
+      attach_attempt "$candidates"
+      if [[ "$ATTACH_HELD" -eq 0 && "$ATTACH_READY" -gt 0 ]]; then
+        queue_leave
+        trap - EXIT
+        log "Attached ${ATTACH_READY}/${ATTACH_FOUND} VM(s) in ${POOL_DIR}"
+        return 0
+      fi
+      # Giving back a half-taken fleet is the whole point: two waiters that
+      # each keep their half would both sit there holding what the other needs.
+      release_claims
+      forget_sessions
+      if [[ "$announced" != "busy:${ATTACH_HELD}" ]]; then
+        log "The fleet is busy: ${ATTACH_HELD} of ${ATTACH_FOUND} VM(s) held, waiting"
+        announced="busy:${ATTACH_HELD}"
+      fi
+    elif [[ "$ahead" != "$announced" ]]; then
+      log "Waiting for the fleet: ${ahead} run(s) ahead of you"
+      announced="$ahead"
+    fi
+
+    (( SECONDS < deadline )) || {
+      queue_leave
+      die "Gave up waiting for the fleet after ${ATTACH_WAIT_TIMEOUT}s.
+If the run holding it is dead, take the VMs with --force-claim; otherwise its
+claim ages out on its own after ${ATTACH_CLAIM_TTL}s."
+    }
+    sleep "$ATTACH_WAIT_POLL"
+  done
+}
+
 # The counterpart to `attach`. Forgets the pool without touching the hardware,
 # which is what a CI job has to do at the end of a run: `down` would delete VMs
 # that belong to whoever brought the fleet up.
 cmd_detach() {
   [[ -d "$POOL_DIR" ]] || return 0
   release_claims
-  rm -f "$POOL_DIR"/*.env "$POOL_DIR"/*.env.lock "$POOL_DIR"/*.quarantine
+  forget_sessions
   log "Detached from the fleet. The VMs are still running."
 }
 

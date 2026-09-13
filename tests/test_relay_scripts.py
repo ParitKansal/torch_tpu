@@ -3318,3 +3318,277 @@ printf '%s' "$cmd" \\
     proc = self.run_fleet("detach", "--pool", self.pool)
     self.assertEqual(proc.returncode, 0, proc.stderr)
     self.assertEqual(self.sessions(), [])
+
+
+class FleetQueueTestCase(FleetClaimTestCase):
+  """Runs the real waiting line against a fake fleet.
+
+  The claim tests only need one VM. These need two, because the point of the
+  queue is what happens when a run can have some of the fleet but not all of
+  it, so the stubs here give each VM its own address and its own claim.
+  """
+
+  VMS = ("spot-tpu-v5e-111-1", "spot-tpu-v5e-111-2")
+
+  def setUp(self):
+    super().setUp()
+    self.queue_root = os.path.join(self.root, "vms", "queue")
+    self.hosts_file = os.path.join(self.root, "hosts.txt")
+
+  def ip_of(self, name):
+    return f"10.0.0.{name.rsplit('-', 1)[1]}"
+
+  def fake_fleet(self, names=None):
+    """A gcloud whose VMs have separate addresses, claims and one shared queue."""
+    names = names or list(self.VMS)
+    listing_file = os.path.join(self.root, "listing.txt")
+    with open(listing_file, "w", encoding="utf-8") as fh:
+      fh.write("".join(f"{name}\n" for name in names))
+    with open(self.hosts_file, "w", encoding="utf-8") as fh:
+      fh.write("".join(f"{self.ip_of(name)} {name}\n" for name in names))
+
+    path = os.path.join(self.bin_dir, "gcloud")
+    with open(path, "w", encoding="utf-8") as fh:
+      fh.write(f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "{self.gcloud_log}"
+case "$4" in
+  list) cat "{listing_file}" ;;
+  describe)
+    [[ "$*" == *"externalIp"* ]] && printf '10.0.0.%s\\n' "${{5##*-}}"
+    ;;
+  ssh)
+    vm="$5"
+    for arg in "$@"; do
+      if [[ "$arg" == --command=* ]]; then
+        cmd="${{arg#--command=}}"
+        printf '%s' "$cmd" | sed "s|{self.claim_root}|{self.claim_root}-$vm|g" | bash
+      fi
+    done
+    ;;
+esac
+exit 0
+""")
+    os.chmod(path, 0o755)
+
+    # release_claims goes over plain ssh, so the rollback path needs a stub
+    # that can tell the VMs apart by address.
+    ssh_path = os.path.join(self.bin_dir, "ssh")
+    with open(ssh_path, "w", encoding="utf-8") as fh:
+      fh.write(f"""#!/usr/bin/env bash
+cmd="${{@: -1}}"
+dest=""
+for arg in "$@"; do
+  [[ "$arg" == *@* ]] && dest="${{arg#*@}}"
+done
+vm=$(awk -v ip="$dest" '$1==ip {{print $2}}' "{self.hosts_file}")
+printf '%s' "$cmd" | sed "s|{self.claim_root}|{self.claim_root}-$vm|g" | bash
+""")
+    os.chmod(ssh_path, 0o755)
+
+  def wait_attach(self, *extra, timeout="2", poll="1", **kwargs):
+    return self.attach(
+        "--wait",
+        "--wait-timeout",
+        timeout,
+        "--wait-poll",
+        poll,
+        *extra,
+        **kwargs,
+    )
+
+  def run_fleet(self, *args, user=None):
+    proc = subprocess.run(
+        ["bash", FLEET_SCRIPT, *args],
+        env={
+            "PATH": f"{self.bin_dir}:{os.environ['PATH']}",
+            "HOME": self.root,
+            "USER": user or self.user,
+            "TORCH_TPU_REMOTE_CLAIM_PATH": self.claim_root,
+            "TORCH_TPU_REMOTE_QUEUE_PATH": self.queue_root,
+        },
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    return proc
+
+  def tickets(self):
+    if not os.path.isdir(self.queue_root):
+      return []
+    return sorted(os.listdir(self.queue_root))
+
+  def plant_ticket(self, name="000000000001.99.1", owner="other:pool", age=0):
+    """Puts somebody else in the line ahead of us."""
+    ticket = os.path.join(self.queue_root, name)
+    os.makedirs(ticket, exist_ok=True)
+    with open(os.path.join(ticket, "owner"), "w", encoding="utf-8") as fh:
+      fh.write(owner + "\n")
+    stamp = time.time() - age
+    os.utime(ticket, (stamp, stamp))
+    return ticket
+
+  def queue_hosts(self):
+    """The VMs that were sent queue commands.
+
+    A record in the log is one gcloud invocation, and the queue script is
+    several lines long, so records have to be split on their own first token
+    rather than on newlines.
+    """
+    with open(self.gcloud_log, encoding="utf-8") as fh:
+      text = fh.read()
+    records = re.split(r"^(?=compute tpus tpu-vm )", text, flags=re.MULTILINE)
+    return {
+        record.split()[4]
+        for record in records
+        if self.queue_root in record
+        and record.startswith("compute tpus tpu-vm ssh ")
+    }
+
+
+class TestFleetAttachWaitsItsTurn(FleetQueueTestCase):
+  """One run gets the whole fleet; the next one queues instead of splitting it.
+
+  Twenty-eight chips and a seven-minute suite mean the fastest way through two
+  runs is back to back on everything, not side by side on half each. Without a
+  line, two waiters also deadlock: each takes the VMs the other needs and
+  neither can start.
+  """
+
+  def test_taking_the_whole_fleet_leaves_nobody_in_the_line(self):
+    self.fake_fleet()
+    proc = self.wait_attach()
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    self.assertEqual(len(self.sessions()), 2)
+    self.assertEqual(self.tickets(), [])
+
+  def test_the_line_lives_on_the_first_vm_by_name(self):
+    """Every caller has to pick the same host or there are two lines."""
+    self.fake_fleet(list(reversed(self.VMS)))
+    self.wait_attach()
+    self.assertEqual(self.queue_hosts(), {self.VMS[0]})
+
+  def test_the_queue_host_can_be_named(self):
+    self.fake_fleet()
+    self.wait_attach("--queue-host", self.VMS[1])
+    self.assertEqual(self.queue_hosts(), {self.VMS[1]})
+
+  def test_a_half_free_fleet_is_handed_back_rather_than_held(self):
+    """Keeping the free half is what turns two waiters into a deadlock."""
+    self.fake_fleet()
+    self.write_claim("someone-else:their-pool", name=self.VMS[0])
+
+    proc = self.wait_attach()
+    self.assertNotEqual(proc.returncode, 0)
+    self.assertIn("The fleet is busy", proc.stdout)
+    self.assertEqual(self.sessions(), [])
+    self.assertFalse(os.path.exists(self.claim_path(self.VMS[1])))
+
+  def test_somebody_ahead_of_us_keeps_us_off_the_hardware(self):
+    self.fake_fleet()
+    self.plant_ticket()
+
+    proc = self.wait_attach()
+    self.assertNotEqual(proc.returncode, 0)
+    self.assertIn("1 run(s) ahead of you", proc.stdout)
+    for vm in self.VMS:
+      self.assertFalse(os.path.exists(self.claim_path(vm)))
+
+  def test_a_ticket_nobody_touches_loses_its_place(self):
+    """A killed run must not hold the line until somebody notices."""
+    self.fake_fleet()
+    stale = self.plant_ticket(age=600)
+
+    proc = self.wait_attach()
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    self.assertFalse(os.path.exists(stale))
+    self.assertEqual(len(self.sessions()), 2)
+
+  def test_a_live_ticket_ahead_of_us_is_left_alone(self):
+    self.fake_fleet()
+    ticket = self.plant_ticket(age=0)
+    self.wait_attach()
+    self.assertTrue(os.path.exists(ticket))
+
+  def test_waiting_ends_at_the_timeout(self):
+    self.fake_fleet()
+    self.write_claim("someone-else:their-pool", name=self.VMS[0])
+    proc = self.wait_attach(timeout="1")
+    self.assertNotEqual(proc.returncode, 0)
+    self.assertIn("Gave up waiting", proc.stderr)
+
+  def test_giving_up_takes_our_ticket_out_of_the_line(self):
+    self.fake_fleet()
+    self.write_claim("someone-else:their-pool", name=self.VMS[0])
+    self.wait_attach(timeout="1")
+    self.assertEqual(self.tickets(), [])
+
+  def test_the_fleet_is_taken_once_the_holder_lets_go(self):
+    """The wait has to end on its own, not just report the queue correctly."""
+    self.fake_fleet()
+    self.write_claim("someone-else:their-pool", name=self.VMS[0])
+
+    proc = self.wait_attach("--claim-ttl", "3", timeout="20", poll="2")
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    self.assertIn("The fleet is busy", proc.stdout)
+    self.assertEqual(len(self.sessions()), 2)
+    self.assertEqual(self.owner_of(self.VMS[0]), self.mine())
+
+  def test_without_wait_a_busy_fleet_still_gives_you_what_is_free(self):
+    """--wait changes the deal; plain attach keeps working as it always did."""
+    self.fake_fleet()
+    self.write_claim("someone-else:their-pool", name=self.VMS[0])
+
+    proc = self.attach()
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    self.assertEqual(len(self.sessions()), 1)
+    self.assertEqual(self.queue_hosts(), set())
+
+
+class TestRelayDriverQueuesForTheFleet(RelayDriverTestCase):
+  """A PR run should stand in line rather than fight for chips.
+
+  Two runs sharing 28 VMs each get half the parallelism and twice the wall
+  clock, and with claims in place the second one simply fails. Queueing turns
+  that into "wait seven minutes, then get everything".
+  """
+
+  def attach_call(self):
+    return next(
+        call
+        for call in self.fleet_calls()
+        if call.startswith("spot_tpu_fleet.sh attach")
+    )
+
+  def test_a_run_waits_its_turn_by_default(self):
+    self.stub_everything()
+    result = self.run_driver(*self.default_args(), "--sha", self.HEAD_SHA)
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertIn("--wait", self.attach_call())
+    self.assertIn("--wait-timeout 3600", self.attach_call())
+
+  def test_no_wait_asks_for_the_old_fail_fast_behaviour(self):
+    self.stub_everything()
+    result = self.run_driver(
+        *self.default_args(), "--sha", self.HEAD_SHA, "--no-wait"
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertNotIn("--wait", self.attach_call())
+
+  def test_the_wait_can_be_shortened(self):
+    self.stub_everything()
+    self.run_driver(
+        *self.default_args(), "--sha", self.HEAD_SHA, "--wait-timeout", "120"
+    )
+    self.assertIn("--wait-timeout 120", self.attach_call())
+
+  def test_the_plan_says_whether_it_will_queue(self):
+    self.stub_everything()
+    waiting = self.run_driver(
+        *self.default_args(), "--sha", self.HEAD_SHA, "--dry-run"
+    )
+    self.assertIn("wait for all of it", waiting.stdout)
+    impatient = self.run_driver(
+        *self.default_args(), "--sha", self.HEAD_SHA, "--dry-run", "--no-wait"
+    )
+    self.assertIn("take what is free", impatient.stdout)

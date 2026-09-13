@@ -22,11 +22,20 @@
 #   scripts/spot_tpu_fleet.sh up --size 10 [--pool DIR] [--zone ZONE] [--on-demand]
 #                                [--deadline-minutes N]
 #   scripts/spot_tpu_fleet.sh down [--pool DIR]
+#   scripts/spot_tpu_fleet.sh attach [--pool DIR] [--zone ZONE] [--ssh-user USER]
+#                                    [--ssh-identity PATH] [--no-key-push]
+#   scripts/spot_tpu_fleet.sh detach [--pool DIR]
 #   scripts/spot_tpu_fleet.sh status [--pool DIR]
 #
 # `up` arms a detached deadline that runs `down` after --deadline-minutes, so a
 # fleet cannot outlive a crashed orchestrator. Pass 0 to turn it off. `down`
 # cancels it.
+#
+# `attach` joins a fleet somebody else already brought up: it lists the VMs,
+# pushes the caller's SSH key to each one and writes the session files. It never
+# creates or deletes a VM and never arms a deadline. `detach` drops the session
+# files again and leaves the VMs running. Use that pair from CI against a
+# long-lived pool, so a finished job cannot delete hardware another job is using.
 
 set -uo pipefail
 
@@ -52,6 +61,11 @@ ON_DEMAND=false
 # 50 minutes), short enough that a forgotten fleet is hours of billing, not days.
 DEADLINE_MINUTES=180
 REAPER_PID_FILE=""
+# `attach` runs as whatever identity CI authenticated as, which is not the
+# identity that created the VMs, so the key has to be pushed before SSH works.
+SSH_IDENTITY_PATH="${SSH_IDENTITY:-${HOME}/.ssh/google_compute_engine}"
+ATTACH_SSH_USER=""
+ATTACH_PUSH_KEY=true
 
 die() {
   echo "ERROR [spot_tpu_fleet]: $*" >&2
@@ -88,8 +102,17 @@ parse_args() {
       --deadline-minutes|--deadline-minutes=*)
         [[ "$1" == *=* ]] && DEADLINE_MINUTES="${1#*=}" || { DEADLINE_MINUTES="${2:-}"; shift; }
         shift ;;
+      --ssh-identity|--ssh-identity=*)
+        [[ "$1" == *=* ]] && SSH_IDENTITY_PATH="${1#*=}" || { SSH_IDENTITY_PATH="${2:-}"; shift; }
+        shift ;;
+      --ssh-user|--ssh-user=*)
+        [[ "$1" == *=* ]] && ATTACH_SSH_USER="${1#*=}" || { ATTACH_SSH_USER="${2:-}"; shift; }
+        shift ;;
+      --no-key-push)
+        ATTACH_PUSH_KEY=false
+        shift ;;
       -h|--help)
-        sed -n '16,29p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+        sed -n '16,38p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
         exit 0 ;;
       *)
         die "Unknown option '$1'." ;;
@@ -258,6 +281,117 @@ cmd_down() {
   log "Fleet torn down. Verify with: $0 status"
 }
 
+# Writes one session file for a VM that already exists. Returns non-zero and
+# writes nothing if the VM has no reachable address, so a half-provisioned node
+# cannot end up in the pool looking healthy.
+attach_one() {
+  local index="$1" name="$2" zone="$3"
+  local session="${POOL_DIR}/vm_${index}.env"
+  local log_file="${POOL_DIR}/vm_${index}.log"
+
+  local ip
+  ip=$(gcloud compute tpus tpu-vm describe "$name" \
+    --zone="$zone" --project="$ALLOWED_PROJECT" \
+    --format="value(networkEndpoints[0].accessConfig.externalIp)" 2>>"$log_file")
+  if [[ -z "$ip" ]]; then
+    ip=$(gcloud compute tpus tpu-vm describe "$name" \
+      --zone="$zone" --project="$ALLOWED_PROJECT" \
+      --format="value(networkEndpoints[0].ipAddress)" 2>>"$log_file")
+  fi
+  [[ -n "$ip" ]] || { log "${name}: no reachable address, skipping"; return 1; }
+
+  # `gcloud ... ssh` uploads the caller's public key as a side effect, which is
+  # the whole reason to call it: the identity attaching is not the identity that
+  # created the VM, so nothing has authorised it yet. Its stdout also names the
+  # account the VM actually logs us in as, which OS Login can rewrite.
+  local ssh_user="$ATTACH_SSH_USER"
+  if [[ "$ATTACH_PUSH_KEY" == "true" ]]; then
+    local detected
+    detected=$(gcloud compute tpus tpu-vm ssh "$name" \
+      --zone="$zone" --project="$ALLOWED_PROJECT" \
+      --command="whoami" 2>>"$log_file" | tr -d '\r\n')
+    [[ -z "$detected" ]] || ssh_user="$detected"
+  fi
+  [[ -n "$ssh_user" ]] || ssh_user="${USER:-$(whoami)}"
+
+  local control_path="/tmp/tpu_cm_${ip}_22_${ssh_user}"
+  if [[ ${#control_path} -gt 107 ]]; then
+    local sock_hash
+    sock_hash=$(printf '%s_22_%s' "$ip" "$ssh_user" | sha256sum | cut -c1-16)
+    control_path="/tmp/tpu_cm_${sock_hash}.sock"
+  fi
+
+  local tmp_env="${session}.tmp.$$"
+  cat <<EOF > "$tmp_env"
+export TPU_NAME="${name}"
+export TPU_ZONE="${zone}"
+export TPU_PROJECT="${ALLOWED_PROJECT}"
+export TPU_IP="${ip}"
+export SSH_CONTROL_PATH="${control_path}"
+export SSH_USER="${ssh_user}"
+export SSH_IDENTITY="${SSH_IDENTITY_PATH}"
+EOF
+  chmod 600 "$tmp_env"
+  mv -f "$tmp_env" "$session"
+  log "vm_${index} attached to ${name} in ${zone}"
+}
+
+cmd_attach() {
+  mkdir -p "$POOL_DIR"
+
+  local attached=()
+  local session
+  for session in "$POOL_DIR"/*.env; do
+    [[ -s "$session" ]] || continue
+    attached+=("$(sed -n 's/^export TPU_NAME="\(.*\)"$/\1/p' "$session")")
+  done
+
+  local index=0 pids=() found=0
+  local zone name
+  for zone in "${ZONES[@]}"; do
+    while read -r name; do
+      [[ -n "$name" ]] || continue
+      # Re-attaching must not hand the same VM out twice under two slots.
+      local already=false entry
+      for entry in ${attached[@]+"${attached[@]}"}; do
+        [[ "$entry" == "$name" ]] && { already=true; break; }
+      done
+      if [[ "$already" == "true" ]]; then
+        log "${name} is already in the pool"
+        continue
+      fi
+      while [[ -s "${POOL_DIR}/vm_${index}.env" ]]; do
+        index=$(( index + 1 ))
+      done
+      found=$(( found + 1 ))
+      attach_one "$index" "$name" "$zone" &
+      pids+=("$!")
+      index=$(( index + 1 ))
+    done < <(gcloud compute tpus tpu-vm list \
+      --zone="$zone" --project="$ALLOWED_PROJECT" \
+      --filter="name~${VM_NAME_PREFIX} AND state:READY" \
+      --format="value(name.basename())" 2>/dev/null)
+  done
+
+  local ready=0 pid
+  for pid in ${pids[@]+"${pids[@]}"}; do
+    wait "$pid" && ready=$(( ready + 1 ))
+  done
+
+  log "Attached ${ready}/${found} VM(s) in ${POOL_DIR}"
+  [[ "$ready" -gt 0 ]] || die "No VMs to attach to. Bring a fleet up first."
+  return 0
+}
+
+# The counterpart to `attach`. Forgets the pool without touching the hardware,
+# which is what a CI job has to do at the end of a run: `down` would delete VMs
+# that belong to whoever brought the fleet up.
+cmd_detach() {
+  [[ -d "$POOL_DIR" ]] || return 0
+  rm -f "$POOL_DIR"/*.env "$POOL_DIR"/*.env.lock "$POOL_DIR"/*.quarantine
+  log "Detached from the fleet. The VMs are still running."
+}
+
 # Deletes fleet VMs that no session file knows about. Provisioning can create
 # the node and then fail before writing its session, and the pool has no record
 # of it, so the loop above walks straight past it while it keeps billing.
@@ -311,9 +445,11 @@ main() {
   case "$subcommand" in
     up)     cmd_up ;;
     down)   cmd_down ;;
+    attach) cmd_attach ;;
+    detach) cmd_detach ;;
     deadline) cmd_deadline ;;
     status) cmd_status ;;
-    *)      die "Usage: $0 <up|down|status> [options]" ;;
+    *)      die "Usage: $0 <up|down|attach|detach|status> [options]" ;;
   esac
 }
 

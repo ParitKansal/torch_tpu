@@ -34,7 +34,10 @@ readonly SANDBOX_ID="${CLEAN_TARGET}_$$_${RANDOM}"
 readonly REMOTE_RELAY_DIR="/tmp/torch_tpu_relay"
 readonly REMOTE_EXECUTOR="${REMOTE_RELAY_DIR}/remote_tpu_executor.sh"
 readonly REMOTE_PAYLOAD_CACHE="${REMOTE_RELAY_DIR}/payloads"
-readonly REMOTE_BASE_CACHE="${REMOTE_RELAY_DIR}/base"
+# ci/tools/stage_relay_base.sh names this after the content it staged, so two
+# runs sharing a VM pool cannot overwrite each other. A bare bazel run with no
+# driver falls back to the unversioned path.
+readonly REMOTE_BASE_CACHE="${TORCH_TPU_RELAY_BASE_DIR:-${REMOTE_RELAY_DIR}/base}"
 readonly REMOTE_SANDBOX="${REMOTE_RELAY_DIR}/sandboxes/${SANDBOX_ID}"
 readonly TIMEOUT_RAW="${TEST_TIMEOUT:-900}"
 _clean_timeout="${TIMEOUT_RAW%[sS]}"
@@ -344,6 +347,8 @@ fi
 # No run id means no caching, which is the safe default for a bare bazel run.
 # The VM half of the timing prints nothing unless it sees this too.
 [[ -z "${TORCH_TPU_RELAY_TIMING:-}" ]] || remote_env+="TORCH_TPU_RELAY_TIMING=1 "
+
+remote_env+="TORCH_TPU_BASE_CACHE=${REMOTE_BASE_CACHE} "
 
 payload_key=""
 if [[ -n "${TORCH_TPU_RELAY_RUN_ID:-}" ]]; then

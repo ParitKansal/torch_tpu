@@ -31,6 +31,10 @@ readonly SESSION_ENV_FILE="${TPU_SESSION_ENV:-/tmp/tpu_active_session.env}"
 # Where the TPU runtime gets pip-installed on the VM. The remote executor puts
 # this on PYTHONPATH; nothing here depends on the image's Python version.
 readonly REMOTE_BASE_DIR="/tmp/torch_tpu_relay/base"
+# The key gcloud hands the VM and that the control master then authenticates
+# with. CI has no developer home directory, so it points this at an ephemeral
+# key it generated for the run.
+readonly SSH_IDENTITY_PATH="${SSH_IDENTITY:-${HOME}/.ssh/google_compute_engine}"
 
 cleanup_standalone_up() {
   local sig="${1:-TERM}"
@@ -267,7 +271,7 @@ cmd_up() {
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o IdentitiesOnly=yes \
-    -i ~/.ssh/google_compute_engine \
+    -i "${SSH_IDENTITY_PATH}" \
     -o ServerAliveInterval=15 \
     -o ServerAliveCountMax=4 \
     -o BatchMode=yes \
@@ -329,7 +333,7 @@ export TPU_PROJECT="${ALLOWED_PROJECT}"
 export TPU_IP="${tpu_ip}"
 export SSH_CONTROL_PATH="${control_path}"
 export SSH_USER="${ssh_user}"
-export SSH_IDENTITY="${HOME}/.ssh/google_compute_engine"
+export SSH_IDENTITY="${SSH_IDENTITY_PATH}"
 EOF
   chmod 600 "$tmp_env"
   mv -f "$tmp_env" "$session_env"

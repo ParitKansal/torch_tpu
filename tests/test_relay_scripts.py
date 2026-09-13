@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import tarfile
 import tempfile
@@ -1898,3 +1899,369 @@ class TestPhaseTimingIsOptIn(
         fn = body[start : body.index("\n}\n", start)]
         self.assertIn("TORCH_TPU_RELAY_TIMING", fn)
         self.assertIn(label, fn)
+
+
+class TestStageRelayBaseIsolatesRuns(StageRelayBaseTestCase):
+  """Two runs sharing a VM pool must not unpack over each other.
+
+  The base directory used to be a fixed path, so a second run with different
+  C++ content replaced the shared objects underneath the first run's tests.
+  """
+
+  BASE_DIR_RE = re.compile(r"^/tmp/torch_tpu_relay/base-[0-9a-f]{16}$")
+
+  def emit_base_dir(self, **kwargs):
+    emit = os.path.join(self.root, "base_dir.txt")
+    proc = self.run_stage(
+        "--session",
+        self.session_file(),
+        "--emit-base-dir",
+        emit,
+        **kwargs,
+    )
+    self.assertTrue(
+        os.path.exists(emit), f"nothing emitted\n{proc.stdout}\n{proc.stderr}"
+    )
+    with open(emit, encoding="utf-8") as fh:
+      return fh.read().strip()
+
+  def test_the_emitted_path_is_content_addressed(self):
+    self.add_runfiles_tree("a", deps=["rules_python++pip+x"], solibs=["_U_a"])
+    self.assertRegex(self.emit_base_dir(), self.BASE_DIR_RE)
+
+  def test_identical_content_reuses_the_same_directory(self):
+    self.add_runfiles_tree("a", deps=["rules_python++pip+x"], solibs=["_U_a"])
+    first = self.emit_base_dir()
+    shutil.rmtree(self.tarballs)
+    self.assertEqual(first, self.emit_base_dir())
+
+  def test_a_changed_shared_object_moves_the_directory(self):
+    tree = self.add_runfiles_tree(
+        "a", deps=["rules_python++pip+x"], solibs=["_U_a"]
+    )
+    before = self.emit_base_dir()
+
+    solib = os.path.join(tree, "_main", "_solib_x86_64", "_U_a", "lib.so")
+    with open(solib, "w", encoding="utf-8") as fh:
+      fh.write("a different build of the extension module")
+    os.utime(solib, (1_700_000_000, 1_700_000_000))
+
+    self.assertNotEqual(before, self.emit_base_dir())
+
+  def test_a_changed_lockfile_moves_the_directory(self):
+    self.add_runfiles_tree("a", deps=["rules_python++pip+x"], solibs=["_U_a"])
+    before = self.emit_base_dir()
+    self._write(self.lock, "lockfile v2")
+    self.assertNotEqual(before, self.emit_base_dir())
+
+
+class StageRelayBaseSshTestCase(StageRelayBaseTestCase):
+  """Lets staging run all the way through against a recording fake ssh."""
+
+  REMOTE_IP = "10.0.0.9"
+
+  def setUp(self):
+    super().setUp()
+    self.bin_dir = os.path.join(self.root, "bin")
+    os.makedirs(self.bin_dir)
+    self.ssh_log = os.path.join(self.root, "ssh.log")
+
+    # relay_ssh_master_alive insists on a real socket before it will reuse a
+    # control path, so give it one instead of letting it fork a master.
+    self.control_path = os.path.join(self.root, "cm.sock")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(self.control_path)
+    self.addCleanup(sock.close)
+
+    script = os.path.join(self.bin_dir, "ssh")
+    with open(script, "w", encoding="utf-8") as fh:
+      fh.write(f"""#!/usr/bin/env bash
+printf '%s\\n' "${{@: -1}}" >> "{self.ssh_log}"
+cmd="${{@: -1}}"
+# A cache probe on a layer nobody has pushed yet has to report a miss.
+[[ "$cmd" == *".complete' ]"* ]] && exit 1
+[[ "$cmd" == tar* ]] && cat > /dev/null
+exit 0
+""")
+    os.chmod(script, 0o755)
+
+  def connected_session(self, name="vm_0.env"):
+    path = os.path.join(self.root, name)
+    self._write(
+        path,
+        f'export TPU_NAME="fake-vm"\nexport TPU_ZONE="europe-west4-b"\n'
+        f'export TPU_IP="{self.REMOTE_IP}"\nexport SSH_USER="ci"\n'
+        f'export SSH_CONTROL_PATH="{self.control_path}"\n',
+    )
+    return path
+
+  def run_staged(self, *args):
+    return self.run_stage(
+        "--session",
+        self.connected_session(),
+        *args,
+        env={"PATH": f"{self.bin_dir}:{os.environ['PATH']}"},
+    )
+
+  def remote_commands(self):
+    with open(self.ssh_log, encoding="utf-8") as fh:
+      return [line.rstrip("\n") for line in fh]
+
+
+class TestStageRelayBaseRemoteLayout(StageRelayBaseSshTestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.add_runfiles_tree("a", deps=["rules_python++pip+x"], solibs=["_U_a"])
+    self.emit = os.path.join(self.root, "base_dir.txt")
+    proc = self.run_staged("--emit-base-dir", self.emit)
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    with open(self.emit, encoding="utf-8") as fh:
+      self.base_dir = fh.read().strip()
+    self.commands = self.remote_commands()
+
+  def test_each_layer_unpacks_into_its_own_stamped_directory(self):
+    extracts = [c for c in self.commands if c.startswith("tar -xzf")]
+    self.assertTrue(extracts, self.commands)
+    for cmd in extracts:
+      self.assertRegex(cmd, r"-C '/tmp/torch_tpu_relay/store/\w+-\w+'")
+
+  def test_the_complete_marker_lands_after_the_archive(self):
+    for layer in ("deps", "solib"):
+      extract = self._index(rf"tar -xzf - -C '\S*/{layer}-")
+      marker = self._index(rf"touch '\S*/{layer}-\S*/\.complete'")
+      self.assertLess(extract, marker, f"{layer} marked complete too early")
+
+  def test_the_base_directory_is_a_view_over_the_layers(self):
+    link = self._command(r"^set -e; rm -rf '/tmp/torch_tpu_relay/base-")
+    self.assertIn(f"mkdir -p '{self.base_dir}'", link)
+    self.assertIn("ln -sfn", link)
+    self.assertIn("/tmp/torch_tpu_relay/store/", link)
+
+  def test_live_layers_are_kept_out_of_reach_of_the_sweep(self):
+    link = self._command(r"^set -e; rm -rf '/tmp/torch_tpu_relay/base-")
+    self.assertRegex(link, r"touch '/tmp/torch_tpu_relay/store/\w+-\w+'")
+    sweep = self._command(r"^find '/tmp/torch_tpu_relay/store'")
+    self.assertIn("-mtime +", sweep)
+
+  def _index(self, pattern):
+    for i, cmd in enumerate(self.commands):
+      if re.search(pattern, cmd):
+        return i
+    self.fail(f"no remote command matched {pattern}: {self.commands}")
+
+  def _command(self, pattern):
+    return self.commands[self._index(pattern)]
+
+
+class TestStageRelayBaseSkipsLayersAlreadyThere(StageRelayBaseSshTestCase):
+
+  def test_a_complete_layer_is_not_pushed_again(self):
+    self.add_runfiles_tree("a", deps=["rules_python++pip+x"], solibs=["_U_a"])
+    # Report every probe as a hit.
+    with open(os.path.join(self.bin_dir, "ssh"), "w", encoding="utf-8") as fh:
+      fh.write(f"""#!/usr/bin/env bash
+printf '%s\\n' "${{@: -1}}" >> "{self.ssh_log}"
+exit 0
+""")
+    os.chmod(os.path.join(self.bin_dir, "ssh"), 0o755)
+
+    proc = self.run_staged()
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    self.assertEqual(
+        [c for c in self.remote_commands() if c.startswith("tar -xzf")], []
+    )
+    self.assertIn("already current", proc.stdout)
+
+
+class TestBaseDirectoryReachesTheRemoteExecutor(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests shell scripts.
+):
+  """The staged path is worthless if the three hops don't pass it along."""
+
+  def test_the_driver_forwards_the_staged_path_to_the_test_action(self):
+    with open(DRIVER_SCRIPT, encoding="utf-8") as fh:
+      body = fh.read()
+    self.assertIn("--emit-base-dir", body)
+    self.assertRegex(
+        body, r'--test_env=TORCH_TPU_RELAY_BASE_DIR="\$remote_base_dir"'
+    )
+
+  def test_the_relay_honours_the_staged_path(self):
+    with open(RELAY_RUNNER, encoding="utf-8") as fh:
+      body = fh.read()
+    self.assertRegex(
+        body, r'REMOTE_BASE_CACHE="\$\{TORCH_TPU_RELAY_BASE_DIR:-'
+    )
+    self.assertRegex(body, r'TORCH_TPU_BASE_CACHE=\$\{REMOTE_BASE_CACHE\}')
+
+  def test_the_executor_reads_it_from_the_environment(self):
+    with open(REMOTE_EXECUTOR, encoding="utf-8") as fh:
+      body = fh.read()
+    self.assertRegex(body, r'BASE_CACHE="\$\{TORCH_TPU_BASE_CACHE:-')
+
+
+class FleetAttachTestCase(FleetTeardownTestCase):
+  """A fake gcloud that can also answer `describe` and `ssh`, which attach needs."""
+
+  def fake_gcloud_with_addresses(self, listed_names, ip="10.0.0.5", whoami="ci"):
+    listing_file = os.path.join(self.root, "listing.txt")
+    with open(listing_file, "w", encoding="utf-8") as fh:
+      fh.write("".join(f"{name}\n" for name in listed_names))
+
+    path = os.path.join(self.bin_dir, "gcloud")
+    with open(path, "w", encoding="utf-8") as fh:
+      fh.write(f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "{self.gcloud_log}"
+# argv is: compute tpus tpu-vm <verb> ...
+case "$4" in
+  list) cat "{listing_file}" ;;
+  describe)
+    # Only the external-IP format resolves; the fallback must stay unused.
+    [[ "$*" == *"externalIp"* ]] && printf '%s\\n' "{ip}"
+    ;;
+  ssh) printf '%s\\n' "{whoami}" ;;
+esac
+exit 0
+""")
+    os.chmod(path, 0o755)
+
+  def sessions(self):
+    return sorted(f for f in os.listdir(self.pool) if f.endswith(".env"))
+
+  def read_session(self, name):
+    values = {}
+    with open(os.path.join(self.pool, name), encoding="utf-8") as fh:
+      for line in fh:
+        match = re.match(r'^export (\w+)="(.*)"$', line.strip())
+        if match:
+          values[match.group(1)] = match.group(2)
+    return values
+
+
+class TestFleetAttach(FleetAttachTestCase):
+  """`attach` lets a second operator drive a fleet somebody else brought up.
+
+  CI cannot provision its own v5e capacity, so it has to borrow the standing
+  fleet. That only works if attaching never creates or deletes hardware.
+  """
+
+  def test_it_writes_one_session_per_ready_vm(self):
+    self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1", "spot-tpu-v5e-111-2"])
+    proc = self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
+    self.assertEqual(proc.returncode, 0, proc.stderr)
+    self.assertEqual(self.sessions(), ["vm_0.env", "vm_1.env"])
+
+  def test_a_session_carries_everything_the_relay_reads(self):
+    self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"])
+    self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
+
+    session = self.read_session("vm_0.env")
+    for key in ("TPU_NAME", "TPU_ZONE", "TPU_PROJECT", "TPU_IP",
+                "SSH_CONTROL_PATH", "SSH_USER", "SSH_IDENTITY"):
+      self.assertIn(key, session)
+    self.assertEqual(session["TPU_IP"], "10.0.0.5")
+    self.assertEqual(session["TPU_ZONE"], self.ZONE)
+    self.assertEqual(session["TPU_PROJECT"], "rbe-tpu-oss")
+    self.assertEqual(
+        session["SSH_CONTROL_PATH"], "/tmp/tpu_cm_10.0.0.5_22_ci"
+    )
+
+  def test_it_creates_and_deletes_nothing(self):
+    self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"])
+    self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
+
+    calls = self.gcloud_calls()
+    self.assertEqual(self.delete_calls(), [])
+    self.assertEqual([c for c in calls if " create " in f" {c} "], [])
+
+  def test_it_only_looks_at_ready_vms_this_tooling_named(self):
+    self.fake_gcloud_with_addresses([])
+    self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
+
+    listings = [c for c in self.gcloud_calls() if " list " in f" {c} "]
+    self.assertTrue(listings, self.gcloud_calls())
+    for call in listings:
+      self.assertIn("--filter=name~spot-tpu-v5e- AND state:READY", call)
+
+  def test_attaching_twice_does_not_hand_out_a_vm_under_two_slots(self):
+    self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"])
+    self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
+    second = self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
+
+    self.assertEqual(self.sessions(), ["vm_0.env"])
+    self.assertIn("already in the pool", second.stdout + second.stderr)
+
+  def test_a_new_vm_lands_in_a_free_slot_next_to_the_existing_ones(self):
+    self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"])
+    self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
+    self.fake_gcloud_with_addresses(
+        ["spot-tpu-v5e-111-1", "spot-tpu-v5e-111-2"]
+    )
+    self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
+
+    self.assertEqual(self.sessions(), ["vm_0.env", "vm_1.env"])
+    names = {self.read_session(f)["TPU_NAME"] for f in self.sessions()}
+    self.assertEqual(names, {"spot-tpu-v5e-111-1", "spot-tpu-v5e-111-2"})
+
+  def test_it_records_the_identity_ci_will_connect_with(self):
+    self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"])
+    key = os.path.join(self.root, "ephemeral_key")
+    self.run_fleet(
+        "attach", "--pool", self.pool, "--zone", self.ZONE,
+        "--ssh-identity", key,
+    )
+    self.assertEqual(self.read_session("vm_0.env")["SSH_IDENTITY"], key)
+
+  def test_no_key_push_skips_the_ssh_hop_and_takes_the_given_user(self):
+    self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"], whoami="somebody")
+    self.run_fleet(
+        "attach", "--pool", self.pool, "--zone", self.ZONE,
+        "--ssh-user", "runner", "--no-key-push",
+    )
+    self.assertEqual(self.read_session("vm_0.env")["SSH_USER"], "runner")
+    self.assertEqual(
+        [c for c in self.gcloud_calls() if " ssh " in f" {c} "], []
+    )
+
+  def test_a_vm_with_no_address_never_enters_the_pool(self):
+    """A half-provisioned node in the pool loses every test that leases it."""
+    self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"], ip="")
+    proc = self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
+    self.assertNotEqual(proc.returncode, 0)
+    self.assertEqual(self.sessions(), [])
+
+  def test_an_empty_fleet_fails_loudly(self):
+    self.fake_gcloud_with_addresses([])
+    proc = self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
+    self.assertNotEqual(proc.returncode, 0)
+    self.assertIn("Bring a fleet up first", proc.stdout + proc.stderr)
+
+
+class TestFleetDetach(FleetAttachTestCase):
+  """`detach` is what CI runs at the end. `down` there would delete somebody
+  else's VMs.
+  """
+
+  def test_it_clears_the_pool_without_touching_the_hardware(self):
+    self.fake_gcloud_with_addresses(["spot-tpu-v5e-111-1"])
+    self.run_fleet("attach", "--pool", self.pool, "--zone", self.ZONE)
+    self.assertEqual(self.sessions(), ["vm_0.env"])
+
+    proc = self.run_fleet("detach", "--pool", self.pool)
+    self.assertEqual(proc.returncode, 0, proc.stderr)
+    self.assertEqual(self.sessions(), [])
+    self.assertEqual(self.delete_calls(), [])
+
+  def test_it_clears_leases_and_quarantine_markers_too(self):
+    for name in ("vm_0.env", "vm_0.env.lock", "vm_0.quarantine"):
+      with open(os.path.join(self.pool, name), "w", encoding="utf-8") as fh:
+        fh.write("x")
+    self.run_fleet("detach", "--pool", self.pool)
+    self.assertEqual(os.listdir(self.pool), [])
+
+  def test_detaching_from_nothing_is_not_an_error(self):
+    proc = self.run_fleet(
+        "detach", "--pool", os.path.join(self.root, "never-existed")
+    )
+    self.assertEqual(proc.returncode, 0, proc.stderr)

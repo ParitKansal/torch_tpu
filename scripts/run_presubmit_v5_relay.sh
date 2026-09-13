@@ -495,11 +495,22 @@ main() {
 
   local stage_args=(--session "$SESSION_ENV_FILE")
   [[ -z "$CLI_SESSION_POOL" ]] || stage_args=(--pool "$CLI_SESSION_POOL")
+  local base_dir_file="${CLI_OUTPUT_DIR}/remote_base_dir.txt"
   echo -e "\nStaging the shared base cache..."
-  "$RELAY_STAGER" "${stage_args[@]}" || {
+  "$RELAY_STAGER" "${stage_args[@]}" --emit-base-dir "$base_dir_file" || {
     echo "ERROR [run_presubmit]: base cache staging failed." >&2
     return 1
   }
+
+  # The stager names the base directory after what it staged, so the tests have
+  # to be told where it landed. Without this they would read whatever the last
+  # run left at the unversioned path.
+  local remote_base_dir=""
+  [[ ! -s "$base_dir_file" ]] || remote_base_dir="$(cat "$base_dir_file")"
+  if [[ -n "$remote_base_dir" ]]; then
+    relay_env+=(--test_env=TORCH_TPU_RELAY_BASE_DIR="$remote_base_dir")
+    echo "Tests will read the base cache from ${remote_base_dir}."
+  fi
 
   echo -e "\nStarting test execution through relay runner..."
   local bazel_log="${CLI_OUTPUT_DIR}/bazel_presubmit.log"

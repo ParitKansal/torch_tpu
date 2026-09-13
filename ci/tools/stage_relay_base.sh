@@ -27,12 +27,23 @@
 # It goes over in two layers because they change at different rates:
 #   deps   the interpreter and the wheels, only when MODULE.bazel.lock moves
 #   solib  the shared C++ libraries, on every code change
+#
+# Both land under a content-addressed store, and each run gets a base directory
+# of symlinks pointing into it. A fixed base path was fine while one person ran
+# this by hand, but a shared VM pool means two runs can stage at once, and the
+# second one would overwrite the shared libraries the first one's tests are
+# already running against. Keying on content also means two runs of the same
+# code stage nothing the second time.
 set -euo pipefail
 
 readonly ALLOWED_PROJECT="rbe-tpu-oss"
-readonly REMOTE_BASE_DIR="/tmp/torch_tpu_relay/base"
+readonly REMOTE_RELAY_DIR="/tmp/torch_tpu_relay"
+readonly REMOTE_STORE_DIR="${REMOTE_RELAY_DIR}/store"
 readonly LOCAL_CACHE_DIR="${TORCH_TPU_BASE_TARBALL_DIR:-/tmp/torch_tpu_relay/base_tarballs}"
 readonly LAYERS=(deps solib)
+# Anything in the store older than this and not part of the run being staged is
+# from a build nobody is waiting on. A day is far longer than any run.
+readonly STORE_TTL_DAYS=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -44,6 +55,7 @@ readonly SSH_OPTS=("${RELAY_SSH_OPTS[@]}")
 CLI_POOL=""
 CLI_SESSION=""
 CLI_JOBS=12
+CLI_EMIT_BASE_DIR=""
 
 die() { echo "ERROR [stage_relay_base]: $*" >&2; exit 1; }
 log() { echo "[stage_relay_base] $*"; }
@@ -51,12 +63,16 @@ log() { echo "[stage_relay_base] $*"; }
 show_help() {
   cat <<'EOF'
 Usage:
-  stage_relay_base.sh --pool DIR [--jobs N]
-  stage_relay_base.sh --session FILE
+  stage_relay_base.sh --pool DIR [--jobs N] [--emit-base-dir FILE]
+  stage_relay_base.sh --session FILE [--emit-base-dir FILE]
 
-  --pool DIR      Directory of *.env session files written by spot_tpu_fleet.sh.
-  --session FILE  A single session file written by spot_tpu_manager.sh up.
-  --jobs N        How many VMs to push to at once (default 12).
+  --pool DIR           Directory of *.env session files written by spot_tpu_fleet.sh.
+  --session FILE       A single session file written by spot_tpu_manager.sh up.
+  --jobs N             How many VMs to push to at once (default 12).
+  --emit-base-dir FILE Write the remote base directory this staging produced to
+                       FILE. The path is content-addressed, so the caller has to
+                       be told it; pass it to the tests as
+                       TORCH_TPU_RELAY_BASE_DIR.
 
 Build the test targets before staging: the shared libraries only exist once
 bazel has produced them. Re-running is cheap, a layer whose stamp already
@@ -73,6 +89,8 @@ parse_args() {
       --session=*) CLI_SESSION="${1#*=}"; shift ;;
       --jobs)      CLI_JOBS="${2:?--jobs needs a number}"; shift 2 ;;
       --jobs=*)    CLI_JOBS="${1#*=}"; shift ;;
+      --emit-base-dir)   CLI_EMIT_BASE_DIR="${2:?--emit-base-dir needs a file}"; shift 2 ;;
+      --emit-base-dir=*) CLI_EMIT_BASE_DIR="${1#*=}"; shift ;;
       -h|--help)   show_help; exit 0 ;;
       *)           die "unknown argument: $1" ;;
     esac
@@ -198,7 +216,8 @@ build_layer() {
 
 stage_one() {
   local session="$1"
-  shift
+  local base_dir="$2"
+  shift 2
   # Remaining arguments are "layer:stamp:tarball" triples.
 
   local TPU_IP="" SSH_USER="" SSH_CONTROL_PATH="" TPU_NAME="" SSH_IDENTITY=""
@@ -217,34 +236,62 @@ stage_one() {
     return 1
   fi
 
-  local spec
+  local spec layer_dirs=()
   for spec in "$@"; do
     local layer="${spec%%:*}"
     local rest="${spec#*:}"
     local stamp="${rest%%:*}"
     local tarball="${rest#*:}"
-    local stamp_file="${REMOTE_BASE_DIR}/.stamp.${layer}"
+    local layer_dir="${REMOTE_STORE_DIR}/${layer}-${stamp}"
+    layer_dirs+=("$layer_dir")
 
+    # The marker goes in last, so a transfer that died halfway leaves a
+    # directory that reads as incomplete and gets rebuilt rather than one that
+    # reads as current and serves half a Python installation.
     if ssh -S "$SSH_CONTROL_PATH" "${SSH_OPTS[@]}" "$remote" \
-        "[ \"\$(cat ${stamp_file} 2>/dev/null)\" = '${stamp}' ]" 2>/dev/null; then
+        "[ -f '${layer_dir}/.complete' ]" 2>/dev/null; then
       echo "[stage_relay_base] ${label}: ${layer} already current"
       continue
     fi
 
     echo "[stage_relay_base] ${label}: pushing ${layer}..."
     if ! ssh -S "$SSH_CONTROL_PATH" "${SSH_OPTS[@]}" "$remote" \
-        "rm -f ${stamp_file}; mkdir -p ${REMOTE_BASE_DIR}" 2>/dev/null; then
+        "rm -rf '${layer_dir}' && mkdir -p '${layer_dir}'" 2>/dev/null; then
       echo "[stage_relay_base] ${label}: cannot reach VM" >&2
       return 1
     fi
     if ! ssh -S "$SSH_CONTROL_PATH" "${SSH_OPTS[@]}" "$remote" \
-        "tar -xzf - -C ${REMOTE_BASE_DIR}" < "$tarball"; then
+        "tar -xzf - -C '${layer_dir}'" < "$tarball"; then
       echo "[stage_relay_base] ${label}: ${layer} transfer failed" >&2
       return 1
     fi
     ssh -S "$SSH_CONTROL_PATH" "${SSH_OPTS[@]}" "$remote" \
-      "printf '%s' '${stamp}' > ${stamp_file}"
+      "touch '${layer_dir}/.complete'"
   done
+
+  # The base directory is just a view over the layers: one symlink per top-level
+  # entry. remote_tpu_executor.sh links those into each sandbox, and a link to a
+  # link resolves the same as a link to the directory.
+  local link_script="set -e; rm -rf '${base_dir}'; mkdir -p '${base_dir}'"
+  local layer_dir
+  for layer_dir in "${layer_dirs[@]}"; do
+    link_script+="; for entry in '${layer_dir}'/*; do"
+    link_script+=" [ -e \"\$entry\" ] || continue;"
+    link_script+=" ln -sfn \"\$entry\" '${base_dir}/'\"\$(basename \"\$entry\")\"; done"
+    # Keep what this run needs out of reach of the sweep below.
+    link_script+="; touch '${layer_dir}'"
+  done
+  if ! ssh -S "$SSH_CONTROL_PATH" "${SSH_OPTS[@]}" "$remote" "$link_script" 2>/dev/null; then
+    echo "[stage_relay_base] ${label}: could not build the base directory" >&2
+    return 1
+  fi
+
+  # Layers from older runs would otherwise pile up until the boot disk fills.
+  ssh -S "$SSH_CONTROL_PATH" "${SSH_OPTS[@]}" "$remote" \
+    "find '${REMOTE_STORE_DIR}' -maxdepth 1 -mindepth 1 -type d -mtime +${STORE_TTL_DAYS} \
+       -exec rm -rf {} + 2>/dev/null;
+     find '${REMOTE_RELAY_DIR}' -maxdepth 1 -mindepth 1 -name 'base-*' -mtime +${STORE_TTL_DAYS} \
+       -exec rm -rf {} + 2>/dev/null" >/dev/null 2>&1 || true
 
   echo "[stage_relay_base] ${label}: ready"
 }
@@ -276,11 +323,22 @@ main() {
     specs+=("${layer}:${stamp}:${tarball}")
     log "${layer} stamp ${stamp:0:12}"
   done
+  [[ ${#specs[@]} -gt 0 ]] || die "nothing to stage; build the test targets first"
+
+  # Naming the base directory after both stamps is what keeps concurrent runs
+  # apart. Same content, same directory, nothing to re-push; different content,
+  # different directory, and neither run can overwrite the other's libraries.
+  local base_key
+  base_key=$(printf '%s\n' "${specs[@]}" | cut -d: -f1,2 | sort | sha256sum | cut -c1-16)
+  local base_dir="${REMOTE_RELAY_DIR}/base-${base_key}"
+  if [[ -n "$CLI_EMIT_BASE_DIR" ]]; then
+    printf '%s\n' "$base_dir" > "$CLI_EMIT_BASE_DIR"
+  fi
 
   local running=0
   local pids=()
   for session in "${sessions[@]}"; do
-    stage_one "$session" "${specs[@]}" &
+    stage_one "$session" "$base_dir" "${specs[@]}" &
     pids+=($!)
     running=$(( running + 1 ))
     if (( running >= CLI_JOBS )); then
@@ -294,7 +352,7 @@ main() {
     wait "$pid" 2>/dev/null || failures=$(( failures + 1 ))
   done
 
-  log "staged $(( ${#sessions[@]} - failures ))/${#sessions[@]} VM(s)"
+  log "staged $(( ${#sessions[@]} - failures ))/${#sessions[@]} VM(s) at ${base_dir}"
   [[ "$failures" -eq 0 ]]
 }
 

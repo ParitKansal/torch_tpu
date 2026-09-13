@@ -224,9 +224,9 @@ jobs:
       group: relay-tpu-v5-fleet
       cancel-in-progress: false
     env:
-      RELAY_POOL_DIR: ${{ runner.temp }}/tpu_pool
+      # `runner` is not in scope in a job-level env block, so the paths below use
+      # $RUNNER_TEMP inside the steps instead. Only `vars` works up here.
       RELAY_ZONES: ${{ vars.RELAY_TPU_ZONES || 'europe-west4-b' }}
-      RELAY_REPORT_DIR: ${{ runner.temp }}/presubmit_report
 
     steps:
       - name: Checkout Repository
@@ -296,10 +296,10 @@ jobs:
         run: |
           read -r -a zone_args <<< "$(printf -- '--zone %s ' ${RELAY_ZONES})"
           scripts/spot_tpu_fleet.sh attach \
-            --pool "${RELAY_POOL_DIR}" \
+            --pool "${RUNNER_TEMP}/tpu_pool" \
             --ssh-identity "${RUNNER_TEMP}/ssh/relay_key" \
             "${zone_args[@]}"
-          echo "RELAY_JOBS=$(find "${RELAY_POOL_DIR}" -name '*.env' | wc -l)" \
+          echo "RELAY_JOBS=$(find "${RUNNER_TEMP}/tpu_pool" -name '*.env' | wc -l)" \
             >> "$GITHUB_ENV"
 
       - name: Run the presubmit suite on TPU v5e
@@ -308,8 +308,8 @@ jobs:
           SSH_IDENTITY: ${{ runner.temp }}/ssh/relay_key
         run: |
           scripts/run_presubmit_v5_relay.sh \
-            --session-pool "${RELAY_POOL_DIR}" \
-            --output-dir "${RELAY_REPORT_DIR}" \
+            --session-pool "${RUNNER_TEMP}/tpu_pool" \
+            --output-dir "${RUNNER_TEMP}/presubmit_report" \
             --bazel-config ci_tpu_v5_relay \
             --jobs "${RELAY_JOBS}"
 
@@ -325,4 +325,4 @@ jobs:
       # job only borrowed it.
       - name: Detach from the fleet
         if: always()
-        run: scripts/spot_tpu_fleet.sh detach --pool "${RELAY_POOL_DIR}" || true
+        run: scripts/spot_tpu_fleet.sh detach --pool "${RUNNER_TEMP}/tpu_pool" || true

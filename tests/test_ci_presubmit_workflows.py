@@ -626,5 +626,37 @@ class TestRelayJob(
     self.assertFalse(concurrency["cancel-in-progress"])
 
 
+
+class TestWorkflowContextScopes(
+    unittest.TestCase  # UNITTEST_OK=No RNG; tests workflow config.
+):
+  """GitHub rejects a whole workflow file when a context is used out of scope.
+
+  It fails at startup with no jobs and no log, which reads as a workflow that
+  simply never triggered. `runner` in a job-level `env:` block cost one push to
+  find.
+  """
+
+  # Contexts GitHub refuses outside a step.
+  STEP_ONLY_CONTEXTS = ("runner", "steps", "job", "env")
+
+  def workflows(self):
+    for name in os.listdir(WORKFLOW_DIR):
+      if name.endswith((".yml", ".yaml")):
+        yield name, load_workflow(os.path.join(WORKFLOW_DIR, name))
+
+  def test_job_level_env_does_not_reach_for_a_step_context(self):
+    for name, workflow in self.workflows():
+      for job_id, job in (workflow.get("jobs") or {}).items():
+        for key, value in (job.get("env") or {}).items():
+          with self.subTest(workflow=name, job=job_id, var=key):
+            for context in self.STEP_ONLY_CONTEXTS:
+              self.assertNotRegex(
+                  str(value),
+                  rf"\$\{{\{{[^}}]*\b{context}\.",
+                  f"{context} is not in scope in a job-level env block",
+              )
+
+
 if __name__ == "__main__":
   unittest.main()

@@ -65,8 +65,6 @@ on:
 
 permissions:
   contents: read
-  # Lets google-github-actions/auth mint a Workload Identity Federation token.
-  id-token: write
 
 concurrency:
   # Labels unrelated to RBE still fire a `labeled` event. Park those runs in a
@@ -123,6 +121,10 @@ jobs:
             suite: "tpu_v5e_only"
             extra_flags: "--test_tag_filters=presubmit-v5,-fails-on-tpu-v5,-nopresubmit,-notest,-nobuild"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets google-github-actions/auth mint a Workload Identity Federation token.
+      id-token: write
 
     steps:
       - name: Checkout Repository
@@ -216,6 +218,10 @@ jobs:
       ${{ !(contains(github.event.pull_request.labels.*.name, 'ci:replace-tpu-v5')
       || (github.event_name == 'workflow_dispatch' && inputs.mode == 'replacement')) }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets google-github-actions/auth mint a Workload Identity Federation token.
+      id-token: write
     # One relay run at a time. Every run leases the whole fleet, so two of them
     # would each ask for more VMs than exist and spend the difference waiting on
     # flock. Queue instead of cancelling: the run that is already going has VMs
@@ -294,7 +300,11 @@ jobs:
       - name: Attach to the TPU v5e fleet
         if: steps.creds.outputs.configured == 'true'
         run: |
-          read -r -a zone_args <<< "$(printf -- '--zone %s ' ${RELAY_ZONES})"
+          read -r -a zones <<< "${RELAY_ZONES}"
+          zone_args=()
+          for zone in "${zones[@]}"; do
+            zone_args+=(--zone "${zone}")
+          done
           scripts/spot_tpu_fleet.sh attach \
             --pool "${RUNNER_TEMP}/tpu_pool" \
             --ssh-identity "${RUNNER_TEMP}/ssh/relay_key" \

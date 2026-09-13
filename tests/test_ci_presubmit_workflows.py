@@ -298,7 +298,25 @@ class TestRbeOptInWorkflow(
     auth = self.steps["Authenticate to GCP RBE"]
     self.assertIn("workload_identity_provider", auth["with"])
     self.assertNotIn("credentials_json", auth["with"])
-    self.assertEqual(self.workflow["permissions"]["id-token"], "write")
+    self.assertEqual(self.job["permissions"]["id-token"], "write")
+
+  def test_the_token_permission_is_scoped_to_the_jobs_that_mint_one(self):
+    """Granting id-token at the workflow level hands it to every job.
+
+    zizmor's overly-broad-permissions audit fails the build over it, so each
+    job that authenticates asks for the token itself.
+    """
+    self.assertNotIn("id-token", self.workflow.get("permissions", {}))
+    for name, job in self.workflow["jobs"].items():
+      authenticates = any(
+          "google-github-actions/auth" in step.get("uses", "")
+          for step in job.get("steps", [])
+      )
+      with self.subTest(job=name):
+        if authenticates:
+          self.assertEqual(job["permissions"]["id-token"], "write")
+        else:
+          self.assertNotIn("id-token", job.get("permissions", {}))
 
   def test_third_party_actions_are_pinned_to_a_commit(self):
     for name, step in self.steps.items():

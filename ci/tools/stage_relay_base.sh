@@ -236,6 +236,17 @@ stage_one() {
     return 1
   fi
 
+  # tests/tpu_errors_test.py copies a 4 TB result back to the host and expects
+  # the TPU to be the thing that reports the OOM. Under the kernel's default
+  # heuristic a 47 GB v5litepod-1 refuses the host-side malloc first, so the
+  # test sees "DefaultCPUAllocator: can't allocate memory" and fails on the
+  # wrong error. A ct5lp CI runner has the RAM to get past it. Allowing the
+  # overcommit lets the copy run far enough for the TPU to answer.
+  ssh -S "$SSH_CONTROL_PATH" "${SSH_OPTS[@]}" "$remote" \
+    "sudo sysctl -w vm.overcommit_memory=1" >/dev/null 2>&1 \
+    || echo "[stage_relay_base] ${label}: could not relax memory overcommit;" \
+            "tpu_errors_test will report a host OOM" >&2
+
   local spec layer_dirs=()
   for spec in "$@"; do
     local layer="${spec%%:*}"

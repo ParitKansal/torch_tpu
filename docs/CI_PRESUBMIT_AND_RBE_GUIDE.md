@@ -148,10 +148,22 @@ gcloud projects add-iam-policy-binding rbe-tpu-oss \
   --role='projects/rbe-tpu-oss/roles/torchTpuCiRelay'
 ```
 
-> [!NOTE]
-> The build phase sends compile actions to the shared OSS RBE instance
-> (`projects/tensorflow-testing/instances/default_instance`), which is separate
-> from `rbe-tpu-oss` and uses your ordinary application default credentials.
+### The build phase talks to two things that are not `rbe-tpu-oss`
+
+The relay only borrows TPUs from `rbe-tpu-oss`. The bazel build in front of it
+reaches two other services on your application default credentials.
+
+| Service | What for | If you cannot reach it |
+| :--- | :--- | :--- |
+| `projects/tensorflow-testing/instances/default_instance` | Compile actions, via `--config=ci_tpu_v5_relay` | Pass `--bazel-config=""` and build locally. First build is slow, later ones are warm. |
+| ResultStore / BES on `ml-oss-rbe-testing` | Build event upload, dragged in by `--config=resultstore_base` | Already off. `relay_presubmit_pr.sh` passes `--bes_backend=` unless you ask for `--upload-results`. |
+
+> [!IMPORTANT]
+> Only the CI service account can write to the ResultStore instance. Left on,
+> the upload fails **after** the build finishes, bazel still exits non-zero, and
+> a green run gets reported as an error. That is why the driver turns it off by
+> default. Do not add `--upload-results` unless you know your account can write
+> there.
 
 ---
 

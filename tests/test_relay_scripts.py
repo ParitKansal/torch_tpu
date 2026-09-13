@@ -3004,3 +3004,63 @@ class TestRelayDriverBazelFlags(RelayDriverTestCase):
     result = self.run_driver("--pr", "1", "--bazel-flag")
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("--bazel-flag requires an argument", result.stderr)
+
+
+class TestStageRelayBaseRelaxesOvercommit(StageRelayBaseSshTestCase):
+  """The OOM error test needs the host allocator to get out of the way.
+
+  tests/tpu_errors_test.py copies a 4 TB result back and asserts the TPU is
+  what reports the OOM. A 47 GB v5litepod-1 refuses that malloc under the
+  kernel's default heuristic, so the test sees the host allocator's error
+  instead and fails. A ct5lp CI runner has the RAM and never hits it.
+  """
+
+  def setUp(self):
+    super().setUp()
+    self.add_runfiles_tree("a", deps=["rules_python++pip+x"], solibs=["_U_a"])
+    proc = self.run_staged()
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    self.commands = self.remote_commands()
+
+  def test_it_allows_the_overcommit(self):
+    self.assertIn("sudo sysctl -w vm.overcommit_memory=1", self.commands)
+
+  def test_it_happens_before_anything_is_pushed(self):
+    tweak = self.commands.index("sudo sysctl -w vm.overcommit_memory=1")
+    pushes = [
+        i for i, cmd in enumerate(self.commands) if cmd.startswith("tar -xzf")
+    ]
+    self.assertTrue(pushes, self.commands)
+    self.assertLess(tweak, pushes[0])
+
+
+class TestStageRelayBaseSurvivesAReadOnlyHost(StageRelayBaseSshTestCase):
+  """A VM that refuses the sysctl still gets staged.
+
+  Only one test out of 45,000 cares about the overcommit setting. Failing the
+  whole run over it would trade one bad result for fifty-seven.
+  """
+
+  def setUp(self):
+    super().setUp()
+    script = os.path.join(self.bin_dir, "ssh")
+    with open(script, "w", encoding="utf-8") as fh:
+      fh.write(f"""#!/usr/bin/env bash
+printf '%s\\n' "${{@: -1}}" >> "{self.ssh_log}"
+cmd="${{@: -1}}"
+[[ "$cmd" == sudo* ]] && exit 1
+[[ "$cmd" == *".complete' ]"* ]] && exit 1
+[[ "$cmd" == tar* ]] && cat > /dev/null
+exit 0
+""")
+    os.chmod(script, 0o755)
+    self.add_runfiles_tree("a", deps=["rules_python++pip+x"], solibs=["_U_a"])
+
+  def test_staging_still_succeeds(self):
+    proc = self.run_staged()
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+    self.assertIn("ready", proc.stdout)
+
+  def test_it_says_which_test_will_suffer(self):
+    proc = self.run_staged()
+    self.assertIn("tpu_errors_test", proc.stderr)

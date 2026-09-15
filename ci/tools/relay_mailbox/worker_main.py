@@ -97,14 +97,14 @@ def pack_runfiles_layer(runfiles_dir: pathlib.Path) -> bytes:
   Excludes base cache components (rules_python repositories, _solib_x86_64,
   csrc) that are pre-staged on the TPU VMs.
   """
-  main_dir = runfiles_dir / "_main"
-  if not main_dir.is_dir():
-    main_dir = runfiles_dir
-
   buffer = io.BytesIO()
   with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.GNU_FORMAT) as tar:
-    for root, dirs, files in os.walk(main_dir):
-      dirs[:] = [d for d in dirs if d not in ("_solib_x86_64", "csrc", "__pycache__")]
+    for root, dirs, files in os.walk(runfiles_dir):
+      dirs[:] = [
+          d for d in dirs
+          if d not in ("_solib_x86_64", "csrc", "__pycache__")
+          and not d.startswith("rules_python")
+      ]
       for name in list(dirs):
         p = os.path.join(root, name)
         if os.path.islink(p):
@@ -116,7 +116,10 @@ def pack_runfiles_layer(runfiles_dir: pathlib.Path) -> bytes:
             dirs.remove(name)
 
       for f in files:
-        if f.endswith((".pyc", ".a", ".o", ".params", ".cppmap")):
+        if f.endswith((".pyc", ".a", ".o", ".params", ".cppmap")) or f in (
+            "MANIFEST",
+            "_repo_mapping",
+        ):
           continue
         p = os.path.join(root, f)
         if p.endswith(".so") and "torch_tpu/common" in p:

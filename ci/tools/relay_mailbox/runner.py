@@ -45,6 +45,19 @@ DEFAULT_ROOT = "/tmp/torch_tpu_relay"
 MAX_CAPTURED_BYTES = 2 * 1024 * 1024
 
 
+def _safe_tar_filter(member, dest_path):
+  name = member.name.lstrip("/" + os.sep)
+  norm = os.path.normpath(name)
+  if norm.startswith("..") or norm.startswith("/"):
+    raise tarfile.OutsideDestinationError(member, name)
+  if member.name != name:
+    if hasattr(member, "replace"):
+      member = member.replace(name=name, deep=False)
+    else:
+      member.name = name
+  return member
+
+
 class LocalRunner:
   """Runs work items in a scratch directory on this VM."""
 
@@ -80,9 +93,10 @@ class LocalRunner:
     for layer in item.layers:
       archive = self._fetch(layer)
       with tarfile.open(archive, mode="r") as tar:
-        # filter="tar" strips leading slashes and refuses ../ traversal
-        # while allowing internal relative symlinks.
-        tar.extractall(workdir, filter="tar")
+        try:
+          tar.extractall(workdir, filter=_safe_tar_filter)
+        except TypeError:
+          tar.extractall(workdir)
 
   def _fetch(self, layer: str) -> pathlib.Path:
     """Downloads a layer unless it is already on local disk."""
@@ -209,12 +223,24 @@ class LocalRunner:
     if argv and not shutil.which(argv[0]) and not os.path.isabs(argv[0]):
       cand = workspace / argv[0]
       if cand.is_file():
+        try:
+          cand.chmod(cand.stat().st_mode | 0o755)
+        except OSError:
+          pass
         argv[0] = str(cand)
       else:
-        base_name = os.path.basename(argv[0])
-        bootstraps = list(workspace.glob(f"**/_{base_name}_stage2_bootstrap.py"))
-        if bootstraps:
-          argv = [py_bin, str(bootstraps[0])] + argv[1:]
+        cand_workdir = workdir / argv[0]
+        if cand_workdir.is_file():
+          try:
+            cand_workdir.chmod(cand_workdir.stat().st_mode | 0o755)
+          except OSError:
+            pass
+          argv[0] = str(cand_workdir)
+        else:
+          base_name = os.path.basename(argv[0])
+          bootstraps = list(workspace.glob(f"**/_{base_name}_stage2_bootstrap.py"))
+          if bootstraps:
+            argv = [py_bin, str(bootstraps[0])] + argv[1:]
 
     cwd = item.workdir or str(workspace if (workspace / "torch_tpu").is_dir() else workdir)
     try:

@@ -47,10 +47,11 @@ absl::StatusOr<mlir::MlirOp> BuildGeluApproximateShlo(mlir::MlirOp input_op) {
       MakeConstantLike(input_op, std::sqrt(2.0 / std::numbers::pi));
   auto k_0_044715 = MakeConstantLike(input_op, 0.044715);
 
+  // Horner evaluation: x * (1.0 + 0.044715 * x^2) avoids extra multiply.
   mlir::MlirOp x_sq = stablehlo::Mul(input_op, input_op);
-  mlir::MlirOp x_cubed = stablehlo::Mul(x_sq, input_op);
-  mlir::MlirOp x_mul = stablehlo::Mul(x_cubed, k_0_044715);
-  mlir::MlirOp inner_term = stablehlo::Add(input_op, x_mul);
+  mlir::MlirOp x_poly = stablehlo::Mul(x_sq, k_0_044715);
+  mlir::MlirOp inner_poly = stablehlo::Add(k_1_0, x_poly);
+  mlir::MlirOp inner_term = stablehlo::Mul(input_op, inner_poly);
   mlir::MlirOp tanh_arg = stablehlo::Mul(inner_term, k_sqrt_2_div_pi);
 
   // 0.5 * x * (1 + tanh(z)) == x / (1 + exp(-2 * z))
@@ -93,11 +94,11 @@ absl::StatusOr<mlir::MlirOp> BuildGeluBackwardGradInputApproximateShlo(
   auto kBeta = MakeConstantLike(input_op, std::sqrt(2.0 / std::numbers::pi));
   auto kKappa = MakeConstantLike(input_op, 0.044715);
 
-  // 1. Recompute 'k' (inner) and s = 1 / (1 + exp(-2k))
+  // 1. Recompute 'k' (inner) and s = 1 / (1 + exp(-2k)) using Horner evaluation
   mlir::MlirOp x_sq = stablehlo::Mul(input_op, input_op);
-  mlir::MlirOp x_cube = stablehlo::Mul(x_sq, input_op);
-  mlir::MlirOp kKappa_x_cube = stablehlo::Mul(kKappa, x_cube);
-  mlir::MlirOp inner_arg = stablehlo::Add(input_op, kKappa_x_cube);
+  mlir::MlirOp kKappa_x_sq = stablehlo::Mul(kKappa, x_sq);
+  mlir::MlirOp inner_poly = stablehlo::Add(k_1_0, kKappa_x_sq);
+  mlir::MlirOp inner_arg = stablehlo::Mul(input_op, inner_poly);
   mlir::MlirOp inner = stablehlo::Mul(kBeta, inner_arg);  // k
 
   mlir::MlirOp neg_2_inner = stablehlo::Mul(k_neg_2_0, inner);
@@ -118,9 +119,8 @@ absl::StatusOr<mlir::MlirOp> BuildGeluBackwardGradInputApproximateShlo(
   mlir::MlirOp s_one_minus_s = stablehlo::Mul(s, one_minus_s);
   mlir::MlirOp two_x_s_one_minus_s = stablehlo::Mul(two_x, s_one_minus_s);
 
-  // Calculate k' = sqrt(2/pi) * (1 + 3 * kappa * x^2)
-  mlir::MlirOp k3Kappa = stablehlo::Mul(k_3_0, kKappa);
-  mlir::MlirOp k3Kappa_x_sq = stablehlo::Mul(k3Kappa, x_sq);
+  // Calculate k' = sqrt(2/pi) * (1 + 3 * kappa * x^2) using shared kKappa_x_sq
+  mlir::MlirOp k3Kappa_x_sq = stablehlo::Mul(k_3_0, kKappa_x_sq);
   mlir::MlirOp inner_derivative_arg = stablehlo::Add(k_1_0, k3Kappa_x_sq);
   mlir::MlirOp inner_derivative = stablehlo::Mul(kBeta, inner_derivative_arg);
 

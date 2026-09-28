@@ -1438,28 +1438,31 @@ TORCH_LIBRARY(tpu, m) {
       "_sparse_dense_matmul(Tensor row_pointers, Tensor embedding_ids, Tensor "
       "sample_ids, Tensor gains, Tensor embedding_table, int "
       "device_batch_size, int max_ids_per_partition, int "
-      "max_unique_ids_per_partition) -> Tensor");
+      "max_unique_ids_per_partition, bool enable_minibatching=False) -> "
+      "Tensor");
   m.def(
       "_sparse_dense_matmul_grad_with_adagrad(Tensor row_pointers, Tensor "
       "embedding_ids, Tensor sample_ids, Tensor gains, Tensor embedding_table, "
       "Tensor accumulator, Tensor activations_grad, Tensor learning_rate, "
       "float epsilon, int "
       "device_batch_size, int max_ids_per_partition, int "
-      "max_unique_ids_per_partition, str computation_name) -> (Tensor, "
+      "max_unique_ids_per_partition, str computation_name, bool "
+      "enable_minibatching=False) -> (Tensor, "
       "Tensor)");
   m.def(
       "_sparse_dense_matmul_grad_with_sgd(Tensor row_pointers, Tensor "
       "embedding_ids, Tensor sample_ids, Tensor gains, Tensor embedding_table, "
       "Tensor activations_grad, Tensor learning_rate, int device_batch_size, "
       "int max_ids_per_partition, int max_unique_ids_per_partition, str "
-      "computation_name) -> Tensor");
+      "computation_name, bool enable_minibatching=False) -> Tensor");
   m.def(
       "_sparse_dense_matmul_grad_with_adam(Tensor row_pointers, Tensor "
       "embedding_ids, Tensor sample_ids, Tensor gains, Tensor embedding_table, "
       "Tensor momentum, Tensor velocity, Tensor activations_grad, Tensor "
       "alpha_t, float beta_1, float beta_2, float epsilon, int "
       "device_batch_size, int max_ids_per_partition, int "
-      "max_unique_ids_per_partition, str computation_name) -> (Tensor, Tensor, "
+      "max_unique_ids_per_partition, str computation_name, bool "
+      "enable_minibatching=False) -> (Tensor, Tensor, "
       "Tensor)");
   m.def(
       "_sparse_gather(Tensor row_pointers, Tensor indices, Tensor operand, int "
@@ -1569,8 +1572,8 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
       +[](const at::Tensor& row_pointers, const at::Tensor& embedding_ids,
           const at::Tensor& sample_ids, const at::Tensor& gains,
           const at::Tensor& embedding_table, int64_t device_batch_size,
-          int64_t max_ids_per_partition,
-          int64_t max_unique_ids_per_partition) -> at::Tensor {
+          int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition,
+          bool /*enable_minibatching*/) -> at::Tensor {
         TT_CHECK_THROW(embedding_table.dim() == 2, error::kInvalidArgument)
             << "expected embedding_table to be a 2D tensor, got a "
             << embedding_table.dim() << "D tensor of shape "
@@ -1655,7 +1658,7 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
           const at::Tensor& embedding_table, const at::Tensor& activations_grad,
           const at::Tensor& learning_rate, int64_t device_batch_size,
           int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition,
-          std::string_view computation_name) {
+          std::string_view computation_name, bool /*enable_minibatching*/) {
         return at::empty_like(embedding_table);
       });
   ImplInternal<OpName::kSparseDenseMatmulGradWithAdagrad>(
@@ -1666,7 +1669,7 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
           const at::Tensor& activations_grad, const at::Tensor& learning_rate,
           double epsilon, int64_t device_batch_size,
           int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition,
-          std::string_view computation_name) {
+          std::string_view computation_name, bool /*enable_minibatching*/) {
         return std::make_tuple(at::empty_like(embedding_table),
                                at::empty_like(accumulator));
       });
@@ -1679,7 +1682,7 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
           const at::Tensor& alpha_t, double beta_1, double beta_2,
           double epsilon, int64_t device_batch_size,
           int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition,
-          std::string_view computation_name) {
+          std::string_view computation_name, bool /*enable_minibatching*/) {
         return std::make_tuple(at::empty_like(embedding_table),
                                at::empty_like(momentum),
                                at::empty_like(velocity));

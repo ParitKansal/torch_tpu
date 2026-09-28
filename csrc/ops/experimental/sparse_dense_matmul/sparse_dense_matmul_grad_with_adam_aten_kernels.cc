@@ -59,16 +59,19 @@ namespace torch_tpu {
 
 namespace {
 
+using ReturnType = absl::StatusOr<MlirOpResults<3>>;
+
 auto SparseDenseMatmulGradWithAdamBuilder(int64_t device_batch_size,
                                           int64_t max_ids_per_partition,
                                           int64_t max_unique_ids_per_partition,
                                           double beta_1, double beta_2,
                                           double epsilon,
-                                          std::string_view computation_name) {
+                                          std::string_view computation_name,
+                                          bool enable_minibatching) {
   return [max_ids_per_partition, max_unique_ids_per_partition,
           computation_name = std::string(computation_name), beta_1, beta_2,
-          epsilon](FixedSizeSpan<mlir::MlirOp, 9> inputs)
-             -> absl::StatusOr<MlirOpResults<3>> {
+          epsilon, enable_minibatching](
+             FixedSizeSpan<mlir::MlirOp, 9> inputs) -> ReturnType {
     mlir::MlirOp row_pointers = inputs[0];
     mlir::MlirOp embedding_ids = inputs[1];
     mlir::MlirOp sample_ids = inputs[2];
@@ -238,7 +241,10 @@ auto SparseDenseMatmulGradWithAdamBuilder(int64_t device_batch_size,
     const mlir::NamedAttribute backend_config_attr = op_builder.getNamedAttr(
         "backend_config", op_builder.getStringAttr(backend_config));
 
-    std::string_view call_target = "SparseDenseMatmulGradOpWithOptimizerUpdate";
+    std::string_view call_target =
+        enable_minibatching
+            ? "SparseDenseMatmulGradOptimizerUpdateWithMinibatchingOp"
+            : "SparseDenseMatmulGradOpWithOptimizerUpdate";
 
     mlir::NamedAttribute call_target_attr = op_builder.getNamedAttr(
         "call_target_name", op_builder.getStringAttr(call_target));
@@ -261,18 +267,37 @@ auto SparseDenseMatmulGradWithAdamBuilder(int64_t device_batch_size,
         op_builder.getArrayAttr({mlir::SymbolRefAttr::get(
             op_builder.getContext(), computation_name)}));
 
-    std::vector<mlir::Value> operands = {row_pointers.getValue(),
-                                         embedding_ids.getValue(),
-                                         sample_ids.getValue(),
-                                         gains.getValue(),
-                                         activations_grad.getValue(),
-                                         embedding_table.getValue(),
-                                         momentum.getValue(),
-                                         velocity.getValue(),
-                                         alpha_t.getValue(),
-                                         one_minus_beta_1_const.getValue(),
-                                         one_minus_beta_2_const.getValue(),
-                                         epsilon_const.getValue()};
+    std::vector<mlir::Value> operands;
+    if (enable_minibatching) {
+      auto num_minibatches =
+          torch_tpu::MakeScalarConstant(builder, 1, op_builder.getI32Type());
+      operands = {row_pointers.getValue(),
+                  embedding_ids.getValue(),
+                  sample_ids.getValue(),
+                  gains.getValue(),
+                  num_minibatches.getValue(),
+                  embedding_table.getValue(),
+                  momentum.getValue(),
+                  velocity.getValue(),
+                  activations_grad.getValue(),
+                  alpha_t.getValue(),
+                  one_minus_beta_1_const.getValue(),
+                  one_minus_beta_2_const.getValue(),
+                  epsilon_const.getValue()};
+    } else {
+      operands = {row_pointers.getValue(),
+                  embedding_ids.getValue(),
+                  sample_ids.getValue(),
+                  gains.getValue(),
+                  activations_grad.getValue(),
+                  embedding_table.getValue(),
+                  momentum.getValue(),
+                  velocity.getValue(),
+                  alpha_t.getValue(),
+                  one_minus_beta_1_const.getValue(),
+                  one_minus_beta_2_const.getValue(),
+                  epsilon_const.getValue()};
+    }
 
     auto out_type = mlir::TupleType::get(
         op_builder.getContext(),
@@ -308,13 +333,14 @@ AtenSparseDenseMatmulGradWithAdam(
     const at::Tensor& velocity, const at::Tensor& activations_grad,
     const at::Tensor& alpha_t, double beta_1, double beta_2, double epsilon,
     int64_t device_batch_size, int64_t max_ids_per_partition,
-    int64_t max_unique_ids_per_partition, std::string_view computation_name) {
+    int64_t max_unique_ids_per_partition, std::string_view computation_name,
+    bool enable_minibatching) {
   TT_KERNEL(
       OpName::kSparseDenseMatmulGradWithAdam, param_keys,
       (row_pointers, embedding_ids, sample_ids, gains, embedding_table,
        momentum, velocity, activations_grad, alpha_t, beta_1, beta_2, epsilon,
        device_batch_size, max_ids_per_partition, max_unique_ids_per_partition,
-       computation_name),
+       computation_name, enable_minibatching),
       {
         std::array<TensorHolder, 9> inputs = {
             row_pointers, embedding_ids,    sample_ids,
@@ -328,7 +354,7 @@ AtenSparseDenseMatmulGradWithAdam(
         auto builder_fn = SparseDenseMatmulGradWithAdamBuilder(
             device_batch_size, max_ids_per_partition,
             max_unique_ids_per_partition, beta_1, beta_2, epsilon,
-            computation_name);
+            computation_name, enable_minibatching);
 
         TT_ASSIGN_OR_THROW(
             mlir::ElementType out_dtype,

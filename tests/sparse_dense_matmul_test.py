@@ -87,6 +87,7 @@ def preprocess_sparse_dense_matmul_input(
       options.get("hbm_word_size_in_4b", _get_hbm_word_size_in_4b()),
       options.get("allow_id_dropping", True),
       table_name,
+      options.get("enable_minibatching", False),
   )
 
 

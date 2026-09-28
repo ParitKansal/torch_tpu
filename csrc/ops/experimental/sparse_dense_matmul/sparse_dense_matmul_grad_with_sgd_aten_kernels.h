@@ -62,7 +62,7 @@ at::Tensor AtenSparseDenseMatmulGradWithSgd(
     const at::Tensor& embedding_table, const at::Tensor& activations_grad,
     const at::Tensor& learning_rate, int64_t device_batch_size,
     int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition,
-    std::string_view computation_name);
+    std::string_view computation_name, bool enable_minibatching = false);
 
 }  // namespace torch_tpu
 

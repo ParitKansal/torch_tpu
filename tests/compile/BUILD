@@ -13,6 +13,7 @@
 # limitations under the License.
 load(
     "//build_files:build_defs.bzl",
+    "REQUIRES_V5_MULTI_DEVICE",
     "if_oss",
     "torch_tpu_package_end",
     "torch_tpu_py_library",
@@ -286,15 +287,15 @@ torch_tpu_py_test(
     timeout = "long",
     srcs = ["compile_with_distributed_test.py"],
     shard_count = 6,
+    # Run test shards exclusively to prevent device contention on /dev/vfio/* when acquiring the
+    # 4-chip TPU slice concurrently.
     tags = if_oss(
-        # Run test shards exclusively to prevent device contention on /dev/vfio/* when acquiring the
-        # 8-chip TPU slice concurrently.
         ["exclusive"],
         [],
     ) + [
+        REQUIRES_V5_MULTI_DEVICE,
         "noasan",  # TODO(b/555762239): fix the test in asan mode.
         "requires-accel-hbm",
-        "requires-tpu-v5lite:8",
     ],
     deps = [
         "//shims/absl_py/testing:absltest",

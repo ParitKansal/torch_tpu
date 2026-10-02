@@ -99,14 +99,15 @@ def run_scatter_mismatch_input_shapes(
 
 def run_scatter_errors() -> None:
   dist.init_process_group(backend="tpu_dist")
-  run_scatter_wrong_number_inputs(num_inputs=9)
+  world_size = int(os.environ["WORLD_SIZE"])
+  run_scatter_wrong_number_inputs(num_inputs=world_size + 1)
   run_scatter_wrong_shape_output(input_shape=[2, 3], output_shape=[3, 3])
   run_scatter_mismatch_input_shapes(shape=[6, 2], mismatch_shape=[8, 6, 2])
 
 
 class ScatterErrorsTest(et.TpuOnlyDistributedErrorTestBase):
 
-  _world_size = 8
+  _world_size = distributed_utils.get_tpu_device_count()
 
   def test_scatter_errors(self):
     distributed_utils.dist_run(

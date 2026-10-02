@@ -83,18 +83,6 @@ OSS_TPU_RUNNER_CHIPS = {
     "v7": 4,
 }
 
-# "requires-tpu-v5lite:4" is not a valid internal Forge tag (Forge only supports
-# single-chip "requires-tpu-v5lite" and 8-chip "requires-tpu-v5lite:8"), so it
-# must only be used in the OSS branch of `if_oss(...)`. We write the internal
-# codename here rather than the exported external tag because:
-# 1. `build_defs.bzl` keys `TPU_VERSION_TO_GENERATION` on `"requires-tpu-v5lite"`
-#    before Copybara export.
-# 2. Copybara's reversible `tpu_codenames_to_external` transform rewrites the
-#    internal codenames to external tags across all BUILD/.bzl files and fails
-#    the reversibility check if the exported tag is present in the internal
-#    source of truth.
-OSS_REQUIRES_V5_X4 = "requires-tpu-v5lite:4"
-
 # Environment variables for `*_test_cov` targets that collect error coverage.
 # Disables addr2line C++ stack trace symbolization to avoid symbolizer overhead
 # and multiprocess hangs while still capturing C++ source locations.
@@ -180,6 +168,24 @@ def if_oss(oss_value, internal_value = None):
     if is_oss():
         return oss_value
     return internal_value
+
+# Tag for tests that require multiple v5 TPU chips: 4 chips on OSS CI runners
+# and 8 chips on internal Forge.
+#
+# "requires-tpu-v5lite:4" is not a valid internal Forge tag (Forge only supports
+# single-chip "requires-tpu-v5lite" and 8-chip "requires-tpu-v5lite:8"), so it
+# must only be used in the OSS branch of `if_oss(...)`. We write the internal
+# codename here rather than the exported external tag because:
+# 1. `build_defs.bzl` keys `TPU_VERSION_TO_GENERATION` on `"requires-tpu-v5lite"`
+#    before Copybara export.
+# 2. Copybara's reversible `tpu_codenames_to_external` transform rewrites the
+#    internal codenames to external tags across all BUILD/.bzl files and fails
+#    the reversibility check if the exported tag is present in the internal
+#    source of truth.
+REQUIRES_V5_MULTI_DEVICE = if_oss(
+    "requires-tpu-v5lite:4",
+    "requires-tpu-v5lite:8",
+)
 
 def oss_target(rule_func, name, **kwargs):
     """Returns a target that is defined only in OSS."""

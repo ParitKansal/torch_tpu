@@ -41,12 +41,13 @@ def run_all_gather_dtype_error() -> None:
 
 
 def run_all_gather_wrong_num_tensors() -> None:
+  world_size = int(os.environ["WORLD_SIZE"])
   input_tensor = torch.ones((1, 2), dtype=torch.float32, device="tpu")
   output_tensors = [torch.empty((1, 2), dtype=torch.float32, device="tpu")]
   # This message comes from native PyTorch.
   expected_msg = re.compile(
       r"distributed\.all_gather\(\): expected output tensor list to have one"
-      r" tensor per process, got 1 tensor and 8 processes.*"
+      rf" tensor per process, got 1 tensor and {world_size} processes.*"
   )
   with et.assert_raises_message(RuntimeError, tpu=expected_msg):
     dist.all_gather(output_tensors, input_tensor)
@@ -81,7 +82,7 @@ def run_all_gather_errors() -> None:
 
 class AllGatherErrorsTest(et.TpuOnlyDistributedErrorTestBase):
 
-  _world_size = 8
+  _world_size = distributed_utils.get_tpu_device_count()
 
   def test_all_gather_errors(self):
     distributed_utils.dist_run(

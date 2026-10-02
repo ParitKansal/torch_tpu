@@ -32,26 +32,42 @@ from tests.distributed import distributed_utils
 
 P = jax.sharding.PartitionSpec
 
-EXPECTED_1D_ROLL_OUTPUT_BY_RANK = {
-    0: [57.0, 58.0, 59.0, 60.0, 61.0, 62.0, 63.0, 64.0],
-    1: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-    2: [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
-    3: [17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0],
-    4: [25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0],
-    5: [33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0],
-    6: [41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0],
-    7: [49.0, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0],
+EXPECTED_1D_ROLL_OUTPUT_BY_WORLD_SIZE_AND_RANK = {
+    4: {
+        0: [25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0],
+        1: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        2: [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+        3: [17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0],
+    },
+    8: {
+        0: [57.0, 58.0, 59.0, 60.0, 61.0, 62.0, 63.0, 64.0],
+        1: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        2: [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+        3: [17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0],
+        4: [25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0],
+        5: [33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0],
+        6: [41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0],
+        7: [49.0, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0],
+    },
 }
 
-EXPECTED_2D_RANK_DP_ROLL_OUTPUT_BY_RANK = {
-    0: [[25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0]],
-    1: [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]],
-    2: [[9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]],
-    3: [[17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0]],
-    4: [[57.0, 58.0, 59.0, 60.0, 61.0, 62.0, 63.0, 64.0]],
-    5: [[33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0]],
-    6: [[41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0]],
-    7: [[49.0, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0]],
+EXPECTED_2D_RANK_DP_ROLL_OUTPUT_BY_WORLD_SIZE_AND_RANK = {
+    4: {
+        0: [[9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]],
+        1: [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]],
+        2: [[25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0]],
+        3: [[17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0]],
+    },
+    8: {
+        0: [[25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0]],
+        1: [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]],
+        2: [[9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]],
+        3: [[17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0]],
+        4: [[57.0, 58.0, 59.0, 60.0, 61.0, 62.0, 63.0, 64.0]],
+        5: [[33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0]],
+        6: [[41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0]],
+        7: [[49.0, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0]],
+    },
 }
 
 # ==============================================================================
@@ -130,7 +146,7 @@ def _run_1d_mesh(do_compile):
   device = torch.device("tpu")
   dist.init_process_group(backend="tpu_dist")
   world_size = dist.get_world_size()
-  assert world_size == 8, f"Test requires 8 ranks, got {world_size}"
+  assert world_size in (4, 8), f"Test requires 4 or 8 ranks, got {world_size}"
   rank = dist.get_rank()
 
   num_per_rank = 8
@@ -163,7 +179,7 @@ def _run_1d_mesh(do_compile):
   y = roll_op_plus_one(x)
 
   y_expected = torch.tensor(
-      EXPECTED_1D_ROLL_OUTPUT_BY_RANK[rank],
+      EXPECTED_1D_ROLL_OUTPUT_BY_WORLD_SIZE_AND_RANK[world_size][rank],
       dtype=torch.float32,
       device=device,
   )
@@ -251,14 +267,14 @@ def _run_2d_rank_dp_mesh(do_compile):
   device = torch.device("tpu")
   dist.init_process_group(backend="tpu_dist")
   world_size = dist.get_world_size()
-  assert world_size == 8, f"Test requires 8 ranks, got {world_size}"
+  assert world_size in (4, 8), f"Test requires 4 or 8 ranks, got {world_size}"
   rank = dist.get_rank()
 
   num_per_rank = 8
 
-  # Create 2D mesh: ('rank', 'dp') with shape (2, 4), spanning world_size 8.
+  # Create 2D mesh: ('rank', 'dp') with shape (2, world_size // 2).
   mesh = torch.tpu.pallas.get_pallas_mesh(
-      axis_names=("rank", "dp"), mesh_shape=(2, 4)
+      axis_names=("rank", "dp"), mesh_shape=(2, world_size // 2)
   )
   assert isinstance(mesh, jax.sharding.Mesh)
 
@@ -289,7 +305,7 @@ def _run_2d_rank_dp_mesh(do_compile):
   y = roll_op_plus_one(x)
 
   y_expected = torch.tensor(
-      EXPECTED_2D_RANK_DP_ROLL_OUTPUT_BY_RANK[rank],
+      EXPECTED_2D_RANK_DP_ROLL_OUTPUT_BY_WORLD_SIZE_AND_RANK[world_size][rank],
       dtype=torch.float32,
       device=device,
   )
@@ -310,7 +326,7 @@ def _run_combined_collective_and_pallas(do_compile: bool = True):
   device = torch.device("tpu")
   dist.init_process_group(backend="tpu_dist")
   world_size = dist.get_world_size()
-  assert world_size == 8, f"Test requires 8 ranks, got {world_size}"
+  assert world_size in (4, 8), f"Test requires 4 or 8 ranks, got {world_size}"
   rank = dist.get_rank()
 
   num_per_rank = 8
@@ -344,13 +360,13 @@ def _run_combined_collective_and_pallas(do_compile: bool = True):
   x = generate_input(rank, num_per_rank)
   y = combined_fn(x)
 
-  # After all_reduce across 8 ranks, sum of ranks is sum(range(8)) = 28.
-  # For each element i: sum_r (r * 8 + i) = 28 * 8 + 8 * i = 224 + 8 * i.
-  # roll_op shifts within world mesh: rank r sends to (r + 1) % 8, receives from (r - 1) % 8.
-  # All ranks hold identical values after all_reduce, so roll_op outputs 224 + 8 * i.
-  # Then + 1 gives 225 + 8 * i.
+  # After all_reduce across world_size ranks, for each element i:
+  # sum_r (r * num_per_rank + i) = sum(range(world_size)) * num_per_rank + world_size * i.
+  # roll_op shifts within world mesh, where all ranks hold identical values after all_reduce.
+  # Then + 1 is added.
+  rank_sum = sum(range(world_size)) * num_per_rank
   y_expected = torch.tensor(
-      [224 + 8 * i + 1 for i in range(num_per_rank)],
+      [rank_sum + world_size * i + 1 for i in range(num_per_rank)],
       dtype=torch.float32,
       device=device,
   )
@@ -413,7 +429,7 @@ def _test_pallas_axis_index_rank_equivalence():
 class TestPallasCommunicationKernels(
     seed_test_utils.MultiProcessRepeatableTest
 ):
-  _world_size = 8
+  _world_size = distributed_utils.get_tpu_device_count()
 
   def test_1d_mesh_kernel_communication_eager(self):
     distributed_utils.dist_run(

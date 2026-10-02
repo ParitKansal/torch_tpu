@@ -15,7 +15,7 @@
 load(
     "//build_files:build_defs.bzl",
     "DEFAULT_TORCH_EXAMPLE_DEPS",
-    "OSS_REQUIRES_V5_X4",
+    "REQUIRES_V5_MULTI_DEVICE",
     "TEST_COV_ENV",
     "if_oss",
     "torch_tpu_oss_torch_example",
@@ -1993,12 +1993,11 @@ torch_tpu_py_test(
     args = ["--backend=tpu"],
     main = "rng_multi_device_test.py",
     tags = if_oss(
-        [
-            "exclusive",
-            OSS_REQUIRES_V5_X4,
-        ],
-        ["requires-tpu-v5lite:8"],
-    ),
+        ["exclusive"],
+        [],
+    ) + [
+        REQUIRES_V5_MULTI_DEVICE,
+    ],
     deps = [
         ":accelerator_test_utils",
         ":seed_test_utils",
@@ -2041,12 +2040,10 @@ torch_tpu_py_test(
     args = ["--backend=tpu"],
     main = "rng_multiprocess_test.py",
     tags = if_oss(
-        [
-            "exclusive",
-            OSS_REQUIRES_V5_X4,
-        ],
-        ["requires-tpu-v5lite:8"],
+        ["exclusive"],
+        [],
     ) + [
+        REQUIRES_V5_MULTI_DEVICE,
         # Spawning 8 PyTorch processes in *san exceeds Forge's 28GB container
         # memory limit; this is an infra constraint rather than a code defect.
         "noasan",  # See comment above.

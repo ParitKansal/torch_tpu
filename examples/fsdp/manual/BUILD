@@ -12,7 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("//build_files:build_defs.bzl", "if_oss", "torch_tpu_package_end", "torch_tpu_py_library", "torch_tpu_py_test")
+load(
+    "//build_files:build_defs.bzl",
+    "REQUIRES_V5_MULTI_DEVICE",
+    "if_oss",
+    "torch_tpu_package_end",
+    "torch_tpu_py_library",
+    "torch_tpu_py_test",
+)
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -22,13 +29,17 @@ package(
 torch_tpu_py_test(
     name = "launch",
     srcs = ["launch.py"],
+    env = if_oss(
+        {"WORLD_SIZE": "4"},
+        {"WORLD_SIZE": "8"},
+    ),
     main = "launch.py",
     tags = if_oss(
         ["exclusive"],
         [],
     ) + [
+        REQUIRES_V5_MULTI_DEVICE,
         "nosan",  # *san builds are low-value for this example and cause OOMs.
-        "requires-tpu-v5lite:8",
     ],
     deps = [
         ":manual_fsdp_worker",
@@ -40,14 +51,18 @@ torch_tpu_py_test(
 torch_tpu_py_test(
     name = "manual_fsdp_memory_test",
     srcs = ["manual_fsdp_memory_test.py"],
+    env = if_oss(
+        {"WORLD_SIZE": "4"},
+        {"WORLD_SIZE": "8"},
+    ),
     main = "manual_fsdp_memory_test.py",
     tags = if_oss(
         ["exclusive"],
         [],
     ) + [
+        REQUIRES_V5_MULTI_DEVICE,
         "noasan",  # OOMs even with the highest memory limit.
         "requires-mem:28g",  # For the *san builds.
-        "requires-tpu-v5lite:8",
     ],
     deps = [
         ":model",

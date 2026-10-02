@@ -92,20 +92,21 @@ def _replicate_tensor(
 
 
 class UnevenShardingTest(seed_test_utils.MultiProcessRepeatableTest):
+  _world_size = distributed_utils.get_tpu_device_count()
 
   @parameterized.named_parameters(
-      ("1d_eager_small", 1, False, 4),
-      ("1d_compiled_small", 1, True, 4),
-      ("1d_eager_uneven", 1, False, 12),
-      ("1d_compiled_uneven", 1, True, 12),
-      ("2d_eager_small", 2, False, 4),
-      ("2d_compiled_small", 2, True, 4),
-      ("2d_eager_uneven", 2, False, 12),
-      ("2d_compiled_uneven", 2, True, 12),
+      ("1d_eager_small", 1, False, 2),
+      ("1d_compiled_small", 1, True, 2),
+      ("1d_eager_uneven", 1, False, 6),
+      ("1d_compiled_uneven", 1, True, 6),
+      ("2d_eager_small", 2, False, 2),
+      ("2d_compiled_small", 2, True, 2),
+      ("2d_eager_uneven", 2, False, 6),
+      ("2d_compiled_uneven", 2, True, 6),
   )
   def test_replicate_tensor_with_shape(self, ndims, compiled, tensor_size):
     distributed_utils.dist_run(
-        nproc_per_node=8,
+        nproc_per_node=self._world_size,
         fn=_replicate_tensor,
         tensor_size=tensor_size,
         compiled=compiled,
@@ -121,44 +122,44 @@ class UnevenShardingTest(seed_test_utils.MultiProcessRepeatableTest):
           "1d_compiled_fail_small",
           1,
           True,
-          4,
+          2,
           f"{_SHAPE_MISMATCH}|{_SFLAG_TIMEOUT}",
       ),
       (
           "1d_eager_fail_small",
           1,
           False,
-          4,
+          2,
           f"{_SHAPE_MISMATCH}|{_SFLAG_TIMEOUT}|{_ZERO_ALL_GATHER_DIM}",
       ),
       (
           "1d_compiled_fail_uneven",
           1,
           True,
-          12,
+          6,
           f"{_SHAPE_MISMATCH}|{_SFLAG_TIMEOUT}",
       ),
       (
           "1d_eager_fail_uneven",
           1,
           False,
-          12,
+          6,
           f"{_SHAPE_MISMATCH}|{_SFLAG_TIMEOUT}|{_ZERO_ALL_GATHER_DIM}",
       ),
-      ("2d_compiled_fail_small", 2, True, 4, _SFLAG_TIMEOUT),
+      ("2d_compiled_fail_small", 2, True, 2, _SFLAG_TIMEOUT),
       (
           "2d_eager_fail_small",
           2,
           False,
-          4,
+          2,
           f"{_SFLAG_TIMEOUT}|{_ZERO_ALL_GATHER_DIM}",
       ),
-      ("2d_compiled_fail_uneven", 2, True, 12, _SFLAG_TIMEOUT),
+      ("2d_compiled_fail_uneven", 2, True, 6, _SFLAG_TIMEOUT),
       (
           "2d_eager_fail_uneven",
           2,
           False,
-          12,
+          6,
           f"{_SFLAG_TIMEOUT}|{_ZERO_ALL_GATHER_DIM}",
       ),
   )
@@ -167,7 +168,7 @@ class UnevenShardingTest(seed_test_utils.MultiProcessRepeatableTest):
   ):
     with self.assertRaisesRegex(Exception, expected_regex):
       distributed_utils.dist_run(
-          nproc_per_node=8,
+          nproc_per_node=self._world_size,
           fn=_replicate_tensor,
           tensor_size=tensor_size,
           compiled=compiled,
@@ -176,14 +177,14 @@ class UnevenShardingTest(seed_test_utils.MultiProcessRepeatableTest):
       )
 
   @parameterized.named_parameters(
-      ("1d_without_shape_stride_small", 1, 4, False),
-      ("1d_with_shape_stride_small", 1, 4, True),
-      ("1d_without_shape_stride_uneven", 1, 12, False),
-      ("1d_with_shape_stride_uneven", 1, 12, True),
-      ("2d_without_shape_stride_small", 2, 4, False),
-      ("2d_with_shape_stride_small", 2, 4, True),
-      ("2d_without_shape_stride_uneven", 2, 12, False),
-      ("2d_with_shape_stride_uneven", 2, 12, True),
+      ("1d_without_shape_stride_small", 1, 2, False),
+      ("1d_with_shape_stride_small", 1, 2, True),
+      ("1d_without_shape_stride_uneven", 1, 6, False),
+      ("1d_with_shape_stride_uneven", 1, 6, True),
+      ("2d_without_shape_stride_small", 2, 2, False),
+      ("2d_with_shape_stride_small", 2, 2, True),
+      ("2d_without_shape_stride_uneven", 2, 6, False),
+      ("2d_with_shape_stride_uneven", 2, 6, True),
   )
   def test_replicate_tensor_debug_eager(
       self, ndims, tensor_size, pass_shape_stride
@@ -191,7 +192,7 @@ class UnevenShardingTest(seed_test_utils.MultiProcessRepeatableTest):
     def run_fn():
       with mock.patch.dict(os.environ, {"TORCH_TPU_ENABLE_DEBUG_CHECKS": "1"}):
         distributed_utils.dist_run(
-            nproc_per_node=8,
+            nproc_per_node=self._world_size,
             fn=_replicate_tensor,
             tensor_size=tensor_size,
             compiled=False,

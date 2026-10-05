@@ -21,14 +21,11 @@
 #include <utility>
 #include <vector>
 
-#include "absl/status/statusor.h"
-#include "csrc/common/error_utils.h"
 #include "csrc/common/status_test_utils.h"
 #include "csrc/experimental/precompiled_kernels/kernel_test_utils.h"
 #include "csrc/internal/mosaic/op_builders.h"
 #include "gtest/gtest.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
 #include "xla/literal.h"
 #include "xla/literal_util.h"
@@ -44,7 +41,7 @@ namespace {
 TEST(DynamicMosaic, CopiesDifferentShapesWithOneExecutable) {
   TT_ASSERT_OK_AND_ASSIGN(auto client, CreateKernelTestClient());
   xla::HloRunner runner(std::move(client));
-  auto context = mlir::torch_tpu::CreateMlirContextWithDialects();
+  auto context = CreateMlirContextWithDialects();
   // Copy from src to dst, with runtime-varying dimensions.
   auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
     #hbm = #tpu.memory_space<hbm>

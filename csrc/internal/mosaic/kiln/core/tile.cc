@@ -165,8 +165,8 @@ Tile Tile::Lanes(int64_t n) const {
     return Slice(llvm::SmallVector<int64_t>(rank(), 0), target);
   }
   return internal::wrap<Tile>(
-      mlir::torch_tpu::CreateRepeatOp(internal::CurrentBuilder(),
-                                      internal::unwrap(*this), rank() - 1, n),
+      CreateRepeatOp(internal::CurrentBuilder(), internal::unwrap(*this),
+                     rank() - 1, n),
       dtype());
 }
 
@@ -240,7 +240,7 @@ Scalar Tile::Extract(llvm::ArrayRef<int64_t> indices) const {
 }
 
 Tile Tile::Full(Literal value) const {
-  return ::torch_tpu::kiln::Full(shape(), dtype(), value);
+  return kiln::Full(shape(), dtype(), value);
 }
 
 Tile Zeros(llvm::ArrayRef<int64_t> shape, DType dtype) {
@@ -277,8 +277,8 @@ Tile Iota(llvm::ArrayRef<int64_t> shape, DType dtype, int axis) {
   }
   mlir::ImplicitLocOpBuilder& b = internal::CurrentBuilder();
   return internal::wrap<Tile>(
-      mlir::torch_tpu::CreateIotaOp(
-          b, mlir::VectorType::get(shape, internal::ToMlirType(dtype)), axis),
+      CreateIotaOp(b, mlir::VectorType::get(shape, internal::ToMlirType(dtype)),
+                   axis),
       dtype);
 }
 
@@ -356,12 +356,11 @@ Tile Dot(Tile lhs, Tile rhs, const DotOptions& options) {
   // Matmuls always produce a float32 result.
   DType result_dtype = Float32Type();
   return internal::wrap<Tile>(
-      mlir::torch_tpu::CreateMatmul(
-          internal::CurrentBuilder(), internal::unwrap(lhs),
-          internal::unwrap(rhs),
-          mlir::torch_tpu::MatmulOptions{.transpose_lhs = options.transpose_lhs,
-                                         .transpose_rhs = options.transpose_rhs,
-                                         .precision = precision}),
+      CreateMatmul(internal::CurrentBuilder(), internal::unwrap(lhs),
+                   internal::unwrap(rhs),
+                   MatmulOptions{.transpose_lhs = options.transpose_lhs,
+                                 .transpose_rhs = options.transpose_rhs,
+                                 .precision = precision}),
       result_dtype);
 }
 

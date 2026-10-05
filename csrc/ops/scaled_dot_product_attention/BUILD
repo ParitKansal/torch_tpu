@@ -198,7 +198,6 @@ torch_tpu_cc_library(
         "@llvm-project//mlir:VectorDialect",
         "@stablehlo//:linalg_passes",
         "@stablehlo//stablehlo/integrations/cpp/builder:attr_type_builder_util",
-        "@xla//xla:xla_data_proto_cc",
     ],
 )
 
@@ -230,7 +229,6 @@ torch_tpu_cc_library(
         "@llvm-project//mlir:VectorDialect",
         "@stablehlo//:linalg_passes",
         "@stablehlo//stablehlo/integrations/cpp/builder:attr_type_builder_util",
-        "@xla//xla:xla_data_proto_cc",
     ],
 )
 

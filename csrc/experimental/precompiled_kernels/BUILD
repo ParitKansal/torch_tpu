@@ -113,11 +113,9 @@ torch_tpu_cc_test(
     deps = [
         ":kernel_test_utils",
         ":mosaic_custom_call",
-        "//csrc/common:error_utils",
         "//csrc/common:oss_test_main",
         "//csrc/common:status_test_utils",
         "//csrc/internal/mosaic:op_builders",
-        "@com_google_absl//absl/status:statusor",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Parser",
         "@xla//xla:literal",

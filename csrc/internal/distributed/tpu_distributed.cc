@@ -89,6 +89,22 @@ std::vector<int64_t> GetDeviceAssignment(  // INT_VEC_OK
   return {};
 }
 
+// Makes the process group of `backend` standalone, see
+// `ProcessGroupTpu::MakeStandalone()`.
+void MakeStandalone(c10::intrusive_ptr<c10d::Backend> backend) {
+  auto* pg_tpu = dynamic_cast<ProcessGroupTpu*>(backend.get());
+  if (pg_tpu != nullptr) {
+    pg_tpu->MakeStandalone();
+  }
+}
+
+// Returns whether the process group of `backend` is standalone, see
+// `ProcessGroupTpu::MakeStandalone()`.
+bool IsStandalone(c10::intrusive_ptr<c10d::Backend> backend) {
+  auto* pg_tpu = dynamic_cast<ProcessGroupTpu*>(backend.get());
+  return pg_tpu != nullptr && pg_tpu->standalone();
+}
+
 // Global device id of the (single) addressable device this process is using.
 int GetGlobalDeviceId() {
   TT_ASSIGN_OR_THROW(int device_id,
@@ -143,6 +159,12 @@ TT_PYBIND11_MODULE(tpu_distributed, m) {
   m.def("rank_to_device_id", &GetRankToDeviceId);
   m.def("replica_groups", &GetReplicaGroups);
   m.def("device_assignment", &GetDeviceAssignment);
+  m.def("make_standalone", &MakeStandalone);
+  m.def("is_standalone", &IsStandalone);
+  m.def("is_standalone_device_group",
+        [](const std::vector<int64_t>& device_ids) {  // INT_VEC_OK
+          return IsStandaloneDeviceGroup(device_ids);
+        });
 
   // We expose these as helper functions on the Python side
   m.def("global_device_id", &GetGlobalDeviceId);

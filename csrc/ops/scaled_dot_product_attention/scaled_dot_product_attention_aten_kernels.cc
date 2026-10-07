@@ -343,17 +343,18 @@ AtenScaledDotProductFusedAttentionOverrideableBackward(
             "allow_fp16_bf16_reduction", allow_half_precision_reduction_math));
 
         TT_ASSIGN_OR_THROW(
-            auto out, ScaledDotProductFusedAttentionShloBackward(
-                          grad_out, query, key, value, attn_bias, logsumexp,
-                          scale, is_causal, allow_half_precision_reduction_math,
-                          std::move(param_keys)));
+            auto grad_results,
+            ScaledDotProductFusedAttentionShloBackward(
+                grad_out, query, key, value, attn_bias, logsumexp, scale,
+                is_causal, allow_half_precision_reduction_math,
+                std::move(param_keys), out));
 
         return std::make_tuple(
-            grad_input_mask[0] ? std::get<0>(out)
+            grad_input_mask[0] ? std::get<0>(grad_results)
                                : at::zeros({0}, grad_out.options()),
-            grad_input_mask[1] ? std::get<1>(out)
+            grad_input_mask[1] ? std::get<1>(grad_results)
                                : at::zeros({0}, grad_out.options()),
-            grad_input_mask[2] ? std::get<2>(out)
+            grad_input_mask[2] ? std::get<2>(grad_results)
                                : at::zeros({0}, grad_out.options()),
             at::zeros({0}, grad_out.options()));
       });

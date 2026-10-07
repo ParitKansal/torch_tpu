@@ -17850,6 +17850,60 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
             preamble=f"close check failed for {name}",
         )
 
+  def test_sdpa_overrideable_gqa_backward_rowsum(self):
+    """Tests GQA backward gradients via forward out rowsum identity."""
+    torch.manual_seed(42)
+    q_cpu = torch.randn(2, 8, 512, 64, dtype=torch.bfloat16)
+    k_cpu = torch.randn(2, 2, 512, 64, dtype=torch.bfloat16)
+    v_cpu = torch.randn(2, 2, 512, 64, dtype=torch.bfloat16)
+    do_cpu = torch.randn(2, 8, 512, 64, dtype=torch.bfloat16)
+
+    q_ref = q_cpu.float().detach().requires_grad_(True)
+    k_ref = k_cpu.float().detach().requires_grad_(True)
+    v_ref = v_cpu.float().detach().requires_grad_(True)
+    out_ref = torch.nn.functional.scaled_dot_product_attention(
+        q_ref, k_ref, v_ref, is_causal=True, enable_gqa=True
+    )
+    out_ref.backward(do_cpu.float())
+
+    q_tpu = q_cpu.to("tpu").detach().requires_grad_(True)
+    k_tpu = k_cpu.to("tpu").detach().requires_grad_(True)
+    v_tpu = v_cpu.to("tpu").detach().requires_grad_(True)
+    with torch.nn.attention.sdpa_kernel(
+        torch.nn.attention.SDPBackend.OVERRIDEABLE
+    ):
+      out_tpu = torch.nn.functional.scaled_dot_product_attention(
+          q_tpu, k_tpu, v_tpu, is_causal=True, enable_gqa=True
+      )
+      out_tpu.backward(do_cpu.to("tpu"))
+
+    q_grad_cpu = q_tpu.grad.cpu()
+    self.assertTrue((q_grad_cpu[..., 0, :] == 0.0).all())
+    self.assert_close(
+        golden_result=out_ref.bfloat16(),
+        torch_tpu_result=out_tpu.cpu(),
+        rtol=5e-2,
+        atol=5e-2,
+    )
+    self.assert_close(
+        golden_result=q_ref.grad.bfloat16(),
+        torch_tpu_result=q_grad_cpu,
+        rtol=5e-2,
+        atol=5e-2,
+    )
+    self.assert_close(
+        golden_result=k_ref.grad.bfloat16(),
+        torch_tpu_result=k_tpu.grad.cpu(),
+        rtol=5e-2,
+        atol=5e-2,
+    )
+    self.assert_close(
+        golden_result=v_ref.grad.bfloat16(),
+        torch_tpu_result=v_tpu.grad.cpu(),
+        rtol=5e-2,
+        atol=5e-2,
+    )
+
   def test_pointwise_op_dtype_promotion(self):
     """Ensure that pointwise ops promote as expected.
 

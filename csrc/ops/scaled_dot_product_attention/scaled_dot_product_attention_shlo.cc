@@ -17,6 +17,7 @@
 #include "csrc/ops/scaled_dot_product_attention/scaled_dot_product_attention_shlo.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <tuple>
@@ -607,20 +608,35 @@ absl::StatusOr<MlirOpResults<2>> BuildScaledDotProductFusedAttentionShloOp(
   return MlirOpResults<2>{out, unflattened_sum_exp};
 }
 
-absl::StatusOr<mlir::MlirOp> ComputeGradP(mlir::MlirBuilder& builder,
-                                          mlir::MlirOp softmax,
-                                          mlir::MlirOp grad_softmax,
-                                          mlir::Type softmax_calc_type) {
+absl::StatusOr<mlir::MlirOp> ComputeGradP(
+    mlir::MlirBuilder& builder, mlir::MlirOp softmax, mlir::MlirOp grad_softmax,
+    mlir::Type softmax_calc_type,
+    std::optional<mlir::MlirOp> rowsum = std::nullopt,
+    bool zero_causal_first_row = false) {
   mlir::MlirOp grad_softmax_calc =
       ConvertElementTypeIfNeeded(grad_softmax, softmax_calc_type);
-  mlir::MlirOp s_mul_ds = mlir::stablehlo::Mul(softmax, grad_softmax_calc);
-  mlir::MlirOp rowsum_s_mul_ds = SumReduce(builder, s_mul_ds, /*dimension=*/3);
+  mlir::MlirOp rowsum_s_mul_ds =
+      rowsum.has_value()
+          ? *rowsum
+          : SumReduce(builder, mlir::stablehlo::Mul(softmax, grad_softmax_calc),
+                      /*dimension=*/3);
   TT_ASSIGN_OR_RETURN(mlir::MlirOp rowsum_broadcasted,
                       BroadcastIfNeeded(rowsum_s_mul_ds, softmax,
                                         /*broadcast_dimensions=*/{0, 1, 2}));
   mlir::MlirOp shifted_ds =
       mlir::stablehlo::Subtract(grad_softmax_calc, rowsum_broadcasted);
-  return mlir::stablehlo::Mul(softmax, shifted_ds);
+  mlir::MlirOp grad_p = mlir::stablehlo::Mul(softmax, shifted_ds);
+  if (zero_causal_first_row) {
+    mlir::Type i32_type = builder.getOpBuilder().getI32Type();
+    TT_ASSIGN_OR_RETURN(mlir::MlirOp q_idx,
+                        Iota(grad_p, /*iota_dimension=*/2, i32_type));
+    mlir::MlirOp zero_idx = MakeConstantLike(q_idx, 0);
+    mlir::MlirOp is_first_row = mlir::stablehlo::Compare(
+        q_idx, zero_idx, mlir::stablehlo::ComparisonDirection::EQ);
+    mlir::MlirOp zero_grad = MakeConstantLike(grad_p, 0.0);
+    grad_p = mlir::stablehlo::Select(is_first_row, zero_grad, grad_p);
+  }
+  return grad_p;
 }
 
 struct BackwardGradients4D {
@@ -635,8 +651,9 @@ absl::StatusOr<BackwardGradients4D> ComputeGqaBackwardGradients(
     mlir::MlirOp key_4d, mlir::MlirOp value_4d, mlir::Type element_type,
     mlir::Type softmax_calc_type, int64_t head_count_ratio, int64_t batch_size,
     int64_t num_head_q, int64_t num_head_kv, int64_t seq_len_q,
-    int64_t seq_len_kv, int64_t head_dim,
-    mlir::stablehlo::Precision precision) {
+    int64_t seq_len_kv, int64_t head_dim, mlir::stablehlo::Precision precision,
+    std::optional<mlir::MlirOp> rowsum = std::nullopt,
+    bool zero_causal_first_row = false) {
   const auto precision_config = mlir::stablehlo::PrecisionConfigAttr::get(
       context, {precision, precision});
   mlir::MlirOp softmax_for_dv =
@@ -677,7 +694,8 @@ absl::StatusOr<BackwardGradients4D> ComputeGqaBackwardGradients(
   // dP = S * (dS - rowsum(S * dS))
   TT_ASSIGN_OR_RETURN(
       mlir::MlirOp grad_p,
-      ComputeGradP(builder, softmax, grad_softmax, softmax_calc_type));
+      ComputeGradP(builder, softmax, grad_softmax, softmax_calc_type, rowsum,
+                   zero_causal_first_row));
 
   mlir::MlirOp grad_p_dot = ConvertElementTypeIfNeeded(grad_p, element_type);
   mlir::MlirOp grad_p_5d = mlir::stablehlo::Reshape(
@@ -716,7 +734,9 @@ absl::StatusOr<BackwardGradients4D> ComputeStandardBackwardGradients(
     mlir::MLIRContext* context, mlir::MlirBuilder& builder,
     mlir::MlirOp softmax, mlir::MlirOp grad_out_4d, mlir::MlirOp query_4d,
     mlir::MlirOp key_4d, mlir::MlirOp value_4d, mlir::Type element_type,
-    mlir::Type softmax_calc_type, mlir::stablehlo::Precision precision) {
+    mlir::Type softmax_calc_type, mlir::stablehlo::Precision precision,
+    std::optional<mlir::MlirOp> rowsum = std::nullopt,
+    bool zero_causal_first_row = false) {
   const auto precision_config = mlir::stablehlo::PrecisionConfigAttr::get(
       context, {precision, precision});
   // dV = softmax^T @ grad_out
@@ -742,7 +762,8 @@ absl::StatusOr<BackwardGradients4D> ComputeStandardBackwardGradients(
   // dP = S * (dS - rowsum(S * dS))
   TT_ASSIGN_OR_RETURN(
       mlir::MlirOp grad_p,
-      ComputeGradP(builder, softmax, grad_softmax, softmax_calc_type));
+      ComputeGradP(builder, softmax, grad_softmax, softmax_calc_type, rowsum,
+                   zero_causal_first_row));
 
   // dQ = (dP @ key) * scale
   mlir::MlirOp grad_p_dot = ConvertElementTypeIfNeeded(grad_p, element_type);
@@ -770,24 +791,59 @@ absl::StatusOr<BackwardGradients4D> ComputeStandardBackwardGradients(
   };
 }
 
+std::pair<mlir::MlirOp, mlir::MlirOp> MaybeBarrierQueryKey(
+    mlir::MlirBuilder& builder, mlir::MlirOp query_mlir, mlir::MlirOp key_mlir,
+    bool use_out_rowsum) {
+  if (!use_out_rowsum) {
+    return {query_mlir, key_mlir};
+  }
+  auto barrier = mlir::stablehlo::OptimizationBarrierOp::create(
+      builder.getOpBuilder(), builder.getLoc(),
+      {query_mlir.getValue(), key_mlir.getValue()});
+  return {mlir::MlirOp(builder, barrier.getResult()[0]),
+          mlir::MlirOp(builder, barrier.getResult()[1])};
+}
+
+std::optional<mlir::MlirOp> MaybeComputeBackwardOutRowsum(
+    mlir::MlirBuilder& builder, std::optional<mlir::MlirOp> out_mlir,
+    mlir::MlirOp grad_out_4d, mlir::Type softmax_calc_type, int batch_size,
+    int num_batch_dims, bool use_out_rowsum) {
+  if (!use_out_rowsum || !out_mlir.has_value()) {
+    return std::nullopt;
+  }
+  mlir::MlirOp out_4d =
+      flatten_batch_dims(*out_mlir, batch_size, num_batch_dims);
+  mlir::MlirOp grad_out_calc =
+      ConvertElementTypeIfNeeded(grad_out_4d, softmax_calc_type);
+  mlir::MlirOp out_calc = ConvertElementTypeIfNeeded(out_4d, softmax_calc_type);
+  return SumReduce(builder, mlir::stablehlo::Mul(grad_out_calc, out_calc),
+                   /*dimension=*/3);
+}
+
 absl::StatusOr<std::array<mlir::MlirOp, 3>>
-BuildScaledDotProductAttentionBackward(absl::Span<mlir::MlirOp> inputs,
-                                       mlir::MlirBuilder& builder, int rank,
-                                       int batch_size, bool is_causal,
-                                       std::optional<double> scale,
-                                       int64_t num_head_q, int64_t num_head_kv,
-                                       int64_t seq_len_q, int64_t seq_len_kv,
-                                       int64_t head_dim,
-                                       bool allow_half_precision_reduction_math,
-                                       mlir::stablehlo::Precision precision) {
+BuildScaledDotProductAttentionBackward(
+    absl::Span<mlir::MlirOp> inputs, mlir::MlirBuilder& builder, int rank,
+    int batch_size, bool is_causal, std::optional<double> scale,
+    int64_t num_head_q, int64_t num_head_kv, int64_t seq_len_q,
+    int64_t seq_len_kv, int64_t head_dim,
+    bool allow_half_precision_reduction_math,
+    mlir::stablehlo::Precision precision, bool has_mask, bool has_out) {
   mlir::MlirOp grad_out_mlir = inputs[0];
-  mlir::MlirOp query_mlir = inputs[1];
-  mlir::MlirOp key_mlir = inputs[2];
+  const bool use_out_rowsum =
+      has_out && seq_len_q == seq_len_kv &&
+      IsSdpaSequenceAlignedAndLarge(inputs[1], inputs[2]);
+  auto [query_mlir, key_mlir] =
+      MaybeBarrierQueryKey(builder, inputs[1], inputs[2], use_out_rowsum);
   mlir::MlirOp value_mlir = inputs[3];
   mlir::MlirOp sum_exp_mlir = inputs[4];
+  size_t next_idx = 5;
   std::optional<mlir::MlirOp> mask_mlir;
-  if (inputs.size() == 6) {
-    mask_mlir = inputs[5];
+  if (has_mask) {
+    mask_mlir = inputs[next_idx++];
+  }
+  std::optional<mlir::MlirOp> out_mlir;
+  if (has_out) {
+    out_mlir = inputs[next_idx++];
   }
   mlir::MLIRContext* context = &builder.getContext();
 
@@ -867,6 +923,12 @@ BuildScaledDotProductAttentionBackward(absl::Span<mlir::MlirOp> inputs,
         mlir::stablehlo::Select(is_masked_broadcasted, zero_softmax, softmax);
   }
 
+  std::optional<mlir::MlirOp> rowsum = MaybeComputeBackwardOutRowsum(
+      builder, out_mlir, grad_out_4d, softmax_calc_type, batch_size,
+      num_batch_dims, use_out_rowsum);
+  const bool zero_causal_first_row =
+      rowsum.has_value() && is_causal && !has_mask;
+
   // Compute backward gradients for Q, K, V
   BackwardGradients4D grads;
   if (head_count_ratio > 1) {
@@ -875,12 +937,13 @@ BuildScaledDotProductAttentionBackward(absl::Span<mlir::MlirOp> inputs,
                    context, builder, softmax, grad_out_4d, query_4d, key_4d,
                    value_4d, element_type, softmax_calc_type, head_count_ratio,
                    batch_size, num_head_q, num_head_kv, seq_len_q, seq_len_kv,
-                   head_dim, precision));
+                   head_dim, precision, rowsum, zero_causal_first_row));
   } else {
     TT_ASSIGN_OR_RETURN(
         grads, ComputeStandardBackwardGradients(
                    context, builder, softmax, grad_out_4d, query_4d, key_4d,
-                   value_4d, element_type, softmax_calc_type, precision));
+                   value_4d, element_type, softmax_calc_type, precision, rowsum,
+                   zero_causal_first_row));
   }
 
   mlir::MlirOp broadcasted_scale_for_query = mlir::stablehlo::Broadcast(
@@ -967,7 +1030,8 @@ ScaledDotProductFusedAttentionShloBackward(
     const at::Tensor& grad_out, const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& attn_bias,
     const at::Tensor& sum_exp, std::optional<double> scale, bool is_causal,
-    bool allow_half_precision_reduction_math, OpParamCacheKeys param_keys) {
+    bool allow_half_precision_reduction_math, OpParamCacheKeys param_keys,
+    const std::optional<at::Tensor>& out) {
   TT_ASSIGN_OR_RETURN(const auto out_dtype,
                       ConvertTo<mlir::ElementType>(query.scalar_type()));
 
@@ -979,20 +1043,27 @@ ScaledDotProductFusedAttentionShloBackward(
   const int64_t seq_len_kv = key.size(rank - 2);
   const int64_t head_dim = query.size(rank - 1);
   const mlir::stablehlo::Precision precision = GetAndAddPrecisionTo(param_keys);
+  const bool has_mask = attn_bias.defined() && attn_bias.numel() > 0;
+  const bool has_out = out.has_value() && out->defined() && out->numel() > 0 &&
+                       seq_len_q == seq_len_kv;
 
-  auto op_builder =
-      [rank, batch_size, is_causal, scale, num_head_q, num_head_kv, seq_len_q,
-       seq_len_kv, head_dim, allow_half_precision_reduction_math,
-       precision](absl::Span<mlir::MlirOp> inputs, mlir::MlirBuilder& builder) {
-        return BuildScaledDotProductAttentionBackward(
-            inputs, builder, rank, batch_size, is_causal, scale, num_head_q,
-            num_head_kv, seq_len_q, seq_len_kv, head_dim,
-            allow_half_precision_reduction_math, precision);
-      };
+  auto op_builder = [rank, batch_size, is_causal, scale, num_head_q,
+                     num_head_kv, seq_len_q, seq_len_kv, head_dim,
+                     allow_half_precision_reduction_math, precision, has_mask,
+                     has_out](absl::Span<mlir::MlirOp> inputs,
+                              mlir::MlirBuilder& builder) {
+    return BuildScaledDotProductAttentionBackward(
+        inputs, builder, rank, batch_size, is_causal, scale, num_head_q,
+        num_head_kv, seq_len_q, seq_len_kv, head_dim,
+        allow_half_precision_reduction_math, precision, has_mask, has_out);
+  };
 
   std::vector<at::Tensor> inputs = {grad_out, query, key, value, sum_exp};
-  if (attn_bias.defined() && attn_bias.numel() > 0) {
+  if (has_mask) {
     inputs.push_back(attn_bias);
+  }
+  if (has_out) {
+    inputs.push_back(*out);
   }
 
   TT_ASSIGN_OR_RETURN(

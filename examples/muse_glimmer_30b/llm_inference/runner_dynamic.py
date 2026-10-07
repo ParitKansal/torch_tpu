@@ -21,9 +21,9 @@ import warnings
 
 import torch
 from torch._functorch._aot_autograd import autograd_cache
-from torch_tpu.examples.muse_glimmer_30b.llm_inference import checkpoint_utils
-from torch_tpu.examples.muse_glimmer_30b.llm_inference import model
-from torch_tpu.examples.muse_glimmer_30b.llm_inference import summary_utils
+import checkpoint_utils
+import model
+import summary_utils
 import transformers
 
 _PROMPT = "The future of artificial intelligence is"

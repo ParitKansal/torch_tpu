@@ -17,7 +17,7 @@
 import time
 from etils import epath
 import torch
-from torch_tpu.examples.muse_glimmer_30b.llm_inference import model
+import model
 import transformers
 
 DEFAULT_MODEL_NAME = "meta-models/Muse-Glimmer-30B"

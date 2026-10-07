@@ -3548,6 +3548,31 @@ class TestOps(op_testing.OpInfoTestBase):
         max_samples_per_op_dtype=5,
     )
 
+  # CUDA's _f8_f8_bf16_rowwise_grouped_mm CUTLASS kernel is Hopper SM90-only.
+  @op_testing.record_gpu_goldens_on(op_testing.GPU_SM90)
+  def test_scaled_grouped_mm_v2(self):
+    self.do_test_op(
+        "torch._scaled_grouped_mm_v2",
+        exclude_dtypes={
+            "cpu": (
+                *ALL_NUMERIC_DTYPES,
+                *quantize_utils.ROCM_ONLY_FLOAT8_DTYPES,
+            ),
+            "gpu": (
+                *UNQUANTIZED_NUMERIC_DTYPES,
+                # TODO(amainz): Enable float8_e4m3fn once Hopper GPU goldens are
+                # recorded and cl/995189060 lands rowwise scale lowering on TPU.
+                torch.float8_e4m3fn,
+                torch.float8_e5m2,
+                *quantize_utils.ROCM_ONLY_FLOAT8_DTYPES,
+            ),
+        },
+        check_out_variant=False,
+        check_grad=False,
+        check_dynamism=False,
+        max_samples_per_op_dtype=5,
+    )
+
   def test_scaled_mm_v2(self):
     self.do_test_op(
         "torch._scaled_mm_v2",

@@ -15020,6 +15020,389 @@ module {{
     self.assertEqual(torch.tpu._get_cache_misses() - start_misses, 0)
     utils.assert_close(actual, expected, rtol=0, atol=0)
 
+  @parameterized.product(
+      layout=["2d_3d", "3d_2d", "2d_2d", "3d_3d"],
+      variant=["default", "out", "out_resize", "no_swizzle", "contraction_dim"],
+  )
+  def test_scaled_grouped_mm_v2_tensorwise(self, layout, variant):
+    """Tests torch.ops.aten._scaled_grouped_mm_v2 with FP8 TensorWise scales.
+
+    v2 delegates to the v1 lowering, so its result must equal v1's exactly.
+
+    Args:
+      layout: Operand ranks, e.g. "2d_3d" is a 2D self (ragged via offs) and a
+        3D mat2.
+      variant: "out" and "out_resize" call the `.out` overload with a correctly
+        sized or an empty `out`; "no_swizzle" passes empty swizzle lists (the
+        torch.nn.functional.scaled_grouped_mm default); "contraction_dim" passes
+        contraction_dim=[-1, -2].
+    """
+    if variant in ("out", "out_resize") and utils.parse_version(
+        torch.__version__
+    ) < (2, 14, 0):
+      self.skipTest("_scaled_grouped_mm_v2.out requires PyTorch >= 2.14.")
+    self_shape, mat2_shape, offs = {
+        "2d_3d": ((16, 8), (2, 8, 8), [8, 16]),
+        "3d_2d": ((2, 8, 8), (8, 16), [8, 16]),
+        "2d_2d": ((8, 16), (16, 8), [8, 16]),
+        "3d_3d": ((2, 8, 8), (2, 8, 8), None),
+    }[layout]
+    t1 = torch.randn(self_shape).to(torch.float8_e4m3fn)
+    t2 = torch.randn(mat2_shape).to(torch.float8_e4m3fn)
+    offs = torch.tensor(offs, dtype=torch.int32) if offs else None
+    scale_a = torch.tensor([1.5])
+    scale_b = torch.tensor([0.5])
+    # at::blas::ScalingType::TensorWise and at::blas::SwizzleType::NO_SWIZZLE.
+    tensorwise = 0
+    swizzle = [] if variant == "no_swizzle" else [0]
+
+    device = "tpu"
+    t1_tpu, t2_tpu = t1.to(device), t2.to(device)
+    sa_tpu, sb_tpu = scale_a.to(device), scale_b.to(device)
+    offs_tpu = offs.to(device) if offs is not None else None
+    v2_args = (
+        t1_tpu,
+        t2_tpu,
+        [sa_tpu],
+        [tensorwise],
+        swizzle,
+        [sb_tpu],
+        [tensorwise],
+        swizzle,
+    )
+    v2_kwargs = dict(offs=offs_tpu, out_dtype=torch.bfloat16)
+    if variant == "contraction_dim":
+      v2_kwargs["contraction_dim"] = [-1, -2]
+    v1_out = torch._scaled_grouped_mm(
+        t1_tpu, t2_tpu, sa_tpu, sb_tpu, offs=offs_tpu, out_dtype=torch.bfloat16
+    )
+    if variant in ("out", "out_resize"):
+      out = (
+          torch.empty_like(v1_out)
+          if variant == "out"
+          else torch.empty(0, dtype=torch.bfloat16, device=device)
+      )
+      v2_out = torch.ops.aten._scaled_grouped_mm_v2.out(
+          *v2_args, **v2_kwargs, out=out
+      )
+      self.assertIs(v2_out, out)
+    else:
+      v2_out = torch.ops.aten._scaled_grouped_mm_v2(*v2_args, **v2_kwargs)
+
+    self.assertEqual(v2_out.dtype, torch.bfloat16)
+    self.assertTrue(torch.equal(v2_out.cpu(), v1_out.cpu()))
+    golden = torch.ops.aten._grouped_mm(
+        t1.to(torch.float32), t2.to(torch.float32), offs=offs
+    ) * (scale_a * scale_b)
+    utils.assert_close(
+        v2_out.cpu().to(torch.float32), golden, rtol=2e-1, atol=2e-1
+    )
+
+  @parameterized.parameters(False, True)
+  def test_scaled_grouped_mm_v2_use_fast_accum_matches_default(self, use_out):
+    """Tests that use_fast_accum=True reuses the default's kernel and result."""
+    if use_out and utils.parse_version(torch.__version__) < (2, 14, 0):
+      self.skipTest("_scaled_grouped_mm_v2.out requires PyTorch >= 2.14.")
+    device = "tpu"
+    t1_fp8 = torch.randn(32, 16).to(torch.float8_e4m3fn).to(device)
+    t2_fp8 = torch.randn(2, 16, 32).to(torch.float8_e4m3fn).to(device)
+    offs = torch.tensor([16, 32], dtype=torch.int32).to(device)
+    scale_a = torch.tensor([1.5]).to(device)
+    scale_b = torch.tensor([0.5]).to(device)
+    # at::blas::ScalingType::TensorWise and at::blas::SwizzleType::NO_SWIZZLE.
+    args = (t1_fp8, t2_fp8, [scale_a], [0], [0], [scale_b], [0], [0])
+
+    def run(use_fast_accum):
+      kwargs = dict(
+          offs=offs, out_dtype=torch.bfloat16, use_fast_accum=use_fast_accum
+      )
+      if use_out:
+        out = torch.empty(32, 32, dtype=torch.bfloat16, device=device)
+        torch.ops.aten._scaled_grouped_mm_v2.out(*args, **kwargs, out=out)
+        return out.cpu()
+      return torch.ops.aten._scaled_grouped_mm_v2(*args, **kwargs).cpu()
+
+    expected = run(use_fast_accum=False)
+    start_misses = torch.tpu._get_cache_misses()
+    actual = run(use_fast_accum=True)
+    # use_fast_accum doesn't change the lowering, so the kernel is reused.
+    self.assertEqual(torch.tpu._get_cache_misses() - start_misses, 0)
+    utils.assert_close(actual, expected, rtol=0, atol=0)
+
+  def _make_rowwise_inputs(
+      self,
+      layout: str,
+      group_sizes: list[int],
+      ragged_size: int | None = None,
+      m: int = 16,
+      k: int = 32,
+      n: int = 24,
+      dtype_a: torch.dtype = torch.float8_e4m3fn,
+  ) -> tuple[torch.Tensor, ...]:
+    """Returns CPU (a, b, scale_a, scale_b, offs) for a rowwise test.
+
+    Scales follow the upstream shapes (torch/_meta_registrations.py): a 2D
+    operand takes a 1D scale over its non-contracting dim (times G for 2D x 2D)
+    and a 3D operand a [G, non-contracting] scale.
+
+    Args:
+      layout: Operand ranks, e.g. "2d_3d" is a 2D self and a 3D mat2.
+      group_sizes: Per-group sizes of the ragged dim: M for 2d_3d, N for 3d_2d
+        and K for 2d_2d. 3d_3d only uses the group count.
+      ragged_size: Size of the ragged dim. Defaults to sum(group_sizes); larger
+        values leave a tail that belongs to no group.
+      m: Rows of each group's output, if not ragged.
+      k: Contracting size, if not ragged.
+      n: Columns of each group's output, if not ragged.
+      dtype_a: dtype of `a`; `b` is e4m3.
+    """
+    g = len(group_sizes)
+    ragged = ragged_size or sum(group_sizes)
+    a_shape, b_shape, sa_shape, sb_shape = {
+        "2d_3d": ((ragged, k), (g, k, n), (ragged,), (g, n)),
+        "3d_2d": ((g, m, k), (k, ragged), (g, m), (ragged,)),
+        "2d_2d": ((m, ragged), (ragged, n), (g * m,), (g * n,)),
+        "3d_3d": ((g, m, k), (g, k, n), (g, m), (g, n)),
+    }[layout]
+    a = torch.randn(a_shape).to(dtype_a)
+    b = torch.randn(b_shape).to(torch.float8_e4m3fn)
+    scale_a = torch.rand(sa_shape) + 0.5
+    scale_b = torch.rand(sb_shape) + 0.5
+    offs = torch.tensor(group_sizes).cumsum(0).to(torch.int32)
+    return a, b, scale_a, scale_b, None if layout == "3d_3d" else offs
+
+  def _rowwise_reference(
+      self,
+      a: torch.Tensor,
+      b: torch.Tensor,
+      scale_a: torch.Tensor,
+      scale_b: torch.Tensor,
+      offs: torch.Tensor | None,
+  ) -> torch.Tensor:
+    """Returns the CPU fp32 per-group reference for rowwise scales.
+
+    Rows or columns past offs[-1] belong to no group and stay zero.
+
+    Args:
+      a: self, as made by _make_rowwise_inputs.
+      b: mat2.
+      scale_a: Rowwise scale of `a`.
+      scale_b: Rowwise scale of `b`.
+      offs: Cumulative group ends; None for 3d_3d.
+    """
+    a, b = a.float(), b.float()
+    if offs is None:
+      return a @ b * scale_a[:, :, None] * scale_b[:, None, :]
+    ends = offs.tolist()
+    bounds = list(zip([0] + ends[:-1], ends))
+    if a.dim() == 2 and b.dim() == 3:
+      out = torch.zeros(a.shape[0], b.shape[2])
+      for g, (start, end) in enumerate(bounds):
+        out[start:end] = (
+            a[start:end] @ b[g] * scale_a[start:end, None] * scale_b[g]
+        )
+      return out
+    if a.dim() == 3:
+      out = torch.zeros(a.shape[1], b.shape[1])
+      for g, (start, end) in enumerate(bounds):
+        out[:, start:end] = (
+            a[g] @ b[:, start:end] * scale_a[g][:, None] * scale_b[start:end]
+        )
+      return out
+    scale_a = scale_a.view(len(ends), -1)
+    scale_b = scale_b.view(len(ends), -1)
+    out = torch.zeros(len(ends), a.shape[0], b.shape[1])
+    for g, (start, end) in enumerate(bounds):
+      out[g] = a[:, start:end] @ b[start:end] * scale_a[g][:, None] * scale_b[g]
+    return out
+
+  def _scaled_grouped_mm_tpu(
+      self,
+      a: torch.Tensor,
+      b: torch.Tensor,
+      scale_a: torch.Tensor,
+      scale_b: torch.Tensor,
+      offs: torch.Tensor | None,
+      out_dtype: torch.dtype = torch.bfloat16,
+  ) -> torch.Tensor:
+    """Runs torch._scaled_grouped_mm on TPU and returns the CPU result."""
+    device = "tpu"
+    return torch._scaled_grouped_mm(
+        a.to(device),
+        b.to(device),
+        scale_a.to(device),
+        scale_b.to(device),
+        offs=offs.to(device) if offs is not None else None,
+        out_dtype=out_dtype,
+    ).cpu()
+
+  def _assert_rowwise_close(
+      self, out: torch.Tensor, expected: torch.Tensor
+  ) -> None:
+    """Compares with the fp32 reference: 1e-2 for bf16 out, 1e-4 for fp32."""
+    tol = 1e-2 if out.dtype == torch.bfloat16 else 1e-4
+    utils.assert_close(
+        out.float(),
+        expected,
+        rtol=tol,
+        atol=tol * expected.abs().max().item(),
+    )
+
+  @parameterized.product(
+      layout=["2d_3d", "3d_2d", "2d_2d", "3d_3d"],
+      group_sizes=[[3, 0, 5, 8], [8, 8, 0, 0], [1, 0, 0, 0]],
+      out_dtype=[torch.bfloat16, torch.float32],
+  )
+  def test_scaled_grouped_mm_rowwise(self, layout, group_sizes, out_dtype):
+    """Tests rowwise FP8 scales against a CPU fp32 per-group reference.
+
+    Args:
+      layout: Operand ranks, e.g. "2d_3d" is a 2D self and a 3D mat2.
+      group_sizes: Uneven with an empty group, trailing empty groups, or a
+        single-token ragged dimension (M=1 / N=1 / K=1).
+      out_dtype: The output dtype.
+    """
+    a, b, scale_a, scale_b, offs = self._make_rowwise_inputs(
+        layout, group_sizes
+    )
+
+    out = self._scaled_grouped_mm_tpu(a, b, scale_a, scale_b, offs, out_dtype)
+
+    self.assertEqual(out.dtype, out_dtype)
+    self._assert_rowwise_close(
+        out, self._rowwise_reference(a, b, scale_a, scale_b, offs)
+    )
+
+  @parameterized.parameters("2d_3d", "3d_2d", "2d_2d")
+  def test_scaled_grouped_mm_rowwise_tail(self, layout):
+    """Tests rows (2d_3d), columns (3d_2d), or contracting tokens (2d_2d) past offs[-1].
+
+    For 2d_3d and 3d_2d, the lowering reads the last group's scale on tail
+    tokens and masks the unpartitioned tail to zero. For 2d_2d, tokens past
+    offs[-1] along the contracting dimension K belong to no group.
+
+    Args:
+      layout: Operand ranks.
+    """
+    a, b, scale_a, scale_b, offs = self._make_rowwise_inputs(
+        layout, [3, 0, 5, 8], ragged_size=24
+    )
+
+    out = self._scaled_grouped_mm_tpu(a, b, scale_a, scale_b, offs)
+
+    self._assert_rowwise_close(
+        out, self._rowwise_reference(a, b, scale_a, scale_b, offs)
+    )
+    if layout != "2d_2d":
+      tail = out[16:] if layout == "2d_3d" else out[:, 16:]
+      self.assertTrue(torch.equal(tail, torch.zeros_like(tail)))
+
+  def test_scaled_grouped_mm_rowwise_many_empty_groups(self):
+    """Tests 2d_3d with 128 groups, 120 of them empty."""
+    group_sizes = [0] * 128
+    gen = torch.Generator().manual_seed(0)
+    for g in torch.randperm(128, generator=gen)[:8].tolist():
+      group_sizes[g] = 8
+    a, b, scale_a, scale_b, offs = self._make_rowwise_inputs(
+        "2d_3d", group_sizes
+    )
+
+    out = self._scaled_grouped_mm_tpu(a, b, scale_a, scale_b, offs)
+
+    self._assert_rowwise_close(
+        out, self._rowwise_reference(a, b, scale_a, scale_b, offs)
+    )
+
+  def test_scaled_grouped_mm_rowwise_e5m2(self):
+    """Tests an e5m2 self (e.g. a gradient) with an e4m3 mat2."""
+    a, b, scale_a, scale_b, offs = self._make_rowwise_inputs(
+        "2d_3d", [3, 0, 5, 8], dtype_a=torch.float8_e5m2
+    )
+
+    out = self._scaled_grouped_mm_tpu(a, b, scale_a, scale_b, offs)
+
+    self._assert_rowwise_close(
+        out, self._rowwise_reference(a, b, scale_a, scale_b, offs)
+    )
+
+  @parameterized.product(
+      matmul=["fwd", "dgrad", "wgrad"], dims=[(2048, 768), (768, 2048)]
+  )
+  def test_scaled_grouped_mm_rowwise_qwen3_shapes(self, matmul, dims):
+    """Tests the torchao MoE matmuls at Qwen3-30B-A3B expert sizes.
+
+    Args:
+      matmul: "fwd" is x @ w, "dgrad" dy @ w.t() and "wgrad" x.t() @ dy, with
+        512 tokens split unevenly over 8 experts.
+      dims: The expert's (in, out) feature sizes.
+    """
+    d_in, d_out = dims
+    layout, sizes = {
+        "fwd": ("2d_3d", dict(k=d_in, n=d_out)),
+        "dgrad": ("2d_3d", dict(k=d_out, n=d_in)),
+        "wgrad": ("2d_2d", dict(m=d_in, n=d_out)),
+    }[matmul]
+    group_sizes = self._ragged_k_group_sizes(512, 8, "uneven")
+    a, b, scale_a, scale_b, offs = self._make_rowwise_inputs(
+        layout, group_sizes, **sizes
+    )
+
+    out = self._scaled_grouped_mm_tpu(a, b, scale_a, scale_b, offs)
+
+    self._assert_rowwise_close(
+        out, self._rowwise_reference(a, b, scale_a, scale_b, offs)
+    )
+
+  @parameterized.parameters("2d_3d", "3d_2d", "2d_2d", "3d_3d")
+  def test_scaled_grouped_mm_v2_rowwise(self, layout):
+    """Tests the v2 RowWise recipe. v2 delegates to v1, so results are equal.
+
+    Args:
+      layout: Operand ranks.
+    """
+    a, b, scale_a, scale_b, offs = self._make_rowwise_inputs(
+        layout, [3, 0, 5, 8]
+    )
+    device = "tpu"
+    a, b = a.to(device), b.to(device)
+    scale_a, scale_b = scale_a.to(device), scale_b.to(device)
+    offs = offs.to(device) if offs is not None else None
+    rowwise = 1  # at::blas::ScalingType::RowWise.
+
+    v1_out = torch._scaled_grouped_mm(
+        a, b, scale_a, scale_b, offs=offs, out_dtype=torch.bfloat16
+    )
+    v2_out = torch.ops.aten._scaled_grouped_mm_v2(
+        a,
+        b,
+        [scale_a],
+        [rowwise],
+        [],
+        [scale_b],
+        [rowwise],
+        [],
+        offs=offs,
+        out_dtype=torch.bfloat16,
+    )
+
+    self.assertTrue(torch.equal(v2_out.cpu(), v1_out.cpu()))
+    if utils.parse_version(torch.__version__) >= (2, 14, 0):
+      v2_out_buf = torch.empty(0, dtype=torch.bfloat16, device=device)
+      torch.ops.aten._scaled_grouped_mm_v2.out(
+          a,
+          b,
+          [scale_a],
+          [rowwise],
+          [],
+          [scale_b],
+          [rowwise],
+          [],
+          offs=offs,
+          out_dtype=torch.bfloat16,
+          out=v2_out_buf,
+      )
+      self.assertTrue(torch.equal(v2_out_buf.cpu(), v1_out.cpu()))
+
   def test_optimization_barrier_meta_non_contiguous_eager(self):
     x = torch.empty((16, 2, 256, 256), device="meta")
     x1 = x[:, 0, :, :]

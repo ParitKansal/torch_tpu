@@ -29,8 +29,8 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import torch
 from torch._dynamo import testing as dynamo_testing
-from torch_tpu.examples.muse_glimmer_30b.llm_inference import kv_cache
-from torch_tpu.examples.muse_glimmer_30b.llm_inference import model as model_lib
+import kv_cache
+import model as model_lib
 
 _BATCH_SIZE = 1
 _NUM_KV_HEADS = 2

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from absl.testing import absltest
-from torch_tpu.examples.muse_glimmer_30b.llm_inference import runner_dynamic
+import runner_dynamic
 
 
 class SingleTpuInferenceDynamicTest(absltest.TestCase):

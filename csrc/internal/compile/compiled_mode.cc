@@ -54,6 +54,7 @@
 #include "csrc/common/utils.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/device_buffer_utils.h"
+#include "csrc/eager/events_queue.h"
 #include "csrc/eager/materialize.h"
 #include "csrc/eager/structured_log_buffer.h"
 #include "csrc/eager/tensor_to_buffer.h"
@@ -154,6 +155,13 @@ absl::StatusOr<std::vector<DeviceBufferRef>> PrepareCompiledModeArgumentsImpl(
         argument_buffer_refs, MaterializationReason::kCompileModeExecution,
         MaterializationMode::kSplitGraph,
         MaterializationBlockMode::kBlockUntilStarted));
+    for (size_t i = 0; i < argument_tensors.size(); ++i) {
+      const at::Tensor& argument_tensor = DerefTensor(argument_tensors[i]);
+      if (TensorHasTrivialLayout(argument_tensor)) {
+        MaybeCacheMaterializedFullStorageView(argument_tensor,
+                                              argument_buffer_refs[i]);
+      }
+    }
   }
 
   // After materialization, each argument buffer will be a materialized,
@@ -258,6 +266,69 @@ absl::StatusOr<std::vector<DeviceBufferRef>> PrepareCompiledModeArgumentsImpl(
         MaterializationBlockMode::kBlockUntilStarted));
   }
   return argument_buffer_refs;
+}
+
+Indices DeduplicateDonatedInputs(const Indices& donated_inputs,
+                                 const Indices& argument_indices,
+                                 bool has_duplicates) {
+  Indices unique_donated_inputs = donated_inputs;
+  if (!has_duplicates || donated_inputs.empty()) {
+    return unique_donated_inputs;
+  }
+  for (int64_t& donated_idx : unique_donated_inputs) {
+    if (donated_idx >= 0 &&
+        donated_idx < static_cast<int64_t>(argument_indices.size())) {
+      donated_idx = argument_indices[donated_idx];
+    }
+  }
+  std::sort(unique_donated_inputs.begin(), unique_donated_inputs.end());
+  unique_donated_inputs.erase(
+      std::unique(unique_donated_inputs.begin(), unique_donated_inputs.end()),
+      unique_donated_inputs.end());
+  return unique_donated_inputs;
+}
+
+bool IsFullBaseBufferView(const at::Tensor& tensor,
+                          const DeviceBufferRef& base_buffer) {
+  return tensor.storage_offset() == 0 && tensor.is_contiguous() &&
+         absl::c_equal(tensor.sizes(), base_buffer.dimensions());
+}
+
+absl::StatusOr<std::vector<CustomLayout>> MapArgumentLayoutsToBaseBuffers(
+    const std::vector<at::Tensor>& argument_tensors,
+    const std::vector<CustomLayout>& argument_layouts,
+    const Indices& argument_indices, absl::Span<const DeviceBufferRef> bases,
+    bool has_duplicates) {
+  if (!has_duplicates || argument_layouts.empty()) {
+    return argument_layouts;
+  }
+  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Checked by caller.
+      argument_layouts.size() == argument_tensors.size(),
+      error::kInvalidArgument)
+      << "expected one layout per argument, got " << argument_layouts.size()
+      << " layouts for " << argument_tensors.size() << " arguments";
+  std::vector<CustomLayout> base_argument_layouts(bases.size(), CustomLayout{});
+  Indices conflicting_bases;
+  for (size_t i = 0; i < argument_tensors.size(); ++i) {
+    const CustomLayout& layout = argument_layouts[i];
+    const int64_t base_idx = argument_indices[i];
+    if (layout.minor_to_major.empty() ||
+        !IsFullBaseBufferView(argument_tensors[i], bases[base_idx]) ||
+        absl::c_linear_search(conflicting_bases, base_idx)) {
+      continue;
+    }
+    CustomLayout& base_layout = base_argument_layouts[base_idx];
+    if (!base_layout.minor_to_major.empty() && !(base_layout == layout)) {
+      ABSL_LOG(WARNING) << "Ignoring conflicting layouts for arguments "
+                           "sharing base buffer "
+                        << base_idx;
+      base_layout = CustomLayout{};
+      conflicting_bases.push_back(base_idx);
+      continue;
+    }
+    base_layout = layout;
+  }
+  return base_argument_layouts;
 }
 
 }  // namespace
@@ -420,18 +491,8 @@ absl::StatusOr<AsyncCompileResult> TraverseAndCompile(
       << "failed to validate and reorder traversal inputs";
 
   // Re-map donated inputs to deduplicated unique base arguments.
-  Indices unique_donated_inputs = options.donated_inputs;
-  if (has_duplicates && !options.donated_inputs.empty()) {
-    for (int64_t& donated_idx : unique_donated_inputs) {
-      if (donated_idx >= 0 && donated_idx < argument_indices.size()) {
-        donated_idx = argument_indices[donated_idx];
-      }
-    }
-    std::sort(unique_donated_inputs.begin(), unique_donated_inputs.end());
-    unique_donated_inputs.erase(
-        std::unique(unique_donated_inputs.begin(), unique_donated_inputs.end()),
-        unique_donated_inputs.end());
-  }
+  Indices unique_donated_inputs = DeduplicateDonatedInputs(
+      options.donated_inputs, argument_indices, has_duplicates);
 
   // Map argument layouts onto the deduplicated base buffers. A base buffer
   // takes its layout from an argument that covers the whole buffer unchanged:
@@ -439,41 +500,11 @@ absl::StatusOr<AsyncCompileResult> TraverseAndCompile(
   // permuted views, such as slices and transposes, describe the view rather
   // than the base buffer, so they are ignored. If two such arguments request
   // different layouts, the base buffer gets no layout.
-  std::vector<CustomLayout> base_argument_layouts;
-  if (has_duplicates && !options.argument_layouts.empty()) {
-    TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Checked by caller.
-        options.argument_layouts.size() == argument_tensors.size(),
-        error::kInvalidArgument)
-        << "expected one layout per argument, got "
-        << options.argument_layouts.size() << " layouts for "
-        << argument_tensors.size() << " arguments";
-    absl::Span<const DeviceBufferRef> bases = traversal->arguments();
-    base_argument_layouts.assign(bases.size(), CustomLayout{});
-    Indices conflicting_bases;
-    for (int64_t i = 0; i < argument_tensors.size(); ++i) {
-      const at::Tensor& tensor = argument_tensors[i];
-      const CustomLayout& layout = options.argument_layouts[i];
-      const int64_t base_idx = argument_indices[i];
-      if (layout.minor_to_major.empty() || tensor.storage_offset() != 0 ||
-          !tensor.is_contiguous() ||
-          !absl::c_equal(tensor.sizes(), bases[base_idx].dimensions()) ||
-          absl::c_linear_search(conflicting_bases, base_idx)) {
-        continue;
-      }
-      CustomLayout& base_layout = base_argument_layouts[base_idx];
-      if (!base_layout.minor_to_major.empty() && !(base_layout == layout)) {
-        ABSL_LOG(WARNING) << "Ignoring conflicting layouts for arguments "
-                             "sharing base buffer "
-                          << base_idx;
-        base_layout = CustomLayout{};
-        conflicting_bases.push_back(base_idx);
-        continue;
-      }
-      base_layout = layout;
-    }
-  } else {
-    base_argument_layouts = options.argument_layouts;
-  }
+  TT_ASSIGN_OR_RETURN(
+      std::vector<CustomLayout> base_argument_layouts,
+      MapArgumentLayoutsToBaseBuffers(
+          argument_tensors, options.argument_layouts, argument_indices,
+          traversal->arguments(), has_duplicates));
 
   const CompilationSpec compilation_spec =
       GetCompilationSpec(options.compilation_mode);

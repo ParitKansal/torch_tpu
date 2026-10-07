@@ -1321,6 +1321,188 @@ def _sample_inputs_scaled_mm_v2(
   )
 
 
+def _ref_scaled_grouped_mm_v2(
+    self,
+    mat2,
+    scale_a,
+    scale_recipe_a,
+    swizzle_a,
+    scale_b,
+    scale_recipe_b,
+    swizzle_b,
+    offs=None,
+    bias=None,
+    out_dtype=None,
+):
+  """Float32 reference implementation for torch._scaled_grouped_mm_v2."""
+  del scale_recipe_a, swizzle_a, scale_recipe_b, swizzle_b
+  sa = scale_a[0].to(torch.float32)
+  sb = scale_b[0].to(torch.float32)
+  target_dtype = out_dtype if out_dtype is not None else torch.bfloat16
+
+  if offs is None:
+    g, m, _ = self.shape
+    _, _, n = mat2.shape
+    a_scaled = self.to(torch.float32) * sa.reshape(g, m, 1)
+    b_scaled = mat2.to(torch.float32) * sb.reshape(g, 1, n)
+    out_f32 = torch.bmm(a_scaled, b_scaled)
+  elif self.ndim == 2 and mat2.ndim == 3:
+    g, _, n = mat2.shape
+    sa_col = sa.reshape(-1, 1)
+    sb_rows = sb.reshape(g, 1, n)
+    chunks = []
+    start = 0
+    for idx, end in enumerate(offs.tolist()):
+      a_g = self[start:end].to(torch.float32) * sa_col[start:end]
+      b_g = mat2[idx].to(torch.float32) * sb_rows[idx]
+      chunks.append(torch.mm(a_g, b_g))
+      start = end
+    out_f32 = torch.cat(chunks, dim=0)
+  elif self.ndim == 3 and mat2.ndim == 2:
+    g, m, _ = self.shape
+    sa_cols = sa.reshape(g, m, 1)
+    sb_row = sb.reshape(1, -1)
+    chunks = []
+    start = 0
+    for idx, end in enumerate(offs.tolist()):
+      a_g = self[idx].to(torch.float32) * sa_cols[idx]
+      b_g = mat2[:, start:end].to(torch.float32) * sb_row[:, start:end]
+      chunks.append(torch.mm(a_g, b_g))
+      start = end
+    out_f32 = torch.cat(chunks, dim=1)
+  else:
+    g = offs.numel()
+    m = self.shape[0]
+    n = mat2.shape[1]
+    sa_2d = sa.reshape(g, m)
+    sb_2d = sb.reshape(g, n)
+    chunks = []
+    start = 0
+    for idx, end in enumerate(offs.tolist()):
+      a_g = self[:, start:end].to(torch.float32) * sa_2d[idx].unsqueeze(1)
+      b_g = mat2[start:end, :].to(torch.float32) * sb_2d[idx].unsqueeze(0)
+      chunks.append(torch.mm(a_g, b_g))
+      start = end
+    out_f32 = torch.stack(chunks, dim=0)
+
+  if bias is not None:
+    out_f32 = out_f32 + bias.to(torch.float32)
+  return out_f32.to(target_dtype)
+
+
+def _sample_inputs_scaled_grouped_mm_v2(
+    op_info, device, dtype, requires_grad=False, **kwargs
+):
+  """Generates sample inputs for torch._scaled_grouped_mm_v2."""
+  del op_info, requires_grad, kwargs
+  make_mat_row_major = (
+      lambda shape: torch.randn(*shape, dtype=torch.float32)
+      .to(dtype)
+      .to(device)
+  )
+  make_mat_col_major = (
+      lambda shape: torch.randn(*shape, dtype=torch.float32)
+      .to(dtype)
+      .to(device)
+      .transpose(-2, -1)
+      .contiguous()
+      .transpose(-2, -1)
+  )
+  make_scale = lambda shape: (
+      torch.randn(*shape, dtype=torch.float32).abs() + 0.1
+  ).to(device)
+
+  # 1. 2D x 3D (ragged M) with RowWise scaling (recipe=1, swizzle=0)
+  yield core.SampleInput(
+      make_mat_row_major((48, 32)),
+      make_mat_col_major((2, 32, 64)),
+      args=(
+          [make_scale((48,))],
+          [1],
+          [0],
+          [make_scale((2, 64))],
+          [1],
+          [0],
+      ),
+      kwargs={
+          "offs": torch.tensor([16, 48], dtype=torch.int32, device=device),
+          "out_dtype": torch.bfloat16,
+      },
+  )
+
+  # 2. 2D x 3D (ragged M) with zero-sized group and default out_dtype (None)
+  yield core.SampleInput(
+      make_mat_row_major((48, 32)),
+      make_mat_col_major((3, 32, 64)),
+      args=(
+          [make_scale((48,))],
+          [1],
+          [0],
+          [make_scale((3, 64))],
+          [1],
+          [0],
+      ),
+      kwargs={
+          "offs": torch.tensor([16, 16, 48], dtype=torch.int32, device=device),
+          "out_dtype": None,
+      },
+  )
+
+  # 3. 3D x 3D (batched, offs=None) with RowWise scaling
+  yield core.SampleInput(
+      make_mat_row_major((2, 32, 32)),
+      make_mat_col_major((2, 32, 64)),
+      args=(
+          [make_scale((2, 32))],
+          [1],
+          [0],
+          [make_scale((2, 64))],
+          [1],
+          [0],
+      ),
+      kwargs={
+          "offs": None,
+          "out_dtype": torch.bfloat16,
+      },
+  )
+
+  # 4. 2D x 2D (ragged K) with RowWise scaling
+  yield core.SampleInput(
+      make_mat_row_major((32, 48)),
+      make_mat_col_major((48, 64)),
+      args=(
+          [make_scale((2, 32))],
+          [1],
+          [0],
+          [make_scale((2, 64))],
+          [1],
+          [0],
+      ),
+      kwargs={
+          "offs": torch.tensor([16, 48], dtype=torch.int32, device=device),
+          "out_dtype": torch.bfloat16,
+      },
+  )
+
+  # 5. 3D x 2D (ragged N) with RowWise scaling
+  yield core.SampleInput(
+      make_mat_row_major((2, 32, 32)),
+      make_mat_col_major((32, 48)),
+      args=(
+          [make_scale((2, 32))],
+          [1],
+          [0],
+          [make_scale((48,))],
+          [1],
+          [0],
+      ),
+      kwargs={
+          "offs": torch.tensor([16, 48], dtype=torch.int32, device=device),
+          "out_dtype": torch.bfloat16,
+      },
+  )
+
+
 # The in_features (K) of the Llama3-8B linear layers, whose (in_features,
 # out_features) are wq/wo (4096, 4096), wk/wv (4096, 1024), w1/w3 (4096, 14336)
 # and w2 (14336, 4096).
@@ -2658,6 +2840,17 @@ _ADDITIONAL_TORCH_TPU_OPS: Final[Sequence[OpInfo]] = [
         supports_autograd=False,
     ),
     OpInfo(
+        "torch._scaled_grouped_mm_v2",
+        op=torch._scaled_grouped_mm_v2,  # pylint: disable=protected-access
+        ref=_ref_scaled_grouped_mm_v2,
+        # Input matrices for _scaled_grouped_mm_v2 are quantized FP8 tensors.
+        dtypes=common_methods_invocations.float8_types(),
+        sample_inputs_func=_sample_inputs_scaled_grouped_mm_v2,
+        supports_out=True,
+        # Quantized primitive without autograd formula.
+        supports_autograd=False,
+    ),
+    OpInfo(
         "torch._scaled_mm_v2",
         op=torch._scaled_mm_v2,  # pylint: disable=protected-access
         ref=_ref_scaled_mm_v2,
@@ -2900,6 +3093,7 @@ for _op_info in _ADDITIONAL_TORCH_TPU_OPS:
   if _op_info.name in (
       "_thnn_fused_lstm_cell",
       "_thnn_fused_gru_cell",
+      "torch._scaled_grouped_mm_v2",
       "torch._scaled_mm_v2",
   ):
     _op_info.use_ref_for_cpu_golden = True

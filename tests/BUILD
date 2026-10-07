@@ -1248,6 +1248,7 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//shims/torch:testing_internal",
         "//src/torch_tpu",
+        "//src/torch_tpu/_internal/compile:compiler",
         "//src/torch_tpu/_internal/compile:tpu_torch_compile",
         "//src/torch_tpu/_internal/dynamism",
         "//src/torch_tpu/_internal/execution_mode",
@@ -1405,6 +1406,7 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//shims/torch:testing_internal",
         "//src/torch_tpu",
+        "//src/torch_tpu/_internal/compile:compiler",
         "//src/torch_tpu/_internal/compile:tpu_torch_compile",
         "//src/torch_tpu/_internal/dynamism",
         "//src/torch_tpu/_internal/execution_mode",
@@ -1445,6 +1447,7 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//shims/torch:testing_internal",
         "//src/torch_tpu",
+        "//src/torch_tpu/_internal/compile:compiler",
         "//src/torch_tpu/_internal/compile:tpu_torch_compile",
         "//src/torch_tpu/_internal/dynamism",
         "//src/torch_tpu/_internal/execution_mode",
@@ -1716,6 +1719,7 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/pallas",
         "//src/torch_tpu/_internal/pallas:tpu_torch_pallas",  # build_cleaner: keep
         "//src/torch_tpu/_internal/utils:hardware",
+        "//src/torch_tpu/_internal/utils:test_utils",
         "//tests/distributed:distributed_utils",
     ],
 )
@@ -1787,6 +1791,7 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/pallas",
         "//src/torch_tpu/_internal/pallas:tpu_torch_pallas",  # build_cleaner: keep
         "//src/torch_tpu/_internal/utils:hardware",
+        "//src/torch_tpu/_internal/utils:test_utils",
         "//tests/distributed:distributed_utils",
     ],
 )

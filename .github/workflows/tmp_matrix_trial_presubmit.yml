@@ -59,9 +59,9 @@ jobs:
     outputs:
       matrix: ${{ steps.generate.outputs.matrix }}
     env:
-      TPU_GENERATIONS: v5,v6,v7
-      PYTHON_VERSIONS: 3.11,3.14
-      TORCH_VERSIONS: 2.12.1,2.13.0
+      TPU_GENERATIONS: v6
+      PYTHON_VERSIONS: 3.14
+      TORCH_VERSIONS: 2.13.0
       DEP_RESOLUTIONS: oldest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -125,16 +125,17 @@ jobs:
             --output-file "requirements/requirements_${PYTHON_VERSION//./_}.txt"
           grep -E '^(torch|torchvision|numpy)==' "requirements/requirements_${PYTHON_VERSION//./_}.txt"
       # full: every TPU Python test that can run on this generation, listed
-      # explicitly so the `manual` nightly-only tests are included, minus the
-      # upstream PyTorch suites, which need extra checkouts and are not part
-      # of the wheel test path. presubmit: the wheel_test_tpu_v* config on
-      # //..., as presubmit runs it.
+      # explicitly so the `manual` nightly-only tests are included, minus what
+      # no suite on main runs: the upstream PyTorch suites (wheel_test_excluded;
+      # they need extra checkouts) and manual+nonightly targets, which
+      # presubmit, postsubmit, and nightly all skip. presubmit: the
+      # wheel_test_tpu_v* config on //..., as presubmit runs it.
       - name: Run TPU Python tests against the staged wheel
         run: |
           case "${TEST_SUITE}" in
             full)
               BAZEL_CONFIG="ci_tpu_${TPU_GENERATION}"
-              TARGETS=$(bazel query 'kind("py_test", tests(//...)) except attr("tags", "wheel_test_excluded", tests(//...))' | tr '\n' ' ')
+              TARGETS=$(bazel query 'kind("py_test", tests(//...)) except (attr("tags", "wheel_test_excluded", tests(//...)) union (attr("tags", "manual", tests(//...)) intersect attr("tags", "nonightly", tests(//...))))' | tr '\n' ' ')
               ;;
             presubmit)
               BAZEL_CONFIG="wheel_test_tpu_${TPU_GENERATION}"
@@ -148,6 +149,9 @@ jobs:
           if [[ -n "${TEST_TARGETS}" ]]; then
             TARGETS="${TEST_TARGETS}"
           fi
+          # Exit code 4 means the config's --test_tag_filters left nothing to
+          # run, such as the presubmit suite on v6e; the cell then passes with
+          # a notice instead of failing.
           # shellcheck disable=SC2086
           bazel test \
             --config="${BAZEL_CONFIG}" \
@@ -158,7 +162,11 @@ jobs:
             --test_lang_filters=py \
             --test_timeout=-1,-1,-1,4800 \
             --run_under="$(pwd)/ci/tools/parallel_accelerator_execute.sh" \
-            ${TARGETS}
+            ${TARGETS} || {
+              status=$?
+              [[ ${status} -eq 4 ]] || exit "${status}"
+              echo "::notice::No ${TEST_SUITE} tests to run on TPU ${TPU_GENERATION}; this cell ran nothing."
+            }
       - name: Upload test logs on failure
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: failure()

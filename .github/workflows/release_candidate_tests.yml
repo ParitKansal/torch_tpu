@@ -27,7 +27,8 @@
 #                      every target runs on exactly one of them. The C++ TPU
 #                      tests in a slice are built from source_sha on the same
 #                      runner, as presubmit does.
-#   upstream_pytorch   Upstream PyTorch device-generic tests on v5e.
+#   upstream_pytorch   Upstream PyTorch device-generic tests on v5e, with the
+#                      lock regenerated around torch 2.13.0.
 #   upstream_examples  Upstream PyTorch examples on v7x.
 #
 # From source_sha:
@@ -37,10 +38,11 @@
 #   lint               License headers, directory layout, actionlint, CI tool
 #                      unit tests.
 #
-# The Bazel jobs use the checked-in lock (lowest-direct resolution, default
-# PyTorch) and Python 3.14 on TPU. release_wheel_full_matrix_tests.yml is the
-# manual deep run of the TPU suite over every Python, released PyTorch,
-# dependency resolution, and TPU generation.
+# Unless noted above, the Bazel jobs use the checked-in lock (lowest-direct
+# resolution, default PyTorch) and Python 3.14 on TPU.
+# release_wheel_full_matrix_tests.yml is the manual deep run of the TPU suite
+# over every Python, released PyTorch, dependency resolution, and TPU
+# generation.
 name: Release Candidate Tests
 # The Kokoro trigger job finds its run by this title.
 run-name: RC tests ${{ inputs.request_id }}
@@ -237,28 +239,26 @@ jobs:
       # Every OSS TPU test carries exactly one presubmit-v{N} tag naming the
       # generation it runs on in presubmit (build_defs.bzl,
       # oss_presubmit_tpu_generation), so the slices below are disjoint by
-      # construction, with two adjustments:
-      # - requires-tpu-v6e tests tagged presubmit-v5 cannot run on v5e and
-      #   move to the v6e slice, where nightly_tpu.yml runs them today.
-      # - wheel_test_excluded targets are the upstream PyTorch tests and
-      #   examples, which need extra checkouts and run in the upstream_* jobs.
+      # construction, with one adjustment: requires-tpu-v6e tests tagged
+      # presubmit-v5 cannot run on v5e and move to the v6e slice, where
+      # nightly_tpu.yml runs them today. The split step then drops what no
+      # suite on main runs (see SKIPPED_QUERY there).
       # The nightly-only TPU tests are `manual`, so `bazel test //...` would
       # skip them; listing the query result explicitly runs them.
-      # To see what a slice runs: bazel query '<target_query>'.
       matrix:
         job_info:
           - name: "TPU v5e"
             runner: "linux-x86-ct5lp-224-8tpu"
             bazel_config: "ci_tpu_v5"
-            target_query: 'attr("tags", "presubmit-v5", tests(//...)) except attr("tags", "requires-tpu-v6e|wheel_test_excluded", tests(//...))'
+            target_query: 'attr("tags", "presubmit-v5", tests(//...)) except attr("tags", "requires-tpu-v6e", tests(//...))'
           - name: "TPU v6e"
             runner: "linux-x86-ct6e-180-8tpu"
             bazel_config: "ci_tpu_v6"
-            target_query: 'attr("tags", "presubmit-v6|requires-tpu-v6e", tests(//...)) except attr("tags", "wheel_test_excluded", tests(//...))'
+            target_query: 'attr("tags", "presubmit-v6|requires-tpu-v6e", tests(//...))'
           - name: "TPU v7x"
             runner: "linux-x86-tpu7x-224-4tpu"
             bazel_config: "ci_tpu_v7"
-            target_query: 'attr("tags", "presubmit-v7", tests(//...)) except attr("tags", "wheel_test_excluded", tests(//...))'
+            target_query: 'attr("tags", "presubmit-v7", tests(//...))'
     runs-on: ${{ matrix.job_info.runner }}
     timeout-minutes: 180
     container:
@@ -270,6 +270,12 @@ jobs:
       PYTHON_VERSION: "3.14"
       BAZEL_CONFIG: ${{ matrix.job_info.bazel_config }}
       TARGET_QUERY: ${{ matrix.job_info.target_query }}
+      # Targets no suite on main runs. wheel_test_excluded marks the upstream
+      # PyTorch tests and examples, which need extra checkouts and run in the
+      # upstream_* jobs. manual (nopresubmit or nolocal) plus nonightly means
+      # presubmit, postsubmit, and nightly all skip the target; running such a
+      # test here for the first time is not what a release gate is for.
+      SKIPPED_QUERY: 'attr("tags", "wheel_test_excluded", tests(//...)) union (attr("tags", "manual", tests(//...)) intersect attr("tags", "nonightly", tests(//...)))'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -288,7 +294,7 @@ jobs:
       # never builds the C++ tests in.
       - name: Split the slice into Python and C++ test targets
         run: |
-          bazel query "${TARGET_QUERY}" --output=label_kind > slice_targets.txt
+          bazel query "(${TARGET_QUERY}) except (${SKIPPED_QUERY})" --output=label_kind > slice_targets.txt
           {
             echo "PY_TARGETS=$(awk '$1 == "py_test" {print $3}' slice_targets.txt | tr '\n' ' ')"
             echo "CC_TARGETS=$(awk '$1 != "py_test" {print $3}' slice_targets.txt | tr '\n' ' ')"
@@ -383,9 +389,12 @@ jobs:
     env:
       GCS_WHEEL_DIR: ${{ inputs.gcs_wheel_dir }}
       PYTHON_VERSION: "3.14"
-      # The device-generic test runner needs torch 2.13+, so this installs
-      # the same torch and test suite revision upstream_tests.yaml uses by
-      # default instead of the checked-in lock's torch.
+      # The device-generic test runner needs torch 2.13+, so this job runs
+      # against the torch and test suite revision upstream_tests.yaml uses by
+      # default. It re-locks the environment around that torch instead of
+      # using --config=local_torch: the wheel test environment carries the
+      # lock's torchvision, which only loads against the torch it was built
+      # for.
       TORCH_VERSION: "2.13.0"
     steps:
       - name: Checkout TorchTPU
@@ -405,22 +414,23 @@ jobs:
         with:
           gcs_wheel_dir: ${{ env.GCS_WHEEL_DIR }}
           python_version: ${{ env.PYTHON_VERSION }}
-      - name: Download PyTorch wheel
+      # Same flags as requirements/lock_environments.sh, with torch pinned.
+      - name: Lock dependencies around torch ${{ env.TORCH_VERSION }}
         run: |
-          mkdir -p dist/local
-          pip download --no-deps "torch==${TORCH_VERSION}+cpu" \
-            --index-url https://download.pytorch.org/whl/cpu -d dist/local \
-            --python-version "${PYTHON_VERSION}" --only-binary=:all:
-          set -- "$PWD/dist/local/torch-"*.whl
-          echo "TORCH_SOURCE=$1" >> "$GITHUB_ENV"
+          uv pip compile pyproject.toml \
+            --all-extras \
+            --python-version "${PYTHON_VERSION}" \
+            --python-platform x86_64-manylinux_2_31 \
+            --resolution lowest-direct \
+            --constraint <(echo "torch==${TORCH_VERSION}") \
+            --generate-hashes \
+            --output-file "requirements/requirements_${PYTHON_VERSION//./_}.txt"
       - name: Run upstream PyTorch tests against staged wheel
         run: |
           UPSTREAM_TARGETS=$(bazel query 'kind("py_test", //tests/torch:all)' | tr '\n' ' ')
           # shellcheck disable=SC2086
           bazel test \
             --config=ci_tpu_v5 \
-            --config=local_torch \
-            --repo_env=TORCH_SOURCE="$TORCH_SOURCE" \
             --test_wheel=true \
             --//:wheel_build=True \
             --define PYTHON_VERSION="${PYTHON_VERSION}" \

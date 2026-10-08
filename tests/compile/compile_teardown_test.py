@@ -19,6 +19,7 @@ import resource
 import subprocess
 import sys
 from absl.testing import absltest
+from tests import seed_test_utils
 
 
 def _worker():
@@ -47,7 +48,7 @@ def _worker():
   )
 
 
-class CompileTeardownTest(absltest.TestCase):
+class CompileTeardownTest(seed_test_utils.RepeatableTest):
 
   def test_clean_interpreter_teardown(self):
     env = dict(os.environ)

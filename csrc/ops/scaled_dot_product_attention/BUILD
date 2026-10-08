@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("//build_files:build_defs.bzl", "torch_tpu_cc_library", "torch_tpu_package_end")
+load(
+    "//build_files:build_defs.bzl",
+    "torch_tpu_cc_library",
+    "torch_tpu_cc_test",
+    "torch_tpu_package_end",
+)
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -236,6 +241,7 @@ torch_tpu_cc_library(
     srcs = ["flash_attention_kernel_builder.cc"],
     hdrs = ["flash_attention_kernel_builder.h"],
     deps = [
+        ":flash_attention_backward_kernel",
         ":flash_attention_config",
         ":flash_attention_kernel",
         ":helpers",
@@ -286,6 +292,19 @@ torch_tpu_cc_library(
         "@stablehlo//stablehlo/integrations/cpp/builder:mlir_builder",
         "@stablehlo//stablehlo/integrations/cpp/builder:stablehlo_builder",
         "@xla//xla/mosaic:tpu_dialect",
+    ],
+)
+
+torch_tpu_cc_test(
+    name = "scaled_dot_product_attention_aten_kernels_test",
+    srcs = ["scaled_dot_product_attention_aten_kernels_test.cc"],
+    requires_libtpu = True,
+    deps = [
+        ":scaled_dot_product_attention_aten_kernels",
+        "//csrc/common:oss_test_main",
+        "//shims/torch:aten_headers",
+        "//shims/torch:torch_headers",
+        "//shims/torch/c10/core:base_headers",
     ],
 )
 

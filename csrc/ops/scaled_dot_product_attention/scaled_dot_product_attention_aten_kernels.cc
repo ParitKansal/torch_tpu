@@ -106,6 +106,34 @@ bool IsSupportedFlashAttentionShape(
   return has_batch && valid_head_dim;
 }
 
+bool ShouldPreferOverrideableForForwardInference(
+    int64_t batch_size, int64_t num_head_q, int64_t q_seq_len,
+    int64_t kv_seq_len, int64_t head_dim, bool has_2d_or_causal_mask) {
+  const bool is_power_of_two_head_dim =
+      head_dim > 0 && (head_dim & (head_dim - 1)) == 0;
+  const bool is_unaligned_seq =
+      (q_seq_len % 256 != 0) || (kv_seq_len % 256 != 0);
+  if (is_power_of_two_head_dim && q_seq_len <= 256 && kv_seq_len <= 256) {
+    return true;
+  }
+  if (is_power_of_two_head_dim && is_unaligned_seq && q_seq_len <= 3584 &&
+      kv_seq_len <= 3584) {
+    return true;
+  }
+  if (!has_2d_or_causal_mask) {
+    return false;
+  }
+  if (head_dim < 128 && !is_power_of_two_head_dim && q_seq_len <= 8192 &&
+      kv_seq_len <= 8192) {
+    return true;
+  }
+  return is_power_of_two_head_dim &&
+         (num_head_q >= 24 ||
+          (head_dim >= 256 && batch_size * num_head_q >= 8)) &&
+         q_seq_len == kv_seq_len && q_seq_len >= 1024 && q_seq_len <= 8192 &&
+         q_seq_len % 128 == 0;
+}
+
 bool ShouldPreferOverrideableSdp(const at::Tensor& query, const at::Tensor& key,
                                  const at::Tensor& value,
                                  const std::optional<at::Tensor>& attn_mask,
@@ -118,6 +146,7 @@ bool ShouldPreferOverrideableSdp(const at::Tensor& query, const at::Tensor& key,
       (attn_mask.has_value() && HasDynamicShape(*attn_mask))) {
     return false;
   }
+  const int64_t batch_size = get_batch_size(query.sizes());
   const int64_t num_head_q = query.size(query.ndimension() - 3);
   const int64_t q_seq_len = query.size(query.ndimension() - 2);
   const int64_t kv_seq_len = key.size(key.ndimension() - 2);
@@ -126,22 +155,22 @@ bool ShouldPreferOverrideableSdp(const at::Tensor& query, const at::Tensor& key,
   if (q_seq_len <= 0 || kv_seq_len <= 0 || v_seq_len <= 0) {
     return false;
   }
+  if (q_seq_len <= 128 && kv_seq_len <= 8192) {
+    return true;
+  }
   const bool requires_grad =
       c10::GradMode::is_enabled() &&
       (query.requires_grad() || key.requires_grad() || value.requires_grad());
-  const bool is_power_of_two_head_dim =
-      head_dim > 0 && (head_dim & (head_dim - 1)) == 0;
+  if (requires_grad) {
+    return false;
+  }
   const bool has_2d_or_causal_mask =
       is_causal || (attn_mask.has_value() && attn_mask->defined() &&
                     attn_mask->ndimension() >= 2 &&
-                    attn_mask->size(attn_mask->ndimension() - 2) == q_seq_len &&
-                    attn_mask->size(attn_mask->ndimension() - 1) == kv_seq_len);
-  return (q_seq_len <= 128 && kv_seq_len <= 8192) ||
-         (is_power_of_two_head_dim && !requires_grad && q_seq_len <= 256 &&
-          kv_seq_len <= 256) ||
-         (has_2d_or_causal_mask && is_power_of_two_head_dim && !requires_grad &&
-          num_head_q >= 24 && q_seq_len == kv_seq_len && q_seq_len >= 1024 &&
-          q_seq_len <= 8192 && q_seq_len % 128 == 0);
+                    attn_mask->size(attn_mask->ndimension() - 2) == q_seq_len);
+  return ShouldPreferOverrideableForForwardInference(
+      batch_size, num_head_q, q_seq_len, kv_seq_len, head_dim,
+      has_2d_or_causal_mask);
 }
 
 }  // namespace
@@ -177,21 +206,21 @@ int64_t AtenFusedSdpChoice(const at::Tensor& query, const at::Tensor& key,
        IgnoreInCacheKey(enable_gqa, "Unused")),
       {
         const auto& ctx = at::globalContext();
-        bool flash_enabled = ctx.userEnabledFlashSDP();
-        bool math_enabled = ctx.userEnabledMathSDP();
-        bool overrideable_enabled = ctx.userEnabledOverrideableSDP();
+        const bool flash_enabled = ctx.userEnabledFlashSDP();
+        const bool math_enabled = ctx.userEnabledMathSDP();
+        const bool overrideable_enabled = ctx.userEnabledOverrideableSDP();
 
-        bool consistent_ranks = query.ndimension() == key.ndimension() &&
-                                query.ndimension() == value.ndimension();
-        bool has_batch = query.ndimension() >= 4;
-        bool has_dropout = dropout_p != 0.0;
-        bool valid_flash_dropout = dropout_p >= 0.0 && dropout_p < 1.0;
-        bool mask_requires_grad =
+        const bool consistent_ranks = query.ndimension() == key.ndimension() &&
+                                      query.ndimension() == value.ndimension();
+        const bool has_batch = query.ndimension() >= 4;
+        const bool has_dropout = dropout_p != 0.0;
+        const bool valid_flash_dropout = dropout_p >= 0.0 && dropout_p < 1.0;
+        const bool mask_requires_grad =
             c10::GradMode::is_enabled() && attn_mask.has_value() &&
             attn_mask->defined() && attn_mask->requires_grad();
 
         if (flash_enabled) {
-          bool supported_flash_dtype =
+          const bool supported_flash_dtype =
               (query.scalar_type() == at::ScalarType::Float ||
                query.scalar_type() == at::ScalarType::BFloat16);
           if (supported_flash_dtype &&
@@ -239,7 +268,8 @@ int64_t AtenFusedSdpChoice(const at::Tensor& query, const at::Tensor& key,
         // We treat the SHLO implementation as an optimized version of MATH so
         // also try it when it is enabled.
         if (math_enabled || overrideable_enabled) {
-          bool is_floating_type = c10::isFloatingType(query.scalar_type());
+          const bool is_floating_type =
+              c10::isFloatingType(query.scalar_type());
           if (consistent_ranks && has_batch && !has_dropout &&
               is_floating_type && !mask_requires_grad) {
             return static_cast<int64_t>(at::SDPBackend::overrideable);

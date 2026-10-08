@@ -202,7 +202,8 @@ bool CanUseXlaOnlineSoftmaxForward(mlir::MlirOp query, mlir::MlirOp key,
   if (!has_mask_or_causal) {
     return false;
   }
-  constexpr int64_t kMinMaskedOnlineSoftmaxSeqLen = 2048;
+  constexpr int64_t kMinNonPotMaskedSeqLen = 512;
+  constexpr int64_t kMinPotMaskedSeqLen = 2048;
   constexpr int64_t kMaxOnlineSoftmaxSeqLen = 8192;
   constexpr int64_t kMinMaskedOnlineSoftmaxHeadDim = 64;
 
@@ -214,12 +215,13 @@ bool CanUseXlaOnlineSoftmaxForward(mlir::MlirOp query, mlir::MlirOp key,
   const int64_t seq_len_kv = key_shape[key_rank - 2];
   const int64_t head_dim = query_shape[query_rank - 1];
   const bool is_power_of_two_head_dim =
-      head_dim >= kMinMaskedOnlineSoftmaxHeadDim &&
-      (head_dim & (head_dim - 1)) == 0;
-
-  return is_power_of_two_head_dim &&
-         seq_len_q >= kMinMaskedOnlineSoftmaxSeqLen &&
-         seq_len_kv >= kMinMaskedOnlineSoftmaxSeqLen &&
+      head_dim > 0 && (head_dim & (head_dim - 1)) == 0;
+  const int64_t min_seq_len =
+      is_power_of_two_head_dim ? kMinPotMaskedSeqLen : kMinNonPotMaskedSeqLen;
+  if (is_power_of_two_head_dim && head_dim < kMinMaskedOnlineSoftmaxHeadDim) {
+    return false;
+  }
+  return seq_len_q >= min_seq_len && seq_len_kv >= min_seq_len &&
          seq_len_q <= kMaxOnlineSoftmaxSeqLen &&
          seq_len_kv <= kMaxOnlineSoftmaxSeqLen;
 }
@@ -231,6 +233,7 @@ mlir::MlirOp ConvertElementTypeIfNeeded(mlir::MlirOp op,
   }
   return op;
 }
+
 absl::StatusOr<AttentionPrepResults> PrepareAttentionLogits(
     mlir::MlirBuilder& builder, mlir::MLIRContext* context, mlir::MlirOp query,
     mlir::MlirOp key, mlir::MlirOp value, std::optional<mlir::MlirOp> mask,
@@ -549,9 +552,10 @@ absl::StatusOr<MlirOpResults<2>> BuildScaledDotProductFusedAttentionShloOp(
   mlir::MlirOp exp_val = mlir::stablehlo::Exp(logits);
   mlir::MlirOp sum_exp = SumReduce(builder, exp_val, /*dimension=*/3);
   mlir::MlirOp softmax;
+  const bool has_mask_or_causal = is_causal || mask_mlir.has_value();
   if (IsSdpaSequenceAlignedAndLarge(query_mlir, key_mlir) &&
       !CanUseXlaOnlineSoftmaxForward(query_mlir, key_mlir,
-                                     is_causal || mask_mlir.has_value())) {
+                                     has_mask_or_causal)) {
     auto one = MakeConstantLike(sum_exp, 1.0);
     mlir::MlirOp inv_sum_exp = mlir::stablehlo::Div(one, sum_exp);
     TT_ASSIGN_OR_RETURN(mlir::MlirOp inv_sum_exp_broadcasted,

@@ -224,6 +224,43 @@ def _is_getitem_of_collective(node: torch.fx.Node) -> bool:
   return False
 
 
+def _collect_namedtuple_types(arg: Any, seen: dict[type[Any], None]) -> None:
+  """Recursively collects namedtuple types from an FX node argument."""
+  if isinstance(arg, tuple) and hasattr(arg, "_fields"):
+    seen.setdefault(type(arg), None)
+    for elem in arg:
+      _collect_namedtuple_types(elem, seen)
+  elif isinstance(arg, (tuple, list)):
+    for elem in arg:
+      _collect_namedtuple_types(elem, seen)
+  elif isinstance(arg, dict):
+    for elem in arg.values():
+      _collect_namedtuple_types(elem, seen)
+
+
+def _register_output_namedtuple_globals(gm: torch.fx.GraphModule) -> None:
+  """Registers namedtuple output types in the FX graph's codegen globals.
+
+  In PyTorch < 2.12, `torch.fx.graph.CodeGen.generate_output` formats
+  namedtuple outputs using `repr(output_args)` (e.g.
+  `return Single(sum=submod_0)`) without registering the namedtuple class in
+  `PythonCode.globals`, which raises a `NameError` at runtime when the
+  namedtuple class is not in global scope.
+  """
+  namedtuple_types: dict[type[Any], None] = {}
+  for node in gm.graph.find_nodes(op="output"):
+    _collect_namedtuple_types(node.args, namedtuple_types)
+  if not namedtuple_types:
+    return
+
+  codegen = gm.graph._codegen  # pylint: disable=protected-access
+  orig_additional_globals = codegen.additional_globals
+  extra_globals = [(cls.__name__, cls) for cls in namedtuple_types]
+  codegen.additional_globals = (
+      lambda: list(orig_additional_globals()) + extra_globals
+  )
+
+
 class _WrapperModule(torch.nn.Module):
   """Wrapper module for compiled submodules."""
 
@@ -585,6 +622,7 @@ class SplitCompiler(compiler.Compiler):
         graph_module, "clone_mutated_returned_placeholders"
     ).apply_graph_pass(clone_mutated_returned_placeholders.apply)
     graph_module.graph.lint()
+    _register_output_namedtuple_globals(graph_module)
     graph_module.recompile()
 
     partition_id = 0
@@ -668,6 +706,7 @@ class SplitCompiler(compiler.Compiler):
         None,  # type: ignore[arg-type]
         lambda node: partition_map[node],
     )
+    _register_output_namedtuple_globals(split_gm)
     graph_transform_observer.GraphTransformObserver(
         split_gm, "sink_get_attr_constants"
     ).apply_gm_pass(sink_get_attr_constants.apply)

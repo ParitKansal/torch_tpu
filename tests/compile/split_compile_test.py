@@ -258,6 +258,33 @@ class SplitCompileHermeticTest(seed_test_utils.RepeatableTest):
     self.assertEqual(compiled_child.meta["compiler_annotation"], (1, 3))
     self.assertIsNot(compiled_child.meta, child.meta)
 
+  def test_register_output_namedtuple_globals_without_codegen_repr_fn(self):
+    out_type = collections.namedtuple("LocalPair", ["sum", "diff"])
+    graph = torch.fx.Graph()
+    px = graph.placeholder("x")
+    py_node = graph.placeholder("y")
+    sum_node = graph.call_function(torch.ops.aten.add.Tensor, (px, py_node))
+    diff_node = graph.call_function(torch.ops.aten.sub.Tensor, (px, py_node))
+    graph.output(out_type(sum_node, diff_node))
+    gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    # Simulate PyTorch 2.11's CodeGen.generate_output, which formats output_args
+    # via repr() without registering namedtuple classes through repr_fn.
+    with unittest.mock.patch.object(
+        gm.graph._codegen,
+        "generate_output",
+        side_effect=lambda output_args, *, descs=None: f"return {repr(output_args)}",
+    ):
+      split_compiler._register_output_namedtuple_globals(gm)
+      gm.recompile()
+
+    x = torch.tensor([3.0, 5.0])
+    y = torch.tensor([1.0, 2.0])
+    out = gm(x, y)
+    self.assertIs(type(out), out_type)
+    utils.assert_close(out.sum, x + y)
+    utils.assert_close(out.diff, x - y)
+
 
 if __name__ == "__main__":
   absltest.main()

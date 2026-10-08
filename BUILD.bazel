@@ -303,6 +303,12 @@ _WHEEL_SELECT = {
 
 _WHEEL_SELECT["//conditions:default"] = "//ci/wheel:torch_tpu_wheel"
 
+alias(
+    name = "selected_wheel",
+    actual = select(_WHEEL_SELECT),
+    visibility = ["//visibility:public"],
+)
+
 py_import(
     name = "torch_tpu_py_import",
     testonly = True,

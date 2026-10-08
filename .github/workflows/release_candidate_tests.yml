@@ -12,9 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Tests the plain X.Y.Z wheels the Louhi RC flow staged to GCS, which are the
-# exact files the publish flow uploads to PyPI. Every job installs the staged
-# wheel into a clean virtualenv via nox instead of running under Bazel.
+# Release gate for the X.Y.Z wheels the Louhi RC flow staged to GCS, which are
+# the exact files the publish flow uploads to PyPI. A release branch gets no
+# postsubmit, nightly, or lint run of its own, so this workflow runs every
+# test those suites run on main, each test exactly once.
+#
+# Against the staged wheel:
+#   smoke_tpu          nox installs the wheel with every released PyTorch and
+#                      runs the smoke suite, for every Python, on v5e/v6e/v7x.
+#   compat_cpu         CUDA coexistence, dependency upper bounds, twine check.
+#   wheel_cpu          Bazel CPU Python tests and wheel structure checks, for
+#                      every Python.
+#   wheel_tpu          Bazel TPU Python tests, one slice per TPU generation so
+#                      every target runs on exactly one of them. The C++ TPU
+#                      tests in a slice are built from source_sha on the same
+#                      runner, as presubmit does.
+#   upstream_pytorch   Upstream PyTorch device-generic tests on v5e.
+#   upstream_examples  Upstream PyTorch examples on v7x.
+#
+# From source_sha:
+#   source_cpu         C++, shell, Starlark, build, and wheel-excluded CPU
+#                      tests against the highest resolvable dependencies.
+#   tsan               C++ and Python tests under ThreadSanitizer.
+#   lint               License headers, directory layout, actionlint, CI tool
+#                      unit tests.
+#
+# The Bazel jobs use the checked-in lock (lowest-direct resolution, default
+# PyTorch) and Python 3.14 on TPU. release_wheel_full_matrix_tests.yml is the
+# manual deep run of the TPU suite over every Python, released PyTorch,
+# dependency resolution, and TPU generation.
 name: Release Candidate Tests
 # The Kokoro trigger job finds its run by this title.
 run-name: RC tests ${{ inputs.request_id }}
@@ -49,20 +75,51 @@ defaults:
     shell: bash
 
 jobs:
-  test_wheels_tpu_smoke:
+  lint:
+    name: "Lint and CI tool unit tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Check license headers
+        run: go run github.com/google/addlicense@v1.1.1 -check -s=only .
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          enable-cache: true
+      - name: Check directory layout
+        run: python3 ci/tools/check_directory_layout.py
+      # `nox -s lint` diffs against origin/main, which is empty on a plain
+      # commit checkout, so it is not run here.
+      - name: Run actionlint
+        run: uvx nox -s actionlint
+      - name: Run CI tool unit tests
+        run: uvx nox -s test_ci_tools
+
+  smoke_tpu:
     name: "Smoke test staged wheel on ${{ matrix.tpu.name }} (Python ${{ matrix.python_version }})"
     strategy:
       fail-fast: false
-      # tpu_smoke_all_versions runs the TPU smoke suite in a fresh virtualenv
-      # for every supported PyTorch release (WHEEL_TORCH_VERSIONS and
-      # INTERMEDIATE_PATCH_VERSIONS) sequentially within each job.
+      # tpu_smoke_all_versions installs the wheel in a fresh virtualenv once per
+      # released PyTorch (WHEEL_TORCH_VERSIONS and INTERMEDIATE_PATCH_VERSIONS)
+      # and runs the smoke suite against each, so it covers what
+      # smoke_test(tpu-cpu), smoke_test(cpu-cpu), and intermediate_patch_abi
+      # cover elsewhere. The smoke test files are also Bazel targets in
+      # wheel_cpu and wheel_tpu, but those import the wheel through Bazel's
+      # py_import; only this job exercises the pip install path and every
+      # released PyTorch.
       matrix:
         tpu:
-          - name: "TPU v5"
+          - name: "TPU v5e"
             runner: "linux-x86-ct5lp-224-8tpu"
-          - name: "TPU v6"
+          - name: "TPU v6e"
             runner: "linux-x86-ct6e-180-8tpu"
-          - name: "TPU v7 1-Chip"
+          - name: "TPU v7x 1-chip"
             runner: "linux-x86-tpu7x-56-1tpu"
         python_version: ["3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.tpu.runner }}
@@ -70,6 +127,82 @@ jobs:
     container:
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
       options: --privileged
+    env:
+      GCS_WHEEL_DIR: ${{ inputs.gcs_wheel_dir }}
+      PYTHON_VERSION: ${{ matrix.python_version }}
+      UV_CACHE_DIR: /root/.cache/uv
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - name: Fix Git Workspace Ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Cache uv packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: /root/.cache/uv
+          key: uv-tpu-smoke-${{ runner.os }}-py${{ matrix.python_version }}-${{ hashFiles('pyproject.toml', 'bazel/pytorch_versions.bzl') }}
+          restore-keys: |
+            uv-tpu-smoke-${{ runner.os }}-py${{ matrix.python_version }}-
+      - name: Download staged wheel from GCS
+        uses: ./.github/actions/download-staged-wheel
+        with:
+          gcs_wheel_dir: ${{ env.GCS_WHEEL_DIR }}
+          python_version: ${{ env.PYTHON_VERSION }}
+      - name: Run TPU smoke tests across all supported PyTorch versions via nox
+        run: uvx nox --force-python "${PYTHON_VERSION}" -s tpu_smoke_all_versions
+
+  compat_cpu:
+    name: "CUDA coexistence and dependency upper bounds (${{ matrix.session }}, Python 3.14)"
+    strategy:
+      fail-fast: false
+      matrix:
+        session:
+          - "smoke_test(cpu-cuda)"
+          - "dep_upper_bounds"
+    runs-on: linux-x86-n4-16
+    timeout-minutes: 60
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
+    env:
+      GCS_WHEEL_DIR: ${{ inputs.gcs_wheel_dir }}
+      PYTHON_VERSION: "3.14"
+      NOX_SESSION: ${{ matrix.session }}
+      UV_CACHE_DIR: /root/.cache/uv
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - name: Fix Git Workspace Ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Cache uv packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: /root/.cache/uv
+          key: uv-cpu-compat-${{ runner.os }}-py3.14-${{ matrix.session }}-${{ hashFiles('pyproject.toml', 'bazel/pytorch_versions.bzl') }}
+          restore-keys: |
+            uv-cpu-compat-${{ runner.os }}-py3.14-
+      - name: Download staged wheel from GCS
+        uses: ./.github/actions/download-staged-wheel
+        with:
+          gcs_wheel_dir: ${{ env.GCS_WHEEL_DIR }}
+          python_version: ${{ env.PYTHON_VERSION }}
+      - name: Check wheel metadata with twine
+        if: matrix.session == 'smoke_test(cpu-cuda)'
+        run: uv run --isolated --no-project --with twine twine check dist/*.whl
+      - name: Run ${{ matrix.session }} via nox
+        run: uvx nox --force-python "${PYTHON_VERSION}" -s "${NOX_SESSION}"
+
+  wheel_cpu:
+    name: "CPU Python and wheel structure tests against staged wheel (Python ${{ matrix.python_version }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ["3.11", "3.12", "3.13", "3.14"]
+    runs-on: linux-x86-n4-16
+    timeout-minutes: 90
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
     env:
       GCS_WHEEL_DIR: ${{ inputs.gcs_wheel_dir }}
       PYTHON_VERSION: ${{ matrix.python_version }}
@@ -84,26 +217,59 @@ jobs:
         with:
           gcs_wheel_dir: ${{ env.GCS_WHEEL_DIR }}
           python_version: ${{ env.PYTHON_VERSION }}
-      - name: Run TPU smoke tests across all supported PyTorch versions via nox
-        run: uvx nox --force-python "${PYTHON_VERSION}" -s tpu_smoke_all_versions
+      # Same filters as the wheel_test_cpu config minus -nopresubmit, so tests
+      # that postsubmit runs but presubmit skips are included. The explicit
+      # //ci/wheel:wheel_structure_test is `manual` and inspects the staged
+      # wheel through //:selected_wheel.
+      - name: Run CPU Python and wheel structure tests via Bazel
+        run: |
+          bazel test \
+            --config=wheel_test_cpu \
+            --test_tag_filters=-nobuild,-notest,-requires-gpu,-requires-tpu,-wheel_test_excluded,-cuda-build-test \
+            --repo_env=HERMETIC_PYTHON_VERSION="${PYTHON_VERSION}" \
+            --define PYTHON_VERSION="${PYTHON_VERSION}" \
+            //... //ci/wheel:wheel_structure_test
 
-  test_wheel_cpu_compat:
-    name: "Test ABI and dependency compatibility (${{ matrix.session }}, Python 3.14)"
+  wheel_tpu:
+    name: "${{ matrix.job_info.name }} tests (Python against staged wheel, C++ from source)"
     strategy:
       fail-fast: false
+      # Every OSS TPU test carries exactly one presubmit-v{N} tag naming the
+      # generation it runs on in presubmit (build_defs.bzl,
+      # oss_presubmit_tpu_generation), so the slices below are disjoint by
+      # construction, with two adjustments:
+      # - requires-tpu-v6e tests tagged presubmit-v5 cannot run on v5e and
+      #   move to the v6e slice, where nightly_tpu.yml runs them today.
+      # - wheel_test_excluded targets are the upstream PyTorch tests and
+      #   examples, which need extra checkouts and run in the upstream_* jobs.
+      # The nightly-only TPU tests are `manual`, so `bazel test //...` would
+      # skip them; listing the query result explicitly runs them.
+      # To see what a slice runs: bazel query '<target_query>'.
       matrix:
-        session:
-          - "smoke_test(cpu-cuda)"
-          - "intermediate_patch_abi"
-          - "dep_upper_bounds"
-    runs-on: linux-x86-n4-16
-    timeout-minutes: 60
+        job_info:
+          - name: "TPU v5e"
+            runner: "linux-x86-ct5lp-224-8tpu"
+            bazel_config: "ci_tpu_v5"
+            target_query: 'attr("tags", "presubmit-v5", tests(//...)) except attr("tags", "requires-tpu-v6e|wheel_test_excluded", tests(//...))'
+          - name: "TPU v6e"
+            runner: "linux-x86-ct6e-180-8tpu"
+            bazel_config: "ci_tpu_v6"
+            target_query: 'attr("tags", "presubmit-v6|requires-tpu-v6e", tests(//...)) except attr("tags", "wheel_test_excluded", tests(//...))'
+          - name: "TPU v7x"
+            runner: "linux-x86-tpu7x-224-4tpu"
+            bazel_config: "ci_tpu_v7"
+            target_query: 'attr("tags", "presubmit-v7", tests(//...)) except attr("tags", "wheel_test_excluded", tests(//...))'
+    runs-on: ${{ matrix.job_info.runner }}
+    timeout-minutes: 180
     container:
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
+      # Disable ipc isolation to prevent shm limit issues.
+      options: --ipc=host
     env:
       GCS_WHEEL_DIR: ${{ inputs.gcs_wheel_dir }}
       PYTHON_VERSION: "3.14"
-      NOX_SESSION: ${{ matrix.session }}
+      BAZEL_CONFIG: ${{ matrix.job_info.bazel_config }}
+      TARGET_QUERY: ${{ matrix.job_info.target_query }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -115,5 +281,191 @@ jobs:
         with:
           gcs_wheel_dir: ${{ env.GCS_WHEEL_DIR }}
           python_version: ${{ env.PYTHON_VERSION }}
-      - name: Run ${{ matrix.session }} via nox
-        run: uvx nox --force-python "${PYTHON_VERSION}" -s "${NOX_SESSION}"
+      # Python tests swap //src/torch_tpu for the staged wheel under
+      # --test_wheel. The C++ TPU tests (sh_test wrappers) have no wheel
+      # equivalent and are built from source without the wheel flags, since
+      # --//:wheel_build reroutes backend deps into a configuration presubmit
+      # never builds the C++ tests in.
+      - name: Split the slice into Python and C++ test targets
+        run: |
+          bazel query "${TARGET_QUERY}" --output=label_kind > slice_targets.txt
+          {
+            echo "PY_TARGETS=$(awk '$1 == "py_test" {print $3}' slice_targets.txt | tr '\n' ' ')"
+            echo "CC_TARGETS=$(awk '$1 != "py_test" {print $3}' slice_targets.txt | tr '\n' ' ')"
+          } >> "$GITHUB_ENV"
+      - name: Run Python TPU tests against staged wheel
+        run: |
+          # shellcheck disable=SC2086
+          bazel test \
+            --config="${BAZEL_CONFIG}" \
+            --test_wheel=true \
+            --//:wheel_build=True \
+            --define PYTHON_VERSION="${PYTHON_VERSION}" \
+            --test_timeout=-1,-1,-1,4800 \
+            --run_under="$(pwd)/ci/tools/parallel_accelerator_execute.sh" \
+            ${PY_TARGETS}
+      - name: Run C++ TPU tests from source
+        if: success() || failure()
+        run: |
+          # Exit code 4 means nothing was left to run once the config's
+          # --test_tag_filters applied: a slice may have no C++ tests, or only
+          # `notest` wrappers.
+          # shellcheck disable=SC2086
+          bazel test \
+            --config="${BAZEL_CONFIG}" \
+            --test_timeout=-1,-1,-1,4800 \
+            --run_under="$(pwd)/ci/tools/parallel_accelerator_execute.sh" \
+            ${CC_TARGETS} || { status=$?; [[ ${status} -eq 4 ]] || exit "${status}"; }
+
+  source_cpu:
+    name: "C++, shell, Starlark, build, and wheel-excluded CPU tests from source (highest deps)"
+    runs-on: linux-x86-n4-16
+    timeout-minutes: 90
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - name: Fix Git Workspace Ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      # Same resolution as nightly_unpinned_deps.yml; the pinned lock is
+      # covered by the tsan job, which also builds these C++ tests.
+      - name: Resolve highest unpinned dependencies
+        run: |
+          uv pip compile pyproject.toml \
+            --all-extras \
+            --python-version 3.14 \
+            --python-platform x86_64-manylinux_2_31 \
+            --resolution highest \
+            --generate-hashes \
+            --output-file requirements/requirements_3_14.txt
+      # Everything ci_cpu runs that wheel_cpu does not: every non-Python test
+      # plus the Python tests that cannot run from the wheel.
+      - name: Run C++, shell, Starlark, build, and wheel-excluded CPU tests
+        run: |
+          NON_WHEEL_TARGETS=$(bazel query '(tests(//...) except kind("py_test", tests(//...))) union attr("tags", "wheel_test_excluded", tests(//...))' | tr '\n' ' ')
+          # shellcheck disable=SC2086
+          bazel test --config=ci_cpu ${NON_WHEEL_TARGETS}
+
+  tsan:
+    name: "ThreadSanitizer C++ and Python tests from source"
+    runs-on: linux-x86-n4-16
+    timeout-minutes: 90
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - name: Fix Git Workspace Ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      # Same invocations as tsan.yml. These targets also run in source_cpu
+      # and wheel_cpu, but only here under the sanitizer.
+      - name: Run C++ tests with ThreadSanitizer
+        run: bazel test //... --config=ci_cpu --config=tsan_cc --test_lang_filters=cc
+      - name: Run Python tests with ThreadSanitizer
+        run: |
+          bazel test //... \
+            --config=ci_cpu \
+            --config=tsan_py \
+            --test_lang_filters=py \
+            --run_under=//ci/configs:tsan_wrapper
+
+  upstream_pytorch:
+    name: "Upstream PyTorch tests against staged wheel (TPU v5e, torch 2.13.0)"
+    runs-on: linux-x86-ct5lp-224-8tpu
+    timeout-minutes: 90
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
+      # Disable ipc isolation to prevent shm limit issues.
+      options: --ipc=host
+    env:
+      GCS_WHEEL_DIR: ${{ inputs.gcs_wheel_dir }}
+      PYTHON_VERSION: "3.14"
+      # The device-generic test runner needs torch 2.13+, so this installs
+      # the same torch and test suite revision upstream_tests.yaml uses by
+      # default instead of the checked-in lock's torch.
+      TORCH_VERSION: "2.13.0"
+    steps:
+      - name: Checkout TorchTPU
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - name: Checkout PyTorch test suite
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pytorch/pytorch
+          ref: v${{ env.TORCH_VERSION }}
+          path: pytorch
+      - name: Fix Git Workspace Ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Download staged wheel from GCS
+        uses: ./.github/actions/download-staged-wheel
+        with:
+          gcs_wheel_dir: ${{ env.GCS_WHEEL_DIR }}
+          python_version: ${{ env.PYTHON_VERSION }}
+      - name: Download PyTorch wheel
+        run: |
+          mkdir -p dist/local
+          pip download --no-deps "torch==${TORCH_VERSION}+cpu" \
+            --index-url https://download.pytorch.org/whl/cpu -d dist/local \
+            --python-version "${PYTHON_VERSION}" --only-binary=:all:
+          set -- "$PWD/dist/local/torch-"*.whl
+          echo "TORCH_SOURCE=$1" >> "$GITHUB_ENV"
+      - name: Run upstream PyTorch tests against staged wheel
+        run: |
+          UPSTREAM_TARGETS=$(bazel query 'kind("py_test", //tests/torch:all)' | tr '\n' ' ')
+          # shellcheck disable=SC2086
+          bazel test \
+            --config=ci_tpu_v5 \
+            --config=local_torch \
+            --repo_env=TORCH_SOURCE="$TORCH_SOURCE" \
+            --test_wheel=true \
+            --//:wheel_build=True \
+            --define PYTHON_VERSION="${PYTHON_VERSION}" \
+            --run_under="$(pwd)/ci/tools/parallel_accelerator_execute.sh" \
+            --test_env=TORCH_TPU_INTERNAL_PYTORCH_TEST_DIR="$GITHUB_WORKSPACE/pytorch/test" \
+            ${UPSTREAM_TARGETS}
+
+  upstream_examples:
+    name: "Upstream PyTorch examples against staged wheel (TPU v7x)"
+    runs-on: linux-x86-tpu7x-224-4tpu
+    timeout-minutes: 90
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
+      # Disable ipc isolation to prevent shm limit issues.
+      options: --ipc=host
+    env:
+      GCS_WHEEL_DIR: ${{ inputs.gcs_wheel_dir }}
+      PYTHON_VERSION: "3.14"
+    steps:
+      - name: Checkout TorchTPU
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - name: Checkout PyTorch Examples
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: pytorch/examples
+          path: pytorch_examples
+      - name: Fix Git Workspace Ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Download staged wheel from GCS
+        uses: ./.github/actions/download-staged-wheel
+        with:
+          gcs_wheel_dir: ${{ env.GCS_WHEEL_DIR }}
+          python_version: ${{ env.PYTHON_VERSION }}
+      - name: Run upstream PyTorch examples against staged wheel
+        run: |
+          EXAMPLE_TARGETS=$(bazel query 'filter("^//tests:run_upstream_example_.*_tpu$", kind("py_test", //tests:all))' | tr '\n' ' ')
+          # shellcheck disable=SC2086
+          bazel test \
+            --config=ci_tpu_v7 \
+            --test_wheel=true \
+            --//:wheel_build=True \
+            --define PYTHON_VERSION="${PYTHON_VERSION}" \
+            --run_under="$(pwd)/ci/tools/parallel_accelerator_execute.sh" \
+            --test_env=TORCH_TPU_INTERNAL_TORCH_EXAMPLES_DIR="$GITHUB_WORKSPACE/pytorch_examples" \
+            --test_env=PYTHONPATH="$GITHUB_WORKSPACE/pytorch_examples" \
+            ${EXAMPLE_TARGETS}

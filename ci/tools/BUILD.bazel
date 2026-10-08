@@ -94,3 +94,21 @@ py_test(
         ":run_bazel_diff",
     ],
 )
+
+py_binary(
+    name = "release_test_matrix",
+    srcs = ["release_test_matrix.py"],
+    deps = [
+        "//bazel:pytorch_versions",
+    ],
+)
+
+py_test(
+    name = "release_test_matrix_test",
+    size = "small",
+    srcs = ["release_test_matrix_test.py"],
+    deps = [
+        ":release_test_matrix",
+        "//bazel:pytorch_versions",
+    ],
+)

@@ -130,6 +130,7 @@ def test_ci_tools(session: nox.Session) -> None:
       "ci/tools/list_ci_tests_test.py",
       "ci/tools/run_bazel_diff_test.py",
       "ci/tools/gen_torch_tests_test.py",
+      "ci/tools/release_test_matrix_test.py",
   )
 
 

@@ -54,6 +54,12 @@ torch_tpu_oss_torch_test(
 )
 
 torch_tpu_oss_torch_test(
+    name = "distributions_distributions_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "distributions/test_distributions",
+)
+
+torch_tpu_oss_torch_test(
     name = "dynamo_activation_checkpointing_test",
     torch_test_module = "dynamo/test_activation_checkpointing",
 )
@@ -61,6 +67,12 @@ torch_tpu_oss_torch_test(
 torch_tpu_oss_torch_test(
     name = "dynamo_after_aot_test",
     torch_test_module = "dynamo/test_after_aot",
+)
+
+torch_tpu_oss_torch_test(
+    name = "dynamo_aot_autograd_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "dynamo/test_aot_autograd",
 )
 
 torch_tpu_oss_torch_test(
@@ -79,6 +91,11 @@ torch_tpu_oss_torch_test(
 )
 
 torch_tpu_oss_torch_test(
+    name = "dynamo_deviceguard_test",
+    torch_test_module = "dynamo/test_deviceguard",
+)
+
+torch_tpu_oss_torch_test(
     name = "dynamo_dynamo_decompositions_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "dynamo/test_dynamo_decompositions",
@@ -93,6 +110,11 @@ torch_tpu_oss_torch_test(
 torch_tpu_oss_torch_test(
     name = "dynamo_export_test",
     torch_test_module = "dynamo/test_export",
+)
+
+torch_tpu_oss_torch_test(
+    name = "dynamo_hooks_test",
+    torch_test_module = "dynamo/test_hooks",
 )
 
 torch_tpu_oss_torch_test(
@@ -219,6 +241,12 @@ torch_tpu_oss_torch_test(
 )
 
 torch_tpu_oss_torch_test(
+    name = "nn_lazy_modules_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "nn/test_lazy_modules",
+)
+
+torch_tpu_oss_torch_test(
     name = "nn_multihead_attention_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "nn/test_multihead_attention",
@@ -256,6 +284,11 @@ torch_tpu_oss_torch_test(
 )
 
 torch_tpu_oss_torch_test(
+    name = "profiler_trace_validator_test",
+    torch_test_module = "profiler/test_trace_validator",
+)
+
+torch_tpu_oss_torch_test(
     name = "quantization_core_experimental_bits_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "quantization/core/experimental/test_bits",
@@ -274,6 +307,17 @@ torch_tpu_oss_torch_test(
 )
 
 torch_tpu_oss_torch_test(
+    name = "ao_sparsity_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "test_ao_sparsity",
+)
+
+torch_tpu_oss_torch_test(
+    name = "autocast_test",
+    torch_test_module = "test_autocast",
+)
+
+torch_tpu_oss_torch_test(
     name = "autograd_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_autograd",
@@ -284,6 +328,12 @@ torch_tpu_oss_torch_test(
     notap = "b/563402379",  # NOTAP_OK=torch tests
     shard_count = 8,
     torch_test_module = "test_binary_ufuncs",
+)
+
+torch_tpu_oss_torch_test(
+    name = "bmm_outer_product_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "test_bmm_outer_product",
 )
 
 torch_tpu_oss_torch_test(
@@ -465,6 +515,12 @@ torch_tpu_oss_torch_test(
 )
 
 torch_tpu_oss_torch_test(
+    name = "precompile_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "test_precompile",
+)
+
+torch_tpu_oss_torch_test(
     name = "prims_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_prims",
@@ -503,6 +559,7 @@ torch_tpu_oss_torch_test(
 
 torch_tpu_oss_torch_test(
     name = "serialization_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_serialization",
 )
 
@@ -547,6 +604,12 @@ torch_tpu_oss_torch_test(
 torch_tpu_oss_torch_test(
     name = "tensor_iterator_test",
     torch_test_module = "test_tensor_iterator",
+)
+
+torch_tpu_oss_torch_test(
+    name = "tensorboard_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "test_tensorboard",
 )
 
 torch_tpu_oss_torch_test(

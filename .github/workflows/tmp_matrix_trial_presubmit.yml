@@ -1,0 +1,168 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Manual deep run of the TPU Python test suite against a staged release wheel,
+# over the Cartesian product of TPU generation x Python version x released
+# PyTorch version x dependency resolution (oldest or newest resolvable deps).
+#
+# release_candidate_tests.yml is the release gate: it runs each TPU test once,
+# on its home generation, with the checked-in lock (default PyTorch, lowest
+# direct deps) and Python 3.14. This workflow is the superset to reach for when
+# a release needs more confidence or a failure needs isolating to one cell: it
+# runs every TPU test on every selected generation, in every selected Python,
+# against every selected PyTorch release and dependency bound. Each cell
+# regenerates the uv lock for its Python with torch pinned to the cell's
+# version, so the tests run through the same Bazel wheel-test path presubmit
+# uses (--test_wheel against the wheel in dist/).
+#
+# Nightly PyTorch is deliberately not a dimension: release wheels ship without
+# the nightly glue (--config=wheel_release), and the default pip hub resolves
+# from the release index only.
+#
+# Sizing: TPU v6e has a single runner, so its cells run one after another.
+# Trim the dimensions for v6e rather than dispatching the full product there.
+name: TMP matrix trial (presubmit)
+run-name: TMP matrix trial (presubmit)
+
+on:
+  push:
+    branches:
+      - jonathanskim/rc-test-workflows
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-gs://torch-tpu-release-artifacts/0.1.2/rc1/release/-presubmit
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build_matrix:
+    name: "Build the test matrix"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    env:
+      TPU_GENERATIONS: v5,v6,v7
+      PYTHON_VERSIONS: 3.11,3.14
+      TORCH_VERSIONS: 2.12.1,2.13.0
+      DEP_RESOLUTIONS: oldest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - name: Generate matrix JSON
+        id: generate
+        run: |
+          matrix=$(python3 -m ci.tools.release_test_matrix \
+            --tpu_generations="${TPU_GENERATIONS}" \
+            --python_versions="${PYTHON_VERSIONS}" \
+            --torch_versions="${TORCH_VERSIONS}" \
+            --dep_resolutions="${DEP_RESOLUTIONS}")
+          echo "${matrix}" | python3 -c 'import json, sys; print(len(json.load(sys.stdin)["entry"]), "cells")'
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
+  test_wheel:
+    needs: build_matrix
+    name: "Test wheel on ${{ matrix.entry.tpu_name }} (Python ${{ matrix.entry.python_version }}, torch ${{ matrix.entry.torch_version }}, ${{ matrix.entry.deps }} deps)"
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.build_matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.entry.runner }}
+    timeout-minutes: 180
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
+      # Disable ipc isolation to prevent shm limit issues.
+      options: --ipc=host
+    env:
+      GCS_WHEEL_DIR: gs://torch-tpu-release-artifacts/0.1.2/rc1/release/
+      TPU_GENERATION: ${{ matrix.entry.tpu_generation }}
+      PYTHON_VERSION: ${{ matrix.entry.python_version }}
+      TORCH_VERSION: ${{ matrix.entry.torch_version }}
+      UV_RESOLUTION: ${{ matrix.entry.uv_resolution }}
+      TEST_SUITE: presubmit
+      TEST_TARGETS: 
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - name: Fix Git Workspace Ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Download staged wheel from GCS
+        uses: ./.github/actions/download-staged-wheel
+        with:
+          gcs_wheel_dir: ${{ env.GCS_WHEEL_DIR }}
+          python_version: ${{ env.PYTHON_VERSION }}
+      # Same command requirements/lock_environments.sh uses for the checked-in
+      # lock, plus the cell's torch pin and resolution. The @pypi hub reads
+      # this file, so every test dependency (torchvision included) is
+      # re-resolved around the pinned torch.
+      - name: Lock dependencies for this cell
+        run: |
+          uv pip compile pyproject.toml \
+            --all-extras \
+            --python-version "${PYTHON_VERSION}" \
+            --python-platform x86_64-manylinux_2_31 \
+            --resolution "${UV_RESOLUTION}" \
+            --constraint <(echo "torch==${TORCH_VERSION}") \
+            --generate-hashes \
+            --output-file "requirements/requirements_${PYTHON_VERSION//./_}.txt"
+          grep -E '^(torch|torchvision|numpy)==' "requirements/requirements_${PYTHON_VERSION//./_}.txt"
+      # full: every TPU Python test that can run on this generation, listed
+      # explicitly so the `manual` nightly-only tests are included, minus the
+      # upstream PyTorch suites, which need extra checkouts and are not part
+      # of the wheel test path. presubmit: the wheel_test_tpu_v* config on
+      # //..., as presubmit runs it.
+      - name: Run TPU Python tests against the staged wheel
+        run: |
+          case "${TEST_SUITE}" in
+            full)
+              BAZEL_CONFIG="ci_tpu_${TPU_GENERATION}"
+              TARGETS=$(bazel query 'kind("py_test", tests(//...)) except attr("tags", "wheel_test_excluded", tests(//...))' | tr '\n' ' ')
+              ;;
+            presubmit)
+              BAZEL_CONFIG="wheel_test_tpu_${TPU_GENERATION}"
+              TARGETS="//..."
+              ;;
+            *)
+              echo "::error::Unknown test_suite: ${TEST_SUITE}"
+              exit 1
+              ;;
+          esac
+          if [[ -n "${TEST_TARGETS}" ]]; then
+            TARGETS="${TEST_TARGETS}"
+          fi
+          # shellcheck disable=SC2086
+          bazel test \
+            --config="${BAZEL_CONFIG}" \
+            --test_wheel=true \
+            --//:wheel_build=True \
+            --repo_env=HERMETIC_PYTHON_VERSION="${PYTHON_VERSION}" \
+            --define PYTHON_VERSION="${PYTHON_VERSION}" \
+            --test_lang_filters=py \
+            --test_timeout=-1,-1,-1,4800 \
+            --run_under="$(pwd)/ci/tools/parallel_accelerator_execute.sh" \
+            ${TARGETS}
+      - name: Upload test logs on failure
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: failure()
+        with:
+          name: bazel-testlogs-${{ matrix.entry.tpu_generation }}-py${{ matrix.entry.python_version }}-torch${{ matrix.entry.torch_version }}-${{ matrix.entry.deps }}
+          path: bazel-testlogs/
+          retention-days: 7

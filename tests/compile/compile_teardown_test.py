@@ -18,18 +18,22 @@ import os
 import resource
 import subprocess
 import sys
+from absl import app
 from absl.testing import absltest
 from tests import seed_test_utils
 
 
-def _worker():
+def _worker(argv=None):
+  del argv
   try:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
   except Exception:  # pylint: disable=broad-except
     pass
 
   import torch
-  import torch_tpu  # noqa: F401
+  from torch_tpu import _loader
+
+  _loader.load("tpu")
 
   @torch.compile(backend="tpu", dynamic=False, fullgraph=True)
   def add_fn(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -48,11 +52,10 @@ def _worker():
   )
 
 
-class CompileTeardownTest(seed_test_utils.RepeatableTest):
+class CompileTeardownTest(seed_test_utils.MultiProcessRepeatableTest):
 
   def test_clean_interpreter_teardown(self):
     env = dict(os.environ)
-    env["PYTHONPATH"] = ":".join(sys.path)
     env["TPU_PREMAPPED_BUFFER_SIZE"] = "0"
     env["_COMPILE_TEARDOWN_WORKER"] = "1"
 
@@ -76,6 +79,6 @@ class CompileTeardownTest(seed_test_utils.RepeatableTest):
 
 if __name__ == "__main__":
   if os.environ.get("_COMPILE_TEARDOWN_WORKER") == "1":
-    _worker()
+    app.run(_worker)
   else:
     absltest.main()

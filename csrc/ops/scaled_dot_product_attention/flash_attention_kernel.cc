@@ -342,6 +342,28 @@ void StoreNormalizedOutput(ImplicitLocOpBuilder& b,
 //   are chosen to match `kc` so that sub-blocks strictly above the diagonal
 //   (fully masked) are skipped entirely and only the sub-blocks on the diagonal
 //   are masked. For non-square tiles every sub-block is masked.
+int64_t SelectQueryBandRows(int64_t qt, int64_t kc, int64_t vo_head_dim,
+                            bool is_single_kv_step,
+                            bool square_causal_diag_block) {
+  if (square_causal_diag_block) {
+    return kc;
+  }
+  const bool spills_vregs =
+      (!is_single_kv_step && qt > 1536 && vo_head_dim != 128) ||
+      (vo_head_dim >= 256 && qt >= 512);
+  if (!spills_vregs) {
+    return qt;
+  }
+  constexpr int64_t kMaxBandRows = 256;
+  for (int64_t candidate = std::min(qt, kMaxBandRows); candidate >= 128;
+       candidate -= 128) {
+    if (qt % candidate == 0) {
+      return candidate;
+    }
+  }
+  return qt;
+}
+
 void EmitGridStep(ImplicitLocOpBuilder& b, const FlashAttnConfig& config,
                   const Tiling& tiling, const KernelArgs& args,
                   bool is_single_kv_step, bool has_padding,
@@ -355,7 +377,8 @@ void EmitGridStep(ImplicitLocOpBuilder& b, const FlashAttnConfig& config,
   // kv_block > band and needs masking iff kv_block == band.
   const bool square_causal_diag_block = intersects_causal_diag && qt == kt &&
                                         !config.sliding_window_size.has_value();
-  const int64_t band_rows = square_causal_diag_block ? kc : qt;
+  const int64_t band_rows = SelectQueryBandRows(
+      qt, kc, config.vo_head_dim, is_single_kv_step, square_causal_diag_block);
   const int64_t num_bands = qt / band_rows;
 
   for (int64_t band = 0; band < num_bands; ++band) {
@@ -547,19 +570,27 @@ func::FuncOp buildModule(ImplicitLocOpBuilder& module_builder,
                       (config.padded_kv_sequence_length / tiling.kt) - 1));
   Value is_last_col = CmpIOp::create(fn_builder, CmpIPredicate::eq,
                                      args.col_block_idx, last_col_idx);
-  IfOp::create(fn_builder, is_last_col,
-               /*thenBuilder=*/
-               [&](OpBuilder& builder, Location loc) -> void {
-                 ImplicitLocOpBuilder b(loc, builder);
-                 SoftmaxState state{
-                     .m = LoadTile(b, args.mi_arg),
-                     .l = LoadTile(b, args.li_arg),
-                     .acc = LoadTile(b, args.o_scratch_arg),
-                 };
-                 StoreNormalizedOutput(b, config, args, state,
-                                       /*row_offset=*/0);
-                 YieldOp::create(b, loc);
-               });
+  IfOp::create(
+      fn_builder, is_last_col,
+      /*thenBuilder=*/
+      [&](OpBuilder& builder, Location loc) -> void {
+        ImplicitLocOpBuilder b(loc, builder);
+        const int64_t band_rows = SelectQueryBandRows(
+            qt, tiling.kc, config.vo_head_dim, is_single_kv_step,
+            /*square_causal_diag_block=*/false);
+        const int64_t num_bands = qt / band_rows;
+        for (int64_t band = 0; band < num_bands; ++band) {
+          const int64_t row_offset = band * band_rows;
+          SoftmaxState state{
+              .m = LoadTileSlice(b, args.mi_arg, row_offset, band_rows, 0, 128),
+              .l = LoadTileSlice(b, args.li_arg, row_offset, band_rows, 0, 128),
+              .acc = LoadTileSlice(b, args.o_scratch_arg, row_offset, band_rows,
+                                   0, config.vo_head_dim),
+          };
+          StoreNormalizedOutput(b, config, args, state, row_offset);
+        }
+        YieldOp::create(b, loc);
+      });
 
   ReturnOp::create(fn_builder);
 

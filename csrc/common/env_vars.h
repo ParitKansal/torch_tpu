@@ -87,6 +87,12 @@ inline constexpr char kTorchDeviceBackendAutoloadEnvVar[] =
 // https://docs.pytorch.org/docs/stable/debugging_environment_variables.html#pytorch-debug-environment-variables
 inline constexpr char kTorchShowCppStacktracesEnvVar[] =
     "TORCH_SHOW_CPP_STACKTRACES";
+// If set to "1" or "true", calling an internal `torch.tpu` device API that
+// has a `torch.accelerator` equivalent (e.g. `torch.tpu.device_count`) from
+// outside the PyTorch framework emits a one-time warning instead of raising a
+// RuntimeError. Default is "false".
+inline constexpr char kTorchTpuAllowLegacyDeviceApisEnvVar[] =
+    "TORCH_TPU_ALLOW_LEGACY_DEVICE_APIS";
 // The first port used when deriving slicebuilder addresses for a multi-host
 // job. If not set, 8070 is used.
 inline constexpr char kTorchTpuBasePortEnvVar[] = "TORCH_TPU_BASE_PORT";
@@ -291,6 +297,7 @@ inline constexpr auto kEnvVarToStage =
         {kTmpdirEnvVar, SymbolStage::Stable()},
         {kTorchDeviceBackendAutoloadEnvVar, SymbolStage::Stable()},
         {kTorchShowCppStacktracesEnvVar, SymbolStage::Experimental()},
+        {kTorchTpuAllowLegacyDeviceApisEnvVar, SymbolStage::Experimental()},
         {kTorchTpuBasePortEnvVar, SymbolStage::Experimental()},
         {kTorchTpuDeferAndFuseEnvVar, SymbolStage::Experimental()},
         {kTorchTpuDevicesPerHostEnvVar, SymbolStage::Experimental()},

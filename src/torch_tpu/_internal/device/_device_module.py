@@ -26,6 +26,7 @@ import sys
 from typing import Any, Final, List
 import torch
 from torch._dynamo.device_interface import DeviceInterface
+from torch_tpu._internal import env
 from torch_tpu._internal import execution_mode
 from torch_tpu._internal.device import _device_ops_backend
 import torch_tpu._internal.execution_mode as _execution_mode_module
@@ -36,6 +37,15 @@ from torch_tpu._internal.utils import hardware
 
 experimental = annotations.experimental
 get_torch_version = annotations.get_torch_version
+
+# Whether calling an internal device API (one decorated with
+# `@annotations.internal_or_experimental` whose `torch.accelerator` equivalent
+# exists) from outside the PyTorch framework raises a RuntimeError (True) or
+# only warns once (False). Users migrating off these APIs can set
+# TORCH_TPU_ALLOW_LEGACY_DEVICE_APIS=1 to get the warning.
+_STRICT_INTERNAL_DEVICE_APIS: Final[bool] = not env.get_bool_env_once(
+    "TORCH_TPU_ALLOW_LEGACY_DEVICE_APIS", default_value=False
+)
 
 # TODO: add more dtypes here. Initial list was chosen arbitrarily.
 _AMP_SUPPORTED_DTYPES = (
@@ -203,6 +213,7 @@ def _get_device_index(
 @annotations.internal_or_experimental(
     internal_when=get_torch_version() >= (2, 11),
     prefer="torch.accelerator.device_index",
+    strict=_STRICT_INTERNAL_DEVICE_APIS,
     experimental_msg=(
         "device() context manager is experimental and subject to change"
         " without notice."
@@ -448,6 +459,7 @@ class _DeviceModule(abc.ABC, metaclass=_DeviceModuleMeta):
   @annotations.internal_or_experimental(
       internal_when=get_torch_version() >= (2, 11),
       prefer="torch.accelerator.current_device_index",
+      strict=_STRICT_INTERNAL_DEVICE_APIS,
       experimental_msg=(
           "current_device() is experimental and subject to change without"
           " notice."
@@ -484,6 +496,7 @@ class _DeviceModule(abc.ABC, metaclass=_DeviceModuleMeta):
   @annotations.internal_or_experimental(
       internal_when=get_torch_version() >= (2, 11),
       prefer="torch.accelerator.set_device_index",
+      strict=_STRICT_INTERNAL_DEVICE_APIS,
       experimental_msg=(
           "set_device() is experimental and subject to change without notice."
       ),
@@ -553,6 +566,7 @@ class _DeviceModule(abc.ABC, metaclass=_DeviceModuleMeta):
   @annotations.internal_or_experimental(
       internal_when=get_torch_version() >= (2, 11),
       prefer="torch.accelerator.is_available",
+      strict=_STRICT_INTERNAL_DEVICE_APIS,
       experimental_msg=(
           "is_available() is experimental and subject to change without notice."
       ),
@@ -680,6 +694,7 @@ class _DeviceModule(abc.ABC, metaclass=_DeviceModuleMeta):
   @annotations.internal_or_experimental(
       internal_when=get_torch_version() >= (2, 13),
       prefer="torch.accelerator.random.initial_seed",
+      strict=_STRICT_INTERNAL_DEVICE_APIS,
       experimental_msg=(
           "initial_seed() is experimental and may change or be removed without"
           " notice."
@@ -704,6 +719,7 @@ class _DeviceModule(abc.ABC, metaclass=_DeviceModuleMeta):
   @annotations.internal_or_experimental(
       internal_when=get_torch_version() >= (2, 13),
       prefer="torch.accelerator.random.get_rng_state",
+      strict=_STRICT_INTERNAL_DEVICE_APIS,
       experimental_msg=(
           "get_rng_state() is experimental and subject to change without"
           " notice."
@@ -768,6 +784,7 @@ class _DeviceModule(abc.ABC, metaclass=_DeviceModuleMeta):
   @annotations.internal_or_experimental(
       internal_when=get_torch_version() >= (2, 11),
       prefer="torch.accelerator.set_stream",
+      strict=_STRICT_INTERNAL_DEVICE_APIS,
       experimental_msg=(
           "set_stream() is experimental and subject to change without notice."
       ),
@@ -785,6 +802,7 @@ class _DeviceModule(abc.ABC, metaclass=_DeviceModuleMeta):
   @annotations.internal_or_experimental(
       internal_when=get_torch_version() >= (2, 11),
       prefer="torch.accelerator.synchronize",
+      strict=_STRICT_INTERNAL_DEVICE_APIS,
       experimental_msg=(
           "synchronize() is experimental and subject to change without notice."
       ),
@@ -801,6 +819,7 @@ class _DeviceModule(abc.ABC, metaclass=_DeviceModuleMeta):
   @annotations.internal_or_experimental(
       internal_when=get_torch_version() >= (2, 11),
       prefer="torch.accelerator.device_count",
+      strict=_STRICT_INTERNAL_DEVICE_APIS,
       experimental_msg=(
           "device_count() is experimental and subject to change without notice."
       ),
@@ -876,6 +895,7 @@ class _DeviceModule(abc.ABC, metaclass=_DeviceModuleMeta):
   @annotations.internal_or_experimental(
       internal_when=get_torch_version() >= (2, 11),
       prefer="torch.accelerator.current_stream",
+      strict=_STRICT_INTERNAL_DEVICE_APIS,
       experimental_msg=(
           "current_stream() is experimental and subject to change without"
           " notice."

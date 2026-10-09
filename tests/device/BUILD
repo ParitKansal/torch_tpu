@@ -64,11 +64,30 @@ torch_tpu_py_test(
     ],
 )
 
+torch_tpu_py_test(
+    name = "legacy_device_apis_test",
+    srcs = ["legacy_device_apis_test.py"],
+    env = {
+        "TORCH_TPU_ALLOW_LEGACY_DEVICE_APIS": "1",
+    },
+    tags = [
+        "requires-tpu-v5lite",
+    ],
+    deps = [
+        "//shims/absl_py/testing:absltest",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+        "//src/torch_tpu/_internal/utils:annotations",
+        "//tests:seed_test_utils",
+    ],
+)
+
 test_suite(
     name = "device_module_tests",
     tests = [
         "device_module_test_no_tpu",
         "device_module_test_tpu",
+        "legacy_device_apis_test",
     ],
 )
 

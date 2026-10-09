@@ -187,6 +187,7 @@ process. Use it at your own risk. Using it triggers a one-time warning.
 *   `TORCHCOMM_RANK`
 *   `TORCHCOMM_SIZE`
 *   `TORCH_SHOW_CPP_STACKTRACES`
+*   `TORCH_TPU_ALLOW_LEGACY_DEVICE_APIS`
 *   `TORCH_TPU_BASE_PORT`
 *   `TORCH_TPU_DEFER_AND_FUSE`
 *   `TORCH_TPU_DEVICES_PER_HOST`

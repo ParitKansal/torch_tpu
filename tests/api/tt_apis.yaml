@@ -178,6 +178,7 @@ TORCHCOMM_RANK: {category: Environment Variable, defined_in: csrc/common/env_var
 TORCHCOMM_SIZE: {category: Environment Variable, defined_in: csrc/common/env_vars.h, stage: Experimental}
 TORCH_DEVICE_BACKEND_AUTOLOAD: {category: Environment Variable, defined_in: csrc/common/env_vars.h, stage: Stable}
 TORCH_SHOW_CPP_STACKTRACES: {category: Environment Variable, defined_in: csrc/common/env_vars.h, stage: Experimental}
+TORCH_TPU_ALLOW_LEGACY_DEVICE_APIS: {category: Environment Variable, defined_in: csrc/common/env_vars.h, stage: Experimental}
 TORCH_TPU_BASE_PORT: {category: Environment Variable, defined_in: csrc/common/env_vars.h, stage: Experimental}
 TORCH_TPU_DEFER_AND_FUSE: {category: Environment Variable, defined_in: csrc/common/env_vars.h, stage: Experimental}
 TORCH_TPU_DEVICES_PER_HOST: {category: Environment Variable, defined_in: csrc/common/env_vars.h, stage: Experimental}

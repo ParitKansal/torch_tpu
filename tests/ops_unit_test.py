@@ -19339,6 +19339,33 @@ class OpTestingFrameworkTest(op_testing.OpInfoTestBase):
 
     self.assert_close_tpu_vs_cpu(test_fn)
 
+  def test_sdpa_overrideable_flash_fwd_bwd_gqa(self):
+    torch.manual_seed(42)
+    q_cpu = torch.randn(4, 4, 2048, 128, dtype=torch.bfloat16) * 0.2
+    k_cpu = torch.randn(4, 1, 2048, 128, dtype=torch.bfloat16) * 0.2
+    v_cpu = torch.randn(4, 1, 2048, 128, dtype=torch.bfloat16) * 0.2
+    go_cpu = torch.randn(4, 4, 2048, 128, dtype=torch.bfloat16) * 0.2
+
+    def test_fn(device):
+      q = q_cpu.to(device).detach().requires_grad_(True)
+      k = k_cpu.to(device).detach().requires_grad_(True)
+      v = v_cpu.to(device).detach().requires_grad_(True)
+      if device == "cpu":
+        k_exp = k.repeat_interleave(4, dim=1)
+        v_exp = v.repeat_interleave(4, dim=1)
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q, k_exp, v_exp, is_causal=True
+        )
+      else:
+        res = torch.ops.aten._scaled_dot_product_fused_attention_overrideable(
+            q, k, v, None, 0.0, True, False, scale=None
+        )
+        out = res[0]
+      out.backward(go_cpu.to(device))
+      return out, q.grad, k.grad, v.grad
+
+    self.assert_close_tpu_vs_cpu(test_fn, rtol=3e-2, atol=3e-2)
+
   @parameterized.named_parameters(
       dict(
           testcase_name="float4_e2m1fn_x2",

@@ -31,10 +31,16 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "c10/core/DispatchKey.h"
+#include "c10/core/DispatchKeySet.h"
 #include "c10/core/GradMode.h"
 #include "c10/core/ScalarType.h"
+#include "c10/core/Storage.h"
 #include "c10/core/SymInt.h"
+#include "c10/core/TensorImpl.h"
+#include "c10/util/intrusive_ptr.h"
 #include "csrc/common/cache_key.h"
+#include "csrc/common/dimension_types.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/warnings.h"
 #include "csrc/eager/device_buffer.h"
@@ -142,6 +148,69 @@ bool ShouldPreferOverrideableSdp(const at::Tensor& query, const at::Tensor& key,
          (has_2d_or_causal_mask && is_power_of_two_head_dim && !requires_grad &&
           num_head_q >= 24 && q_seq_len == kv_seq_len && q_seq_len >= 1024 &&
           q_seq_len <= 8192 && q_seq_len % 128 == 0);
+}
+
+bool HasSupportedFlashOverrideableTypesAndRank(
+    const at::Tensor& query, const at::Tensor& key, const at::Tensor& value,
+    const std::optional<at::Tensor>& attn_bias, double dropout_p,
+    bool is_causal) {
+  if (!is_causal || dropout_p != 0.0) {
+    return false;
+  }
+  if (attn_bias.has_value() && attn_bias->defined() && attn_bias->numel() > 0) {
+    return false;
+  }
+  const int64_t rank = query.ndimension();
+  if (rank < 4 || key.ndimension() != rank || value.ndimension() != rank) {
+    return false;
+  }
+  if (HasDynamicShape(query) || HasDynamicShape(key) ||
+      HasDynamicShape(value)) {
+    return false;
+  }
+  const at::ScalarType dtype = query.scalar_type();
+  return (dtype == at::ScalarType::BFloat16 ||
+          dtype == at::ScalarType::Float) &&
+         key.scalar_type() == dtype && value.scalar_type() == dtype;
+}
+
+bool CanUseFlashAttentionForOverrideable(
+    const at::Tensor& query, const at::Tensor& key, const at::Tensor& value,
+    const std::optional<at::Tensor>& attn_bias, double dropout_p,
+    bool is_causal) {
+  if (!HasSupportedFlashOverrideableTypesAndRank(query, key, value, attn_bias,
+                                                 dropout_p, is_causal)) {
+    return false;
+  }
+  const int64_t rank = query.ndimension();
+  const int64_t batch_size = get_batch_size(query.sizes());
+  if (batch_size < 4 || get_batch_size(key.sizes()) != batch_size ||
+      get_batch_size(value.sizes()) != batch_size) {
+    return false;
+  }
+  const int64_t num_head_q = query.size(rank - 3);
+  const int64_t num_head_kv = key.size(rank - 3);
+  if (num_head_q <= 0 || num_head_kv <= 0 ||
+      value.size(rank - 3) != num_head_kv || num_head_q % num_head_kv != 0) {
+    return false;
+  }
+  const int64_t q_seq_len = query.size(rank - 2);
+  const int64_t kv_seq_len = key.size(rank - 2);
+  const int64_t head_dim = query.size(rank - 1);
+  return q_seq_len >= 2048 && q_seq_len % 256 == 0 && kv_seq_len >= 2048 &&
+         kv_seq_len % 256 == 0 && value.size(rank - 2) == kv_seq_len &&
+         head_dim >= 128 && head_dim % 128 == 0 &&
+         key.size(rank - 1) == head_dim && value.size(rank - 1) == head_dim;
+}
+
+at::Tensor MakeContiguousShapeView(const at::Tensor& tensor,
+                                   absl::Span<const int64_t> new_sizes) {
+  auto impl = c10::make_intrusive<c10::TensorImpl>(
+      c10::Storage(tensor.storage()),
+      c10::DispatchKeySet(c10::DispatchKey::PrivateUse1), tensor.dtype());
+  impl->set_sizes_contiguous(new_sizes);
+  impl->set_storage_offset(tensor.storage_offset());
+  return at::Tensor(std::move(impl));
 }
 
 }  // namespace
@@ -305,6 +374,23 @@ AtenScaledDotProductFusedAttentionOverrideable(
        IgnoreInCacheKey(dropout_p, "Unused"), is_causal,
        IgnoreInCacheKey(return_debug_mask, "Unused"), scale),
       {
+        if (CanUseFlashAttentionForOverrideable(query, key, value, attn_bias,
+                                                dropout_p, is_causal)) {
+          TT_ASSIGN_OR_THROW(auto results,
+                             CreateFlashAttentionKernel(
+                                 query, key, value, attn_bias, is_causal, scale,
+                                 dropout_p, /*return_lse=*/true));
+          auto [out, logsumexp, philox_seed, philox_offset] =
+              std::move(results);
+          Dimensions squeezed_lse_sizes(query.sizes().begin(),
+                                        query.sizes().end() - 1);
+          at::Tensor squeezed_lse =
+              MakeContiguousShapeView(logsumexp, squeezed_lse_sizes);
+          return GenerateResults(std::move(out), std::move(squeezed_lse),
+                                 std::move(philox_seed),
+                                 std::move(philox_offset));
+        }
+
         const bool allow_half_precision_reduction_math =
             at::globalContext().allowFP16BF16ReductionMathSDP();
         TT_THROW_IF_ERROR(param_keys.SetParam(
@@ -337,6 +423,33 @@ AtenScaledDotProductFusedAttentionOverrideableBackward(
        IgnoreInCacheKey(max_k, "Unused"), IgnoreInCacheKey(dropout_p, "Unused"),
        is_causal, philox_seed, philox_offset, scale),
       {
+        const std::optional<at::Tensor> opt_bias =
+            attn_bias.defined() ? std::optional<at::Tensor>(attn_bias)
+                                : std::nullopt;
+        if (CanUseFlashAttentionForOverrideable(query, key, value, opt_bias,
+                                                dropout_p, is_causal)) {
+          Dimensions flash_lse_sizes(query.sizes().begin(),
+                                     query.sizes().end() - 1);
+          flash_lse_sizes.push_back(1);
+          const at::Tensor flash_lse =
+              logsumexp.ndimension() == query.ndimension() - 1
+                  ? MakeContiguousShapeView(logsumexp, flash_lse_sizes)
+                  : logsumexp;
+          TT_ASSIGN_OR_THROW(
+              auto grads,
+              CreateFlashAttentionBackwardKernel(
+                  grad_out, query, key, value, out, flash_lse, attn_bias, scale,
+                  is_causal, dropout_p, philox_seed, philox_offset));
+          return std::make_tuple(
+              grad_input_mask[0] ? std::get<0>(grads)
+                                 : at::zeros({0}, grad_out.options()),
+              grad_input_mask[1] ? std::get<1>(grads)
+                                 : at::zeros({0}, grad_out.options()),
+              grad_input_mask[2] ? std::get<2>(grads)
+                                 : at::zeros({0}, grad_out.options()),
+              at::zeros({0}, grad_out.options()));
+        }
+
         const bool allow_half_precision_reduction_math =
             at::globalContext().allowFP16BF16ReductionMathSDP();
         TT_THROW_IF_ERROR(param_keys.SetParam(

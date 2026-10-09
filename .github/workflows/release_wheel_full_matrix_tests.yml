@@ -30,8 +30,10 @@
 # the nightly glue (--config=wheel_release), and the default pip hub resolves
 # from the release index only.
 #
-# Sizing: TPU v6e has a single runner, so its cells run one after another.
-# Trim the dimensions for v6e rather than dispatching the full product there.
+# Sizing: the TPU v6e runner pool is small (two jobs at a time when this was
+# written), so its cells queue behind each other and behind main's own v6e
+# jobs. Trim the dimensions for v6e rather than dispatching the full product
+# there.
 name: Release Wheel Full Matrix Tests
 run-name: Release wheel full matrix (${{ inputs.test_suite }}, ${{ inputs.gcs_wheel_dir }})
 

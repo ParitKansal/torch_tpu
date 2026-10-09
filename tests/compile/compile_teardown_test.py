@@ -47,9 +47,9 @@ def _worker(argv=None):
   torch.accelerator.synchronize()
 
   expected = torch.tensor([5.0, 7.0, 9.0], dtype=torch.float32)
-  assert torch.equal(out.cpu(), expected), (
-      f"Expected {expected}, got {out.cpu()}"
-  )
+  assert torch.equal(
+      out.cpu(), expected
+  ), f"Expected {expected}, got {out.cpu()}"
 
 
 class CompileTeardownTest(seed_test_utils.MultiProcessRepeatableTest):

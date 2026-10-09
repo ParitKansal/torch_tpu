@@ -471,7 +471,9 @@ class TorchTpuCompiledExecutable(CompiledArtifact):
       potentially after being processed by `reconstruct_fx_outputs_fn`.
     """
     if self._executable is None:
-      raise RuntimeError("Cannot execute a released TorchTpuCompiledExecutable.")
+      raise RuntimeError(
+          "Cannot execute a released TorchTpuCompiledExecutable."
+      )
 
     if self._fast_runner is not None and not output_shapes:
       return self._fast_runner(args)

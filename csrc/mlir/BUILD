@@ -48,6 +48,7 @@ torch_tpu_cc_library(
         ":instrumentation",
         "//csrc/common:env_vars",
         "//csrc/common:error_utils",
+        "//csrc/mlir/passes:fold_transpose_reshape_dot",
         "//csrc/mlir/passes:reassociate_norm_weights",
         "@com_google_absl//absl/status",
         "@llvm-project//mlir:FuncDialect",

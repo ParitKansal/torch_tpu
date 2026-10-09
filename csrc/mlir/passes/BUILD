@@ -15,6 +15,7 @@
 load(
     "//build_files:build_defs.bzl",
     "torch_tpu_cc_library",
+    "torch_tpu_cc_test",
     "torch_tpu_package_end",
 )
 
@@ -32,6 +33,36 @@ torch_tpu_cc_library(
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:Support",
+    ],
+)
+
+torch_tpu_cc_library(
+    name = "fold_transpose_reshape_dot",
+    srcs = ["fold_transpose_reshape_dot.cc"],
+    hdrs = ["fold_transpose_reshape_dot.h"],
+    deps = [
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:Support",
+        "@stablehlo//:chlo_ops",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+torch_tpu_cc_test(
+    name = "fold_transpose_reshape_dot_test",
+    srcs = ["fold_transpose_reshape_dot_test.cc"],
+    deps = [
+        "//csrc/common:oss_test_main",
+        "//csrc/mlir:pipeline",
+        "@com_google_absl//absl/status:status_matchers",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Parser",
+        "@stablehlo//:chlo_ops",
+        "@stablehlo//:stablehlo_ops",
     ],
 )
 

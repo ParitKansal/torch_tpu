@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -1239,20 +1240,75 @@ xla::Future<std::shared_ptr<EventSnapshot>> EventSnapshot::Record(
                              eager_mode);
 }
 
+EventSnapshot::EventSnapshot(xla::Future<void> future)
+    : future_(std::move(future)), completion_(std::make_shared<Completion>()) {
+  // The completion time is recorded before the next snapshot is released, so
+  // the next snapshot cannot complete before this one has a time.
+  future_.OnReady([completion = completion_](absl::Status status) {
+    std::optional<xla::Promise<void>> chain_promise;
+    {
+      absl::MutexLock lock(completion->mu);
+      completion->time = std::chrono::steady_clock::now();
+      completion->completed = true;
+      chain_promise = std::exchange(completion->chain_promise, std::nullopt);
+    }
+    if (chain_promise.has_value()) {
+      ReleaseNextSnapshot(*std::move(chain_promise));
+    }
+  });
+}
+
 absl::Status EventSnapshot::Synchronize() const {
   const absl::Status status = future_.Await();
+  {
+    // The callback on `future_` records the completion right after it.
+    absl::MutexLock lock(completion_->mu,
+                         absl::Condition(&completion_->completed));
+  }
   // Surface the warnings rerouted from background threads.
   SurfaceReroutedWarnings();
   return status;
 }
 
-absl::StatusOr<bool> EventSnapshot::Query() const { return future_.IsReady(); }
+absl::StatusOr<bool> EventSnapshot::Query() const {
+  return CompletionTime().has_value();
+}
+
+std::optional<std::chrono::steady_clock::time_point>
+EventSnapshot::CompletionTime() const {
+  absl::MutexLock lock(completion_->mu);
+  if (!completion_->completed) {
+    return std::nullopt;
+  }
+  return completion_->time;
+}
+
+absl::StatusOr<double> EventSnapshot::ElapsedTime(
+    const EventSnapshot& end) const {
+  const std::optional<std::chrono::steady_clock::time_point> start_time =
+      CompletionTime();
+  const std::optional<std::chrono::steady_clock::time_point> end_time =
+      end.CompletionTime();
+  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=c10::Event::elapsedTime() raises its
+                 // own error unless both events have completed.
+      start_time.has_value() && end_time.has_value(),
+      error::kFailedPrecondition)
+      << "both events must be completed before calculating elapsed time";
+  TT_RETURN_IF_ERROR(future_.Await());
+  TT_RETURN_IF_ERROR(end.future_.Await());
+  return std::chrono::duration<double, std::milli>(*end_time - *start_time)
+      .count();
+}
 
 void EventSnapshot::OkCallback(xla::Promise<void>&& chain_promise) {
-  future_.OnReady(
-      [chain_promise = std::move(chain_promise)](absl::Status status) mutable {
-        ReleaseNextSnapshot(std::move(chain_promise));
-      });
+  {
+    absl::MutexLock lock(completion_->mu);
+    if (!completion_->completed) {
+      completion_->chain_promise = std::move(chain_promise);
+      return;
+    }
+  }
+  ReleaseNextSnapshot(std::move(chain_promise));
 }
 
 void ClearAllStreams() {

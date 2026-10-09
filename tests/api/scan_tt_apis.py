@@ -1211,7 +1211,7 @@ def _resolve_public_path(path: str) -> Any:
   Unlike `_resolve_module_level_path`, this also resolves class members.
 
   Args:
-      path: A dotted path, e.g. "torch.tpu.optimizers.TorchSgd.ParamGroup".
+      path: A dotted path, e.g. "torch.tpu.optimizers.Sgd.ParamGroup".
 
   Returns:
       The object, or None if `path` doesn't resolve.

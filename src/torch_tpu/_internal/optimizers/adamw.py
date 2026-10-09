@@ -26,7 +26,7 @@ from torch_tpu._internal.utils import annotations as _annotations
 
 __all__ = [
     "ReferenceAdamW",
-    "TorchAdamW",
+    "AdamW",
 ]
 
 
@@ -137,7 +137,7 @@ class ReferenceAdamW(_AdamWBase):
   """Reference pure PyTorch implementation of AdamW.
 
   Internal: not part of the public API. Use
-  `torch.tpu.optimizers.TorchAdamW` instead.
+  `torch.tpu.optimizers.AdamW` instead.
   """
 
   def _reference_adamw_update(
@@ -187,9 +187,9 @@ class ReferenceAdamW(_AdamWBase):
 
 
 @_annotations.experimental(
-    "TorchAdamW is experimental and may change or be removed without notice."
+    "AdamW is experimental and may change or be removed without notice."
 )
-class TorchAdamW(_AdamWBase):
+class AdamW(_AdamWBase):
   """Torch AdamW implementation calling torch.optim.adamw.adamw directly."""
 
   _HYPERPARAMETER_NAMES: ClassVar[tuple[str, ...]] = (

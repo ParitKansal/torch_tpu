@@ -88,11 +88,11 @@ class MuonOptimizersTest(seed_test_utils.RepeatableTest):
     )
 
   def test_torch_muon_step(self):
-    opt = optimizers.TorchMuon(lr=1e-3, momentum=0.95, weight_decay=0.1)
+    opt = optimizers.Muon(lr=1e-3, momentum=0.95, weight_decay=0.1)
     self._validate_opt_step(opt, lr=1e-3, momentum=0.95, weight_decay=0.1)
 
   def test_torch_muon_custom_kwargs(self):
-    opt = optimizers.TorchMuon(
+    opt = optimizers.Muon(
         lr=1e-3,
         momentum=0.95,
         weight_decay=0.1,
@@ -102,14 +102,14 @@ class MuonOptimizersTest(seed_test_utils.RepeatableTest):
     self._validate_opt_step(opt, lr=1e-3, momentum=0.95, weight_decay=0.1)
 
   def test_torch_muon_compiled_linear_train_step(self):
-    opt = optimizers.TorchMuon(lr=1e-3, momentum=0.95, weight_decay=0.1)
+    opt = optimizers.Muon(lr=1e-3, momentum=0.95, weight_decay=0.1)
     test_utils.validate_compiled_linear_train_step(
         self, opt, self.device, bias=False
     )
 
   def test_defaults_are_read_only(self):
     for opt in (
-        optimizers.TorchMuon(lr=1e-2, momentum=0.5),
+        optimizers.Muon(lr=1e-2, momentum=0.5),
         muon.ReferenceMuon(lr=1e-2, momentum=0.5),
     ):
       with self.subTest(type(opt).__name__):

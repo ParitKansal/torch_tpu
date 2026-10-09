@@ -273,13 +273,13 @@ _PUBLIC_MODULES: Mapping[str, ModuleSpec] = {
     "torch.tpu.optimizers": ModuleSpec(
         exports={
             # go/keep-sorted start
+            "AdamW": "torch_tpu._internal.optimizers.adamw:AdamW",
+            "Muon": "torch_tpu._internal.optimizers.muon:Muon",
             "Optimizer": "torch_tpu._internal.optimizers.optim:Optimizer",
+            "Sgd": "torch_tpu._internal.optimizers.sgd:Sgd",
             "SingleTraceTrainer": (
                 "torch_tpu._internal.optimizers.single_trace_trainer:SingleTraceTrainer"
             ),
-            "TorchAdamW": "torch_tpu._internal.optimizers.adamw:TorchAdamW",
-            "TorchMuon": "torch_tpu._internal.optimizers.muon:TorchMuon",
-            "TorchSgd": "torch_tpu._internal.optimizers.sgd:TorchSgd",
             # go/keep-sorted end
         },
         doc="Public optimizers API for TorchTPU (`torch.tpu.optimizers`).",

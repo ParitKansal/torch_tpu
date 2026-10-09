@@ -80,7 +80,7 @@ def _to_single_trace_optimizer(
     return optimizer
   defaults = getattr(optimizer, "defaults", {})
   if isinstance(optimizer, torch.optim.SGD):
-    return single_trace_trainer_adapter.TorchSgd(
+    return single_trace_trainer_adapter.Sgd(
         lr=defaults.get("lr", 1e-3),
         momentum=defaults.get("momentum", 0.0),
         dampening=defaults.get("dampening", 0.0),

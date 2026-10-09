@@ -28,11 +28,11 @@ optimizers = torch.tpu.optimizers
 # Re-export optimizer classes
 Optimizer = optimizers.Optimizer
 ReferenceAdamW = adamw.ReferenceAdamW
-TorchAdamW = optimizers.TorchAdamW
+AdamW = optimizers.AdamW
 ReferenceSgd = sgd.ReferenceSgd
-TorchSgd = optimizers.TorchSgd
+Sgd = optimizers.Sgd
 ReferenceMuon = muon.ReferenceMuon
-TorchMuon = optimizers.TorchMuon
+Muon = optimizers.Muon
 
 
 class SingleTraceTrainerAdapter(optimizers.SingleTraceTrainer):

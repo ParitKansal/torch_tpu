@@ -27,7 +27,7 @@ from torch_tpu._internal.utils import annotations as _annotations
 
 __all__ = [
     "ReferenceMuon",
-    "TorchMuon",
+    "Muon",
 ]
 
 
@@ -192,7 +192,7 @@ class ReferenceMuon(_MuonBase):
   """Reference pure PyTorch implementation of Muon.
 
   Internal: not part of the public API. Use
-  `torch.tpu.optimizers.TorchMuon` instead.
+  `torch.tpu.optimizers.Muon` instead.
   """
 
   def _reference_muon_update(
@@ -231,9 +231,9 @@ class ReferenceMuon(_MuonBase):
 
 
 @_annotations.experimental(
-    "TorchMuon is experimental and may change or be removed without notice."
+    "Muon is experimental and may change or be removed without notice."
 )
-class TorchMuon(_MuonBase):
+class Muon(_MuonBase):
   """Torch Muon implementation calling torch.optim._muon.muon directly."""
 
   _HYPERPARAMETER_NAMES: ClassVar[tuple[str, ...]] = (

@@ -96,15 +96,15 @@ class SGDOptimizersTest(seed_test_utils.RepeatableTest):
     test_utils.validate_compiled_linear_train_step(self, opt, self.device)
 
   def test_torch_sgd_step(self):
-    opt = optimizers.TorchSgd(lr=1e-2, momentum=0.9)
+    opt = optimizers.Sgd(lr=1e-2, momentum=0.9)
     self._validate_opt_step(opt, lr=1e-2, momentum=0.9)
 
   def test_torch_sgd_no_momentum_step(self):
-    opt = optimizers.TorchSgd(lr=1e-2, momentum=0.0)
+    opt = optimizers.Sgd(lr=1e-2, momentum=0.0)
     self._validate_opt_step(opt, lr=1e-2, momentum=0.0)
 
   def test_torch_sgd_custom_kwargs(self):
-    opt = optimizers.TorchSgd(
+    opt = optimizers.Sgd(
         lr=1e-2,
         momentum=0.9,
         fused=False,
@@ -114,12 +114,12 @@ class SGDOptimizersTest(seed_test_utils.RepeatableTest):
     self._validate_opt_step(opt, lr=1e-2, momentum=0.9)
 
   def test_torch_sgd_compiled_linear_train_step(self):
-    opt = optimizers.TorchSgd(lr=1e-2, momentum=0.9)
+    opt = optimizers.Sgd(lr=1e-2, momentum=0.9)
     test_utils.validate_compiled_linear_train_step(self, opt, self.device)
 
   def test_defaults_are_read_only(self):
     for opt in (
-        optimizers.TorchSgd(lr=1e-2, momentum=0.5),
+        optimizers.Sgd(lr=1e-2, momentum=0.5),
         sgd.ReferenceSgd(lr=1e-2, momentum=0.5),
     ):
       with self.subTest(type(opt).__name__):

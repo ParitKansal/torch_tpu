@@ -117,6 +117,11 @@ process. Use it at your own risk. Using it triggers a one-time warning.
 *   `torch.tpu.device_of`
 *   `torch.tpu.distributed.set_tpu_launch_env`
 *   `torch.tpu.distributed.spmd_safe`
+*   `torch.tpu.distributed.topology_aware_mesh`
+*   `torch.tpu.distributed.window_num_stripes` (getter)
+*   `torch.tpu.distributed.window_num_stripes` (setter)
+*   `torch.tpu.distributed.window_stripe_chunk_mb` (getter)
+*   `torch.tpu.distributed.window_stripe_chunk_mb` (setter)
 *   `torch.tpu.eager_mode` (getter)
 *   `torch.tpu.eager_mode` (setter)
 *   `torch.tpu.get_amp_supported_dtype`
@@ -176,11 +181,6 @@ process. Use it at your own risk. Using it triggers a one-time warning.
 *   `torch.tpu.set_eager_mode`
 *   `torch.tpu.set_rng_state`
 *   `torch.tpu.stream`
-*   `torch.tpu.topology_aware_mesh`
-*   `torch.tpu.window_num_stripes` (getter)
-*   `torch.tpu.window_num_stripes` (setter)
-*   `torch.tpu.window_stripe_chunk_mb` (getter)
-*   `torch.tpu.window_stripe_chunk_mb` (setter)
 
 ### Environment Variables
 
@@ -218,6 +218,7 @@ PyTorch deprecation policy instead.
 
 *   `torch.accelerator.current_device_idx` (deprecated by PyTorch)
 *   `torch.accelerator.set_device_idx` (deprecated by PyTorch)
+*   `torch.tpu.topology_aware_mesh` (deprecated in TorchTPU 0.2.0)
 
 <!-- END GENERATED: Deprecated APIs -->
 

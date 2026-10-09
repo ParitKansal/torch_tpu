@@ -4032,7 +4032,7 @@ module {
         tpu="""_set_window_num_stripes(): expected window_num_stripes to be > 0, got 0""",
         message_reviewed_by="wan",
     ):
-      torch.tpu.window_num_stripes = 0
+      torch.tpu.distributed.window_num_stripes = 0
 
   @et.why_tpu_only("WindowTPU DMA striping configuration is TPU-specific")
   def test_window_num_stripes_negative(self):
@@ -4041,7 +4041,7 @@ module {
         tpu="""_set_window_num_stripes(): expected window_num_stripes to be > 0, got -1""",
         message_reviewed_by="wan",
     ):
-      torch.tpu.window_num_stripes = -1
+      torch.tpu.distributed.window_num_stripes = -1
 
   @et.why_tpu_only("WindowTPU DMA striping configuration is TPU-specific")
   def test_window_stripe_chunk_mb_non_positive(self):
@@ -4050,7 +4050,7 @@ module {
         tpu="""_set_window_stripe_chunk_mb(): expected window_stripe_chunk_mb to be > 0, got 0""",
         message_reviewed_by="wan",
     ):
-      torch.tpu.window_stripe_chunk_mb = 0
+      torch.tpu.distributed.window_stripe_chunk_mb = 0
 
   @et.why_tpu_only("WindowTPU DMA striping configuration is TPU-specific")
   def test_window_stripe_chunk_mb_negative(self):
@@ -4059,7 +4059,7 @@ module {
         tpu="""_set_window_stripe_chunk_mb(): expected window_stripe_chunk_mb to be > 0, got -1""",
         message_reviewed_by="wan",
     ):
-      torch.tpu.window_stripe_chunk_mb = -1
+      torch.tpu.distributed.window_stripe_chunk_mb = -1
 
   @et.why_tpu_only("Only default driver ('gesvd') is supported on TPU")
   def test_linalg_svd_unsupported_driver(self):

@@ -80,6 +80,11 @@ torch.tpu.device_count: {category: Public Python API, defined_in: runtime, prefe
 torch.tpu.device_of: {category: Public Python API, defined_in: runtime, stage: Experimental}
 torch.tpu.distributed.set_tpu_launch_env: {category: Public Python API, defined_in: runtime, stage: Experimental}
 torch.tpu.distributed.spmd_safe: {category: Public Python API, defined_in: runtime, stage: Experimental}
+torch.tpu.distributed.topology_aware_mesh: {category: Public Python API, defined_in: runtime, stage: Experimental}
+torch.tpu.distributed.window_num_stripes getter: {category: Public Python API, defined_in: runtime, stage: Experimental}
+torch.tpu.distributed.window_num_stripes setter: {category: Public Python API, defined_in: runtime, stage: Experimental}
+torch.tpu.distributed.window_stripe_chunk_mb getter: {category: Public Python API, defined_in: runtime, stage: Experimental}
+torch.tpu.distributed.window_stripe_chunk_mb setter: {category: Public Python API, defined_in: runtime, stage: Experimental}
 torch.tpu.eager_mode getter: {category: Public Python API, defined_in: runtime, stage: Experimental}
 torch.tpu.eager_mode setter: {category: Public Python API, defined_in: runtime, stage: Experimental}
 torch.tpu.get_amp_supported_dtype: {category: Public Python API, defined_in: runtime, stage: Experimental}
@@ -151,11 +156,7 @@ torch.tpu.set_rng_state: {category: Public Python API, defined_in: runtime, stag
 torch.tpu.set_stream: {category: Public Python API, defined_in: runtime, prefer: torch.accelerator.set_stream, stage: Internal}
 torch.tpu.stream: {category: Public Python API, defined_in: runtime, stage: Experimental}
 torch.tpu.synchronize: {category: Public Python API, defined_in: runtime, prefer: torch.accelerator.synchronize, stage: Internal}
-torch.tpu.topology_aware_mesh: {category: Public Python API, defined_in: runtime, stage: Experimental}
-torch.tpu.window_num_stripes getter: {category: Public Python API, defined_in: runtime, stage: Experimental}
-torch.tpu.window_num_stripes setter: {category: Public Python API, defined_in: runtime, stage: Experimental}
-torch.tpu.window_stripe_chunk_mb getter: {category: Public Python API, defined_in: runtime, stage: Experimental}
-torch.tpu.window_stripe_chunk_mb setter: {category: Public Python API, defined_in: runtime, stage: Experimental}
+torch.tpu.topology_aware_mesh: {category: Public Python API, defined_in: runtime, deprecated_in: 0.2.0, stage: Deprecated}
 
 # --- ABSL Python Flag ---
 torch_tpu_internal_compilation_container_memory_limit_mb: {category: ABSL Python Flag, defined_in: runtime, stage: Internal}

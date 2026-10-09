@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from unittest import mock
+import warnings
 
 from absl.testing import absltest
 import torch
@@ -66,7 +67,9 @@ class DeviceMeshTest(seed_test_utils.MultiProcessRepeatableTest):
             "torch_tpu._internal.distributed.device_mesh._gather_global_device_info",
             return_value=infos,
         ):
-          rank_mesh = torch.tpu.topology_aware_mesh(mesh_shape=(8, 8))
+          rank_mesh = torch.tpu.distributed.topology_aware_mesh(
+              mesh_shape=(8, 8)
+          )
 
     # Verify that the rank mesh has the correct shape.
     self.assertEqual(rank_mesh.shape, (8, 8))
@@ -109,7 +112,7 @@ class DeviceMeshTest(seed_test_utils.MultiProcessRepeatableTest):
 
     rank_mesh = device_mesh_test_utils.patched_call(
         infos,
-        lambda: torch.tpu.topology_aware_mesh(
+        lambda: torch.tpu.distributed.topology_aware_mesh(
             mesh_shape=(2, 8),
             dcn_mesh_shape=(2, 1),
         ),
@@ -132,11 +135,11 @@ class DeviceMeshTest(seed_test_utils.MultiProcessRepeatableTest):
 
     inferred = device_mesh_test_utils.patched_call(
         infos,
-        lambda: torch.tpu.topology_aware_mesh(mesh_shape=(2, 8)),
+        lambda: torch.tpu.distributed.topology_aware_mesh(mesh_shape=(2, 8)),
     )
     explicit = device_mesh_test_utils.patched_call(
         infos,
-        lambda: torch.tpu.topology_aware_mesh(
+        lambda: torch.tpu.distributed.topology_aware_mesh(
             mesh_shape=(2, 8),
             dcn_mesh_shape=(2, 1),
         ),
@@ -151,7 +154,7 @@ class DeviceMeshTest(seed_test_utils.MultiProcessRepeatableTest):
 
     rank_mesh = device_mesh_test_utils.patched_call(
         infos,
-        lambda: torch.tpu.topology_aware_mesh(
+        lambda: torch.tpu.distributed.topology_aware_mesh(
             mesh_shape=(2, 8),
             dcn_mesh_shape=(2, 1),
         ),
@@ -176,17 +179,45 @@ class DeviceMeshTest(seed_test_utils.MultiProcessRepeatableTest):
 
     explicit = device_mesh_test_utils.patched_call(
         infos,
-        lambda: torch.tpu.topology_aware_mesh(
+        lambda: torch.tpu.distributed.topology_aware_mesh(
             mesh_shape=(1, 8),
             dcn_mesh_shape=(1, 1),
         ),
     )
     omitted = device_mesh_test_utils.patched_call(
         infos,
-        lambda: torch.tpu.topology_aware_mesh(mesh_shape=(1, 8)),
+        lambda: torch.tpu.distributed.topology_aware_mesh(mesh_shape=(1, 8)),
     )
 
     self.assertEqual(explicit.tolist(), omitted.tolist())
+
+  def test_deprecated_torch_tpu_alias_matches_and_warns(self):
+    infos = device_mesh_test_utils.v7x_multislice_infos(num_slices=2)
+
+    expected = device_mesh_test_utils.patched_call(
+        infos,
+        lambda: torch.tpu.distributed.topology_aware_mesh(mesh_shape=(2, 8)),
+    )
+    with warnings.catch_warnings(record=True) as w:
+      warnings.simplefilter("always")
+      actual = device_mesh_test_utils.patched_call(
+          infos,
+          lambda: torch.tpu.topology_aware_mesh(mesh_shape=(2, 8)),
+      )
+
+    self.assertEqual(actual.tolist(), expected.tolist())
+    deprecations = [
+        item for item in w if issubclass(item.category, DeprecationWarning)
+    ]
+    self.assertLen(deprecations, 1)
+    self.assertIn(
+        "topology_aware_mesh is deprecated as of TorchTPU 0.2.0",
+        str(deprecations[0].message),
+    )
+    self.assertIn(
+        "Use torch.tpu.distributed.topology_aware_mesh instead.",
+        str(deprecations[0].message),
+    )
 
   def test_infer_dcn_mesh_shape_picks_outermost_divisible_axis(self):
     # TorchTitan orders its axes (pp, dp_replicate, dp_shard, cp, tp), so the

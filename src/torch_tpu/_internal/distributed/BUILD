@@ -31,6 +31,17 @@ package(
 )
 
 torch_tpu_py_library(
+    name = "_distributed_module",
+    srcs = ["_distributed_module.py"],
+    deps = [
+        ":device_mesh",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu/_internal/device:_device_ops_backend",
+        "//src/torch_tpu/_internal/utils:annotations",
+    ],
+)
+
+torch_tpu_py_library(
     name = "distributed",
     srcs = ["distributed.py"],
     deps = [

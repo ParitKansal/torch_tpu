@@ -324,54 +324,6 @@ class _DeviceModuleMeta(abc.ABCMeta):
 
   @property
   @annotations.experimental(
-      "window_num_stripes is experimental and may change or be removed "
-      "without notice."
-  )
-  def window_num_stripes(cls) -> int:
-    """Maximum concurrent DMA stripes for WindowTpu peer transfers."""
-    getter = getattr(_device_ops_backend, "_get_window_num_stripes", None)
-    if getter is None:
-      raise RuntimeError("TorchTPU device ops backend is not initialized.")
-    return getter()
-
-  @window_num_stripes.setter
-  @annotations.experimental(
-      "window_num_stripes is experimental and may change or be removed "
-      "without notice."
-  )
-  def window_num_stripes(cls, value: int):
-    """Sets maximum concurrent DMA stripes for WindowTpu peer transfers."""
-    setter = getattr(_device_ops_backend, "_set_window_num_stripes", None)
-    if setter is None:
-      raise RuntimeError("TorchTPU device ops backend is not initialized.")
-    setter(value)
-
-  @property
-  @annotations.experimental(
-      "window_stripe_chunk_mb is experimental and may change or be removed "
-      "without notice."
-  )
-  def window_stripe_chunk_mb(cls) -> int:
-    """Minimum payload size in MB per parallel DMA stripe for WindowTpu."""
-    getter = getattr(_device_ops_backend, "_get_window_stripe_chunk_mb", None)
-    if getter is None:
-      raise RuntimeError("TorchTPU device ops backend is not initialized.")
-    return getter()
-
-  @window_stripe_chunk_mb.setter
-  @annotations.experimental(
-      "window_stripe_chunk_mb is experimental and may change or be removed "
-      "without notice."
-  )
-  def window_stripe_chunk_mb(cls, value: int):
-    """Sets minimum payload size in MB per parallel DMA stripe for WindowTpu."""
-    setter = getattr(_device_ops_backend, "_set_window_stripe_chunk_mb", None)
-    if setter is None:
-      raise RuntimeError("TorchTPU device ops backend is not initialized.")
-    setter(value)
-
-  @property
-  @annotations.experimental(
       "eager_mode is experimental and may change or be removed without notice."
   )
   def eager_mode(
@@ -1131,8 +1083,9 @@ class TpuDeviceModule(_DeviceModule):
     return ""
 
   @classmethod
-  @experimental(
-      "topology_aware_mesh() is experimental and may change in the future."
+  @annotations.deprecated(
+      version="0.2.0",
+      reason="Use torch.tpu.distributed.topology_aware_mesh instead.",
   )
   def topology_aware_mesh(
       cls,
@@ -1142,20 +1095,13 @@ class TpuDeviceModule(_DeviceModule):
       allow_split_physical_axes: bool = False,
       contiguous_submeshes: bool = False,
   ) -> torch.Tensor:
-    """Computes a topology-aware rank layout tensor.
-
-    Returns an int64 tensor of global torch ranks with shape `mesh_shape`,
-    mapping logically adjacent coordinate positions to physically adjacent TPU
-    devices on the ICI fabric. Whether the job spans one slice or several is
-    read off the devices, so the same call covers both.
+    """Deprecated alias of `torch.tpu.distributed.topology_aware_mesh`.
 
     Args:
       mesh_shape: Full logical mesh shape, ordered by increasing network
-        intensity. Its product must equal the world size, on multi-slice jobs
-        too.
-      dcn_mesh_shape: Which logical axes are split across slices. Same rank as
-        `mesh_shape`, product equal to the number of slices, and must divide
-        `mesh_shape` elementwise. Inferred when None.
+        intensity.
+      dcn_mesh_shape: Which logical axes are split across slices. Inferred when
+        None.
       allow_split_physical_axes: Permits splitting a physical axis across
         logical axes when required.
       contiguous_submeshes: Forwards to create_device_mesh.

@@ -122,6 +122,56 @@ void PruneCompletedFutures(std::vector<xla::Future<void>>& futures) {
       futures.end());
 }
 
+// Sets the promises that release the next event snapshot of a stream. Setting
+// one completes the next snapshot, whose callback releases the snapshot after
+// it, so setting each promise directly nests one call per snapshot, and a long
+// chain overflows the stack of the thread that completed the first snapshot.
+// Instead, a promise released while a thread is already setting promises is
+// queued, and that thread sets it after the current one returns, so a chain of
+// any length completes in a loop.
+class SnapshotChainReleaser {
+ public:
+  void Release(xla::Promise<void> promise) {
+    {
+      absl::MutexLock lock(mu_);
+      if (releasing_) {
+        pending_.push_back(std::move(promise));
+        return;
+      }
+      releasing_ = true;
+    }
+    promise.Set(absl::OkStatus());
+    std::vector<xla::Promise<void>> promises;
+    while (true) {
+      {
+        absl::MutexLock lock(mu_);
+        if (pending_.empty()) {
+          releasing_ = false;
+          return;
+        }
+        promises.swap(pending_);
+      }
+      for (xla::Promise<void>& next : promises) {
+        next.Set(absl::OkStatus());
+      }
+      promises.clear();
+    }
+  }
+
+ private:
+  absl::Mutex mu_;
+  // Promises released while a thread was setting promises.
+  std::vector<xla::Promise<void>> pending_ ABSL_GUARDED_BY(mu_);
+  // Whether a thread is setting promises.
+  bool releasing_ ABSL_GUARDED_BY(mu_) = false;
+};
+
+// Releases the next event snapshot of a stream.
+void ReleaseNextSnapshot(xla::Promise<void> promise) {
+  static absl::NoDestructor<SnapshotChainReleaser> releaser;
+  releaser->Release(std::move(promise));
+}
+
 // Lightweight matcher for target DeviceBufferList pointers during
 // materialization. Avoids heap allocation and SwissTable hashing for the common
 // single-node and small-span cases.
@@ -479,7 +529,7 @@ class StreamState {
                                 absl::StatusOr<std::shared_ptr<EventSnapshot>>
                                     snapshot_or) mutable {
       if (!snapshot_or.ok()) {
-        chaining_promise.Set(absl::OkStatus());
+        ReleaseNextSnapshot(std::move(chaining_promise));
       } else {
         (*snapshot_or)->OkCallback(std::move(chaining_promise));
       }
@@ -1201,7 +1251,7 @@ absl::StatusOr<bool> EventSnapshot::Query() const { return future_.IsReady(); }
 void EventSnapshot::OkCallback(xla::Promise<void>&& chain_promise) {
   future_.OnReady(
       [chain_promise = std::move(chain_promise)](absl::Status status) mutable {
-        chain_promise.Set(absl::OkStatus());
+        ReleaseNextSnapshot(std::move(chain_promise));
       });
 }
 

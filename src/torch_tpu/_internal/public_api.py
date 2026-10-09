@@ -42,7 +42,7 @@ class Property:
   Attributes:
     target: Dotted module path and colon-separated attribute path resolving to a
       `property` object, e.g.
-      `"torch_tpu._internal.device._device_module:_DeviceModuleMeta.window_num_stripes"`.
+      `"torch_tpu._internal.device._device_module:_DeviceModuleMeta.allow_excess_precision"`.
   """
 
   target: str
@@ -76,6 +76,12 @@ class ModuleSpec:
 
 _DEVICE_MODULE: Final[str] = "torch_tpu._internal.device._device_module"
 _TPU_DEVICE_CLASS: Final[str] = f"{_DEVICE_MODULE}:TpuDeviceModule"
+_DISTRIBUTED_MODULE: Final[str] = (
+    "torch_tpu._internal.distributed._distributed_module"
+)
+_DISTRIBUTED_PROPERTIES_CLASS: Final[str] = (
+    f"{_DISTRIBUTED_MODULE}:DistributedModuleProperties"
+)
 
 
 def _tpu_attr(name: str) -> str:
@@ -159,12 +165,6 @@ _PUBLIC_MODULES: Mapping[str, ModuleSpec] = {
             "stream": _tpu_attr("stream"),
             "synchronize": _tpu_attr("synchronize"),
             "topology_aware_mesh": _tpu_attr("topology_aware_mesh"),
-            "window_num_stripes": Property(
-                f"{_DEVICE_MODULE}:_DeviceModuleMeta.window_num_stripes"
-            ),
-            "window_stripe_chunk_mb": Property(
-                f"{_DEVICE_MODULE}:_DeviceModuleMeta.window_stripe_chunk_mb"
-            ),
             # go/keep-sorted end
         },
         private_fallback=_TPU_DEVICE_CLASS,
@@ -188,6 +188,13 @@ _PUBLIC_MODULES: Mapping[str, ModuleSpec] = {
                 "torch_tpu._internal.distributed.distributed:set_tpu_launch_env"
             ),
             "spmd_safe": "torch_tpu._internal.distributed.spmd_util:spmd_safe",
+            "topology_aware_mesh": f"{_DISTRIBUTED_MODULE}:topology_aware_mesh",
+            "window_num_stripes": Property(
+                f"{_DISTRIBUTED_PROPERTIES_CLASS}.window_num_stripes"
+            ),
+            "window_stripe_chunk_mb": Property(
+                f"{_DISTRIBUTED_PROPERTIES_CLASS}.window_stripe_chunk_mb"
+            ),
             # go/keep-sorted end
         },
         main="torch_tpu._internal.distributed.distributed",

@@ -119,6 +119,7 @@ torch_tpu_py_library(
         "//src/torch_tpu/_internal/compiler_options",  # build_cleaner: keep
         "//src/torch_tpu/_internal/device:_device_module",  # build_cleaner: keep
         "//src/torch_tpu/_internal/distributed",  # build_cleaner: keep
+        "//src/torch_tpu/_internal/distributed:_distributed_module",  # build_cleaner: keep
         "//src/torch_tpu/_internal/distributed:spmd_util",  # build_cleaner: keep
         "//src/torch_tpu/_internal/ops:collectives",  # build_cleaner: keep
         "//src/torch_tpu/_internal/ops:jagged",  # build_cleaner: keep

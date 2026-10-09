@@ -207,24 +207,24 @@ class TpuDeviceModuleTest(
     self.assertFalse(self.device_module._is_gpu())
 
   def test_window_num_stripes(self):
-    """Tests torch.tpu.window_num_stripes property."""
-    original = torch.tpu.window_num_stripes
+    """Tests torch.tpu.distributed.window_num_stripes property."""
+    original = torch.tpu.distributed.window_num_stripes
     try:
       self.assertEqual(original, 4)
-      torch.tpu.window_num_stripes = 8
-      self.assertEqual(torch.tpu.window_num_stripes, 8)
+      torch.tpu.distributed.window_num_stripes = 8
+      self.assertEqual(torch.tpu.distributed.window_num_stripes, 8)
     finally:
-      torch.tpu.window_num_stripes = original
+      torch.tpu.distributed.window_num_stripes = original
 
   def test_window_stripe_chunk_mb(self):
-    """Tests torch.tpu.window_stripe_chunk_mb property."""
-    original = torch.tpu.window_stripe_chunk_mb
+    """Tests torch.tpu.distributed.window_stripe_chunk_mb property."""
+    original = torch.tpu.distributed.window_stripe_chunk_mb
     try:
       self.assertEqual(original, 8)
-      torch.tpu.window_stripe_chunk_mb = 16
-      self.assertEqual(torch.tpu.window_stripe_chunk_mb, 16)
+      torch.tpu.distributed.window_stripe_chunk_mb = 16
+      self.assertEqual(torch.tpu.distributed.window_stripe_chunk_mb, 16)
     finally:
-      torch.tpu.window_stripe_chunk_mb = original
+      torch.tpu.distributed.window_stripe_chunk_mb = original
 
   def test_compute_window_stripe_count(self):
     """Tests stripe count calculation logic across tensor byte sizes and configurations."""
@@ -236,12 +236,13 @@ class TpuDeviceModuleTest(
     if compute_fn is None:
       return
 
-    original_stripes = torch.tpu.window_num_stripes
-    original_chunk_mb = torch.tpu.window_stripe_chunk_mb
+    tpu_dist = torch.tpu.distributed
+    original_stripes = tpu_dist.window_num_stripes
+    original_chunk_mb = tpu_dist.window_stripe_chunk_mb
     try:
       # Default: 8 MB chunk, 4 max stripes
-      torch.tpu.window_num_stripes = 4
-      torch.tpu.window_stripe_chunk_mb = 8
+      tpu_dist.window_num_stripes = 4
+      tpu_dist.window_stripe_chunk_mb = 8
       mb = 1024 * 1024
 
       self.assertEqual(compute_fn(0), 1)
@@ -258,8 +259,8 @@ class TpuDeviceModuleTest(
       self.assertEqual(compute_fn(128 * mb), 4)
 
       # Custom: 4 MB chunk, 8 max stripes
-      torch.tpu.window_num_stripes = 8
-      torch.tpu.window_stripe_chunk_mb = 4
+      tpu_dist.window_num_stripes = 8
+      tpu_dist.window_stripe_chunk_mb = 4
 
       self.assertEqual(compute_fn(4 * mb), 1)
       self.assertEqual(compute_fn(8 * mb), 2)
@@ -267,8 +268,8 @@ class TpuDeviceModuleTest(
       self.assertEqual(compute_fn(32 * mb), 8)
       self.assertEqual(compute_fn(64 * mb), 8)
     finally:
-      torch.tpu.window_num_stripes = original_stripes
-      torch.tpu.window_stripe_chunk_mb = original_chunk_mb
+      tpu_dist.window_num_stripes = original_stripes
+      tpu_dist.window_stripe_chunk_mb = original_chunk_mb
 
   def test_torch_save_load_no_warnings(self):
     """Verifies that torch.save and torch.load do not emit warnings on TPU tensors."""

@@ -33,7 +33,7 @@ def _worker(argv=None):
   import torch
   from torch_tpu import _loader
 
-  _loader.load("tpu")
+  _loader.load()
 
   @torch.compile(backend="tpu", dynamic=False, fullgraph=True)
   def add_fn(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:

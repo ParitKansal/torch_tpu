@@ -26,7 +26,7 @@ from torch_tpu._internal.utils import annotations as _annotations
 
 __all__ = [
     "ReferenceSgd",
-    "TorchSgd",
+    "Sgd",
 ]
 
 
@@ -123,7 +123,7 @@ class ReferenceSgd(_SgdBase):
   """Reference pure PyTorch implementation of SGD.
 
   Internal: not part of the public API. Use
-  `torch.tpu.optimizers.TorchSgd` instead.
+  `torch.tpu.optimizers.Sgd` instead.
   """
 
   def _reference_sgd_update(
@@ -170,9 +170,9 @@ class ReferenceSgd(_SgdBase):
 
 
 @_annotations.experimental(
-    "TorchSgd is experimental and may change or be removed without notice."
+    "Sgd is experimental and may change or be removed without notice."
 )
-class TorchSgd(_SgdBase):
+class Sgd(_SgdBase):
   """Torch SGD implementation calling torch.optim.sgd.sgd directly."""
 
   _HYPERPARAMETER_NAMES: ClassVar[tuple[str, ...]] = (

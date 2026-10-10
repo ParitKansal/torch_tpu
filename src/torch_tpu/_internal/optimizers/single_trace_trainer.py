@@ -39,11 +39,11 @@ __all__ = [
 # Re-export optimizer classes for simple_trainer
 Optimizer = optim.Optimizer
 ReferenceAdamW = adamw.ReferenceAdamW
-TorchAdamW = adamw.TorchAdamW
+AdamW = adamw.AdamW
 ReferenceSgd = sgd.ReferenceSgd
-TorchSgd = sgd.TorchSgd
+Sgd = sgd.Sgd
 ReferenceMuon = muon.ReferenceMuon
-TorchMuon = muon.TorchMuon
+Muon = muon.Muon
 
 
 @contextlib.contextmanager

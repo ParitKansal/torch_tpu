@@ -152,29 +152,29 @@ process. Use it at your own risk. Using it triggers a one-time warning.
 *   `torch.tpu.ops.sparse_map_row`
 *   `torch.tpu.ops.splash_sdpa`
 *   `torch.tpu.ops.strip_jagged_padding`
+*   `torch.tpu.optimizers.AdamW`
+*   `torch.tpu.optimizers.AdamW.ParamGroup`
+*   `torch.tpu.optimizers.AdamW.defaults` (getter)
+*   `torch.tpu.optimizers.AdamW.init_param_group`
+*   `torch.tpu.optimizers.AdamW.step`
+*   `torch.tpu.optimizers.Muon`
+*   `torch.tpu.optimizers.Muon.ParamGroup`
+*   `torch.tpu.optimizers.Muon.defaults` (getter)
+*   `torch.tpu.optimizers.Muon.init_param_group`
+*   `torch.tpu.optimizers.Muon.step`
 *   `torch.tpu.optimizers.Optimizer`
 *   `torch.tpu.optimizers.Optimizer.defaults` (getter)
 *   `torch.tpu.optimizers.Optimizer.init_param_group`
 *   `torch.tpu.optimizers.Optimizer.step`
+*   `torch.tpu.optimizers.Sgd`
+*   `torch.tpu.optimizers.Sgd.ParamGroup`
+*   `torch.tpu.optimizers.Sgd.defaults` (getter)
+*   `torch.tpu.optimizers.Sgd.init_param_group`
+*   `torch.tpu.optimizers.Sgd.step`
 *   `torch.tpu.optimizers.SingleTraceTrainer`
 *   `torch.tpu.optimizers.SingleTraceTrainer.make_compiled_train_step`
 *   `torch.tpu.optimizers.SingleTraceTrainer.param_group` (getter)
 *   `torch.tpu.optimizers.SingleTraceTrainer.params` (getter)
-*   `torch.tpu.optimizers.TorchAdamW`
-*   `torch.tpu.optimizers.TorchAdamW.ParamGroup`
-*   `torch.tpu.optimizers.TorchAdamW.defaults` (getter)
-*   `torch.tpu.optimizers.TorchAdamW.init_param_group`
-*   `torch.tpu.optimizers.TorchAdamW.step`
-*   `torch.tpu.optimizers.TorchMuon`
-*   `torch.tpu.optimizers.TorchMuon.ParamGroup`
-*   `torch.tpu.optimizers.TorchMuon.defaults` (getter)
-*   `torch.tpu.optimizers.TorchMuon.init_param_group`
-*   `torch.tpu.optimizers.TorchMuon.step`
-*   `torch.tpu.optimizers.TorchSgd`
-*   `torch.tpu.optimizers.TorchSgd.ParamGroup`
-*   `torch.tpu.optimizers.TorchSgd.defaults` (getter)
-*   `torch.tpu.optimizers.TorchSgd.init_param_group`
-*   `torch.tpu.optimizers.TorchSgd.step`
 *   `torch.tpu.pallas.jax_op`
 *   `torch.tpu.precision`
 *   `torch.tpu.profiler.TpuProfilerConfig`

@@ -95,13 +95,13 @@ class AdamWOptimizersTest(seed_test_utils.RepeatableTest):
     self._validate_opt_step(opt, lr=1e-3, weight_decay=1e-2)
 
   def test_torch_adamw_step(self):
-    opt = optimizers.TorchAdamW(
+    opt = optimizers.AdamW(
         lr=1e-3, weight_decay=1e-2, use_bfloat16_moments=False
     )
     self._validate_opt_step(opt, lr=1e-3, weight_decay=1e-2)
 
   def test_torch_adamw_custom_kwargs(self):
-    opt = optimizers.TorchAdamW(
+    opt = optimizers.AdamW(
         lr=1e-3,
         weight_decay=1e-2,
         use_bfloat16_moments=False,
@@ -113,14 +113,14 @@ class AdamWOptimizersTest(seed_test_utils.RepeatableTest):
     self._validate_opt_step(opt, lr=1e-3, weight_decay=1e-2)
 
   def test_torch_adamw_compiled_linear_train_step(self):
-    opt = optimizers.TorchAdamW(
+    opt = optimizers.AdamW(
         lr=1e-3, weight_decay=1e-2, use_bfloat16_moments=False
     )
     test_utils.validate_compiled_linear_train_step(self, opt, self.device)
 
   def test_defaults_are_read_only(self):
     for opt in (
-        optimizers.TorchAdamW(lr=1e-2, beta1=0.5),
+        optimizers.AdamW(lr=1e-2, beta1=0.5),
         adamw.ReferenceAdamW(lr=1e-2, beta1=0.5),
     ):
       with self.subTest(type(opt).__name__):

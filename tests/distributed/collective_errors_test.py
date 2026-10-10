@@ -453,7 +453,7 @@ def run_conflicting_device_assignments_error() -> None:
   expected = torch.full((4,), float(world_size + half), dtype=torch.float32)
   utils.assert_close(res, expected)
 
-  mesh1 = pallas.get_pallas_mesh(axis_names=("x",))
+  mesh1 = torch.tpu.pallas.get_pallas_mesh(axis_names=("x",))
   mesh2 = jax.sharding.Mesh(mesh1.devices[::-1], axis_names=mesh1.axis_names)
 
   def add_one(x: jax.Array) -> jax.Array:

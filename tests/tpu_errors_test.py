@@ -4811,7 +4811,7 @@ class PyBindErrorUtilsErrorsTest(et.TpuOnlyErrorTestBase):
               re.DOTALL,
           ),
       ):
-        pallas.get_pallas_mesh(axis_names=("rank",), mesh_shape=(4,))
+        torch.tpu.pallas.get_pallas_mesh(axis_names=("rank",), mesh_shape=(4,))
 
       # Non-spanning multi-dimensional mesh (2 * 2 != world_size 8)
       with et.assert_raises_message(
@@ -4822,7 +4822,9 @@ class PyBindErrorUtilsErrorsTest(et.TpuOnlyErrorTestBase):
               re.DOTALL,
           ),
       ):
-        pallas.get_pallas_mesh(axis_names=("dp", "tp"), mesh_shape=(2, 2))
+        torch.tpu.pallas.get_pallas_mesh(
+            axis_names=("dp", "tp"), mesh_shape=(2, 2)
+        )
 
       # Kernel mesh whose size differs from world_size. Only `mesh.size` is
       # read by the validation, so a mock avoids initializing a JAX backend.
@@ -4851,11 +4853,13 @@ class PyBindErrorUtilsErrorsTest(et.TpuOnlyErrorTestBase):
                 re.DOTALL,
             ),
         ):
-          pallas.get_pallas_mesh(axis_names=("rank",), process_group=subgroup)
+          torch.tpu.pallas.get_pallas_mesh(
+              axis_names=("rank",), process_group=subgroup
+          )
 
       # Custom process group with size == world_size is accepted
       custom_pg = mock.MagicMock(spec=dist.ProcessGroup)
-      custom_mesh = pallas.get_pallas_mesh(
+      custom_mesh = torch.tpu.pallas.get_pallas_mesh(
           axis_names=("rank",), process_group=custom_pg
       )
       self.assertEqual(custom_mesh.axis_names, ("rank",))
@@ -4866,13 +4870,13 @@ class PyBindErrorUtilsErrorsTest(et.TpuOnlyErrorTestBase):
           ValueError,
           tpu=re.compile(r".*must be explicitly specified.*", re.DOTALL),
       ):
-        pallas.get_pallas_mesh(axis_names=("data", "model"))
+        torch.tpu.pallas.get_pallas_mesh(axis_names=("data", "model"))
 
       # Length mismatch between mesh_shape and axis_names
       with et.assert_raises_message(
           ValueError, tpu=re.compile(r".*does not match length.*", re.DOTALL)
       ):
-        pallas.get_pallas_mesh(
+        torch.tpu.pallas.get_pallas_mesh(
             axis_names=("data", "model"), mesh_shape=(2, 2, 2)
         )
 

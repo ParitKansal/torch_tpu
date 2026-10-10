@@ -175,6 +175,7 @@ process. Use it at your own risk. Using it triggers a one-time warning.
 *   `torch.tpu.optimizers.SingleTraceTrainer.make_compiled_train_step`
 *   `torch.tpu.optimizers.SingleTraceTrainer.param_group` (getter)
 *   `torch.tpu.optimizers.SingleTraceTrainer.params` (getter)
+*   `torch.tpu.pallas.get_pallas_mesh`
 *   `torch.tpu.pallas.jax_op`
 *   `torch.tpu.precision`
 *   `torch.tpu.profiler.TpuProfilerConfig`

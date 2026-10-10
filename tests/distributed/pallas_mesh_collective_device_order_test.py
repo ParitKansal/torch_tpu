@@ -549,7 +549,7 @@ def _rank_ordered_kernel_op(
     op_name: str,
 ) -> Callable[[torch.Tensor], torch.Tensor]:
   """Builds the ring op over the rank-ordered mesh, after checking placement."""
-  mesh = pallas.get_pallas_mesh(axis_names=(_AXIS,))
+  mesh = torch.tpu.pallas.get_pallas_mesh(axis_names=(_AXIS,))
   _log_placement(mesh)
   _require_non_identity_device_order(mesh)
   return _build_ring_op(mesh, dist.get_world_size(), op_name)
@@ -660,7 +660,7 @@ def run_two_mesh_probe(probe_id: str) -> None:
   def body() -> None:
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    forward_mesh = pallas.get_pallas_mesh(axis_names=(_AXIS,))
+    forward_mesh = torch.tpu.pallas.get_pallas_mesh(axis_names=(_AXIS,))
     _log_placement(forward_mesh)
     _require_non_identity_device_order(forward_mesh)
 

@@ -287,6 +287,9 @@ _PUBLIC_MODULES: Mapping[str, ModuleSpec] = {
     "torch.tpu.pallas": ModuleSpec(
         exports={
             # go/keep-sorted start
+            "get_pallas_mesh": (
+                "torch_tpu._internal.pallas.mesh:get_pallas_mesh"
+            ),
             "jax_op": "torch_tpu._internal.pallas.pallas:jax_op",
             # go/keep-sorted end
         },

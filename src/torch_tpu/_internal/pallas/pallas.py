@@ -1704,12 +1704,25 @@ def jax_op(
     return dec(fn)
 
 
-def get_pallas_mesh(
+def _get_pallas_mesh(
     axis_names: Sequence[str] | str,
     mesh_shape: Sequence[int] | None = None,
     process_group: dist.ProcessGroup | None = None,
 ) -> jax.sharding.Mesh:
-  """Constructs a rank-aligned JAX Mesh using TPU runtime device metadata."""
+  """Constructs a rank-aligned JAX Mesh using TPU runtime device metadata.
+
+  This is the implementation of `torch.tpu.pallas.get_pallas_mesh`. TorchTPU
+  code calls it directly so that it neither emits the experimental warning of
+  the public API nor the deprecation warning of `get_pallas_mesh` below.
+
+  Args:
+    axis_names: Names of the mesh axes.
+    mesh_shape: Shape of the mesh. Required when there is more than one axis.
+    process_group: The process group whose rank-to-device assignment to use.
+
+  Returns:
+    A `jax.sharding.Mesh` over the job's TPU devices.
+  """
   if not dist.is_initialized():
     raise RuntimeError(
         "torch.distributed is not initialized. dist.init_process_group()"
@@ -1754,10 +1767,24 @@ def get_pallas_mesh(
   return jax.sharding.Mesh(mesh_devices, axis_names=axis_names)
 
 
+@annotations.deprecated(
+    version="0.2.0", reason="Use torch.tpu.pallas.get_pallas_mesh instead."
+)
+def get_pallas_mesh(
+    axis_names: Sequence[str] | str,
+    mesh_shape: Sequence[int] | None = None,
+    process_group: dist.ProcessGroup | None = None,
+) -> jax.sharding.Mesh:
+  """Deprecated alias of `torch.tpu.pallas.get_pallas_mesh`."""
+  return _get_pallas_mesh(
+      axis_names, mesh_shape=mesh_shape, process_group=process_group
+  )
+
+
 def get_default_pallas_mesh(
     process_group: dist.ProcessGroup | None = None,
 ) -> jax.sharding.Mesh:
   """Constructs default 1D world rank-aligned JAX Mesh with axis ('rank',)."""
-  return get_pallas_mesh(
+  return _get_pallas_mesh(
       axis_names=("rank",), mesh_shape=None, process_group=process_group
   )

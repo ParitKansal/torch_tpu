@@ -257,7 +257,9 @@ def _run_2d_rank_dp_mesh(do_compile):
   num_per_rank = 8
 
   # Create 2D mesh: ('rank', 'dp') with shape (2, 4), spanning world_size 8.
-  mesh = pallas.get_pallas_mesh(axis_names=("rank", "dp"), mesh_shape=(2, 4))
+  mesh = torch.tpu.pallas.get_pallas_mesh(
+      axis_names=("rank", "dp"), mesh_shape=(2, 4)
+  )
   assert isinstance(mesh, jax.sharding.Mesh)
 
   def generate_input(r, num_per_rank):

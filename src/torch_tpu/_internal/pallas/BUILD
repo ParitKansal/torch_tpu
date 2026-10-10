@@ -91,6 +91,17 @@ torch_tpu_py_library(
     ],
 )
 
+torch_tpu_py_library(
+    name = "mesh",
+    srcs = ["mesh.py"],
+    deps = [
+        ":pallas_lib",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu/_internal/utils:annotations",
+        "@pypi//jax",
+    ],
+)
+
 # NOTE: We use pytype_strict_library here instead of torch_tpu_py_library to break a circular
 # dependency cycle where torch_tpu_py_library automatically injects a dependency on
 # //src/torch_tpu/_internal:testing.

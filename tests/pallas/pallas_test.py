@@ -1752,7 +1752,7 @@ class TestPallasMesh(seed_test_utils.RepeatableTest):
     with mock.patch.object(
         dist, "is_initialized", return_value=True
     ), mock.patch.object(dist, "get_world_size", return_value=4):
-      mesh = pallas.get_pallas_mesh(axis_names=("model",))
+      mesh = torch.tpu.pallas.get_pallas_mesh(axis_names=("model",))
       self.assertIsInstance(mesh, jax.sharding.Mesh)
       self.assertEqual(mesh.axis_names, ("model",))
       self.assertEqual(mesh.devices.shape, (4,))
@@ -1762,7 +1762,9 @@ class TestPallasMesh(seed_test_utils.RepeatableTest):
     with mock.patch.object(
         dist, "is_initialized", return_value=True
     ), mock.patch.object(dist, "get_world_size", return_value=8):
-      mesh = pallas.get_pallas_mesh(axis_names=("dp", "tp"), mesh_shape=(1, 8))
+      mesh = torch.tpu.pallas.get_pallas_mesh(
+          axis_names=("dp", "tp"), mesh_shape=(1, 8)
+      )
       self.assertIsInstance(mesh, jax.sharding.Mesh)
       self.assertEqual(mesh.axis_names, ("dp", "tp"))
       self.assertEqual(mesh.devices.shape, (1, 8))
@@ -1772,7 +1774,7 @@ class TestPallasMesh(seed_test_utils.RepeatableTest):
     with mock.patch.object(
         dist, "is_initialized", return_value=True
     ), mock.patch.object(dist, "get_world_size", return_value=8):
-      mesh = pallas.get_pallas_mesh(
+      mesh = torch.tpu.pallas.get_pallas_mesh(
           axis_names=("data", "attn_dp", "model"), mesh_shape=(2, 2, 2)
       )
       self.assertIsInstance(mesh, jax.sharding.Mesh)
@@ -1785,13 +1787,40 @@ class TestPallasMesh(seed_test_utils.RepeatableTest):
     with mock.patch.object(
         dist, "is_initialized", return_value=True
     ), mock.patch.object(dist, "get_world_size", return_value=8):
-      mesh = pallas.get_pallas_mesh(
+      mesh = torch.tpu.pallas.get_pallas_mesh(
           axis_names=("rank",), process_group=custom_pg
       )
       self.assertIsInstance(mesh, jax.sharding.Mesh)
       self.assertEqual(mesh.axis_names, ("rank",))
       self.assertEqual(mesh.devices.shape, (8,))
       self.assertEqual(len(mesh.devices.flat), 8)
+
+  def test_deprecated_get_pallas_mesh_alias_matches_and_warns(self):
+    with mock.patch.object(
+        dist, "is_initialized", return_value=True
+    ), mock.patch.object(dist, "get_world_size", return_value=4):
+      expected = torch.tpu.pallas.get_pallas_mesh(axis_names=("model",))
+      with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        actual = pallas.get_pallas_mesh(axis_names=("model",))
+
+    self.assertEqual(actual.axis_names, expected.axis_names)
+    self.assertEqual(
+        [d.id for d in actual.devices.flat],
+        [d.id for d in expected.devices.flat],
+    )
+    deprecations = [
+        item for item in w if issubclass(item.category, DeprecationWarning)
+    ]
+    self.assertLen(deprecations, 1)
+    self.assertIn(
+        "get_pallas_mesh is deprecated as of TorchTPU 0.2.0",
+        str(deprecations[0].message),
+    )
+    self.assertIn(
+        "Use torch.tpu.pallas.get_pallas_mesh instead.",
+        str(deprecations[0].message),
+    )
 
 
 if __name__ == "__main__":

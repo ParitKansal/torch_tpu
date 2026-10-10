@@ -184,7 +184,7 @@ achieves this by:
 
 1.  Using `torch.func.grad_and_value` to compute reverse-mode automatic
     differentiation symbolically.
-2.  Using functional optimizer updates (`TorchAdamW` or `TorchSgd`).
+2.  Using functional optimizer updates (`AdamW` or `Sgd`).
 3.  Capturing the entire forward, loss, backward, and optimizer pipeline into a
     single FX graph via `make_fx`.
 
@@ -194,17 +194,17 @@ hardware.
 
 ```python
 SingleTraceTrainer = torch.tpu.optimizers.SingleTraceTrainer
-TorchAdamW = torch.tpu.optimizers.TorchAdamW
+AdamW = torch.tpu.optimizers.AdamW
 
 with torch.device("tpu"):
   no_break_model = ToyLinearModule()
   no_break_x = torch.randn(4, 16)
   no_break_target = torch.randn(4, 16)
 
-# Initialize SingleTraceTrainer with TorchAdamW
+# Initialize SingleTraceTrainer with AdamW
 trainer = SingleTraceTrainer(
     model=no_break_model,
-    optimizer=TorchAdamW(use_bfloat16_moments=False),
+    optimizer=AdamW(use_bfloat16_moments=False),
 )
 
 # Verify zero graph breaks and compile with fullgraph=True

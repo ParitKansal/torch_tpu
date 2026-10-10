@@ -17,6 +17,8 @@
 #include "csrc/eager/events_queue.h"
 
 #include <chrono>
+#include <memory>
+#include <ratio>
 #include <string>
 #include <thread>
 #include <utility>
@@ -47,6 +49,7 @@
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
 #include "stablehlo/integrations/cpp/builder/MlirBuilder.h"
 #include "xla/future.h"
+#include "xla/tsl/platform/env.h"
 
 namespace torch_tpu {
 namespace {
@@ -1172,6 +1175,33 @@ TEST(EventSnapshotTest, ElapsedTimeReturnsEventError) {
       xla::Future<void>(TT_ERROR(error::kInvalidArgument) << "fake error")};
   EXPECT_EQ(ok_event.ElapsedTime(failed_event).status().code(),
             error::kInvalidArgument);
+}
+
+TEST_F(EventsQueueTest, CompletesLongSnapshotChainOnSmallStack) {
+  ClearAllStreams();
+  // Snapshots recorded while a transfer is pending wait for it, and each one
+  // also waits for the snapshot before it, as while model weights load.
+  auto [transfer_promise, transfer_future] = xla::MakePromise<void>();
+  RecordAsyncDeviceToHost(std::move(transfer_future));
+  std::vector<xla::Future<std::shared_ptr<EventSnapshot>>> snapshot_futures;
+  for (int i = 0; i < 20000; ++i) {
+    snapshot_futures.push_back(
+        MaterializeCurrentStream(MaterializationReason::kExplicitSync));
+  }
+  std::shared_ptr<EventSnapshot> last_snapshot;
+  for (const auto& snapshot_future : snapshot_futures) {
+    TT_ASSERT_OK_AND_ASSIGN(last_snapshot, snapshot_future.Await());
+  }
+  TT_ASSERT_OK_AND_ASSIGN(bool completed, last_snapshot->Query());
+  ASSERT_FALSE(completed);
+
+  // The runtime completes device work on threads with 1 MiB stacks.
+  xla::Promise<void> promise = std::move(transfer_promise);
+  std::unique_ptr<tsl::Thread> thread(tsl::Env::Default()->StartThread(
+      tsl::ThreadOptions{.stack_size = 1 << 20}, "complete_transfer",
+      [&promise] { promise.Set(); }));
+  thread.reset();
+  EXPECT_TRUE(last_snapshot->Synchronize().ok());
 }
 
 TEST(CompilationModeTest, GetCompilationMode) {

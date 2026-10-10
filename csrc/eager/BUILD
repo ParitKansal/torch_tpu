@@ -1136,6 +1136,7 @@ torch_tpu_cc_test(
         "@stablehlo//stablehlo/integrations/cpp/builder:attr_type_builder_util",
         "@stablehlo//stablehlo/integrations/cpp/builder:mlir_builder",
         "@xla//xla:future",
+        "@xla//xla/tsl/platform:env",
     ],
 )
 

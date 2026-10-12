@@ -43,7 +43,20 @@
 #include "csrc/ops/python_context.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "llvm/ADT/SmallVector.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/DialectRegistry.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/OwningOpRef.h"
+#include "mlir/IR/Types.h"
+#include "mlir/IR/ValueRange.h"
+#include "stablehlo/dialect/Register.h"
+#include "stablehlo/dialect/StablehloOps.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
+#include "stablehlo/integrations/cpp/builder/FuncBuilder.h"
 #include "stablehlo/integrations/cpp/builder/MlirBuilder.h"
 #include "xla/pjrt/pjrt_executable.h"
 
@@ -567,6 +580,63 @@ TEST_F(TraversalTest, OpWithPreExistingDeviceAssignmentParamDoesNotCrash) {
       traversal_empty->GetCacheKey(kCompileOptionsKey, {}, {});
 
   EXPECT_EQ(key_pre_existing, key_empty);
+}
+
+TEST_F(TraversalTest,
+       BuildMlirModuleRegistersFuncInlinerExtensionAndInlinesHelpers) {
+  TT_ASSERT_OK_AND_ASSIGN(
+      const DeviceBufferRef ref_a,
+      DeviceBufferList::CreatePlaceholder(shape_.dimensions(), shape_.dtype()));
+
+  auto call_helper_builder = [](mlir::MlirBuilder& builder,
+                                absl::Span<mlir::MlirOp> inputs)
+      -> absl::StatusOr<DynamicMlirOpResults> {
+    mlir::ModuleOp module_op = GetModuleOp(builder);
+    mlir::OpBuilder module_builder(module_op.getBodyRegion());
+    const mlir::Type input_type = inputs[0].getValue().getType();
+    auto helper_func = mlir::func::FuncOp::create(
+        module_builder, builder.getLoc(), "private_helper",
+        mlir::FunctionType::get(&builder.getContext(), {input_type},
+                                {input_type}));
+    helper_func.setPrivate();
+    mlir::Block* entry_block = helper_func.addEntryBlock();
+    mlir::OpBuilder helper_builder = mlir::OpBuilder::atBlockBegin(entry_block);
+    auto negated = mlir::stablehlo::NegOp::create(
+        helper_builder, builder.getLoc(), entry_block->getArgument(0));
+    mlir::func::ReturnOp::create(helper_builder, builder.getLoc(),
+                                 mlir::ValueRange{negated.getResult()});
+
+    llvm::SmallVector<mlir::MlirOp> call_results =
+        mlir::func::Call(builder, helper_func, inputs);
+    return DynamicMlirOpResults(call_results.begin(), call_results.end());
+  };
+
+  TT_ASSERT_OK_AND_ASSIGN(const std::vector<DeviceBufferRef> refs_b,
+                          DeviceBufferList::CreateDeferred(
+                              OpName::kNeg, std::move(call_helper_builder),
+                              {ref_a}, OpParamCacheKeys::Empty(), {shape_}));
+  TT_ASSERT_OK_AND_ASSIGN(const std::unique_ptr<Traversal> traversal,
+                          Traversal::Create({refs_b[0]}));
+
+  // Construct an MLIRContext with only StableHLO dialects registered (matching
+  // callers like GetTraversalOutputDimensions in dynamism_utils_test that do
+  // not call MakeMlirContext). BuildMlirModule must register the func inliner
+  // extension itself rather than aborting inside mlir::createInlinerPass().
+  mlir::MLIRContext mlir_context;
+  mlir::DialectRegistry registry;
+  mlir::stablehlo::registerAllDialects(registry);
+  mlir_context.appendDialectRegistry(registry);
+  mlir_context.loadAllAvailableDialects();
+
+  TT_ASSERT_OK_AND_ASSIGN(mlir::OwningOpRef<mlir::ModuleOp> module,
+                          traversal->BuildMlirModule(mlir_context));
+  EXPECT_EQ(module->lookupSymbol<mlir::func::FuncOp>("private_helper"),
+            nullptr);
+  mlir::func::FuncOp main_func =
+      module->lookupSymbol<mlir::func::FuncOp>("main");
+  ASSERT_NE(main_func, nullptr);
+  EXPECT_TRUE(main_func.getOps<mlir::func::CallOp>().empty());
+  EXPECT_FALSE(main_func.getOps<mlir::stablehlo::NegOp>().empty());
 }
 
 }  // namespace

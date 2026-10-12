@@ -59,9 +59,7 @@ _TORCH_INDEXES: Final[Mapping[str, Sequence[str]]] = {
 }
 
 
-def _torch_index_args(
-    variant: str, *, unsafe_best_match: bool = False
-) -> Sequence[str]:
+def _torch_index_args(variant: str) -> Sequence[str]:
   """Return the `uv pip install` index arguments for a torch variant."""
   indexes = _TORCH_INDEXES[variant]
   if not indexes:
@@ -69,19 +67,12 @@ def _torch_index_args(
   args: list[str] = []
   for index in indexes:
     args += ["--extra-index-url", index]
-  # TODO(b/571958437): The `len(indexes) > 1` and `"/whl/test/"` checks below
-  # can be removed once `/whl/test/cpu` and `/whl/test/cu130` are removed from
-  # `_TORCH_INDEXES` after PyTorch 2.15.0 GA. When searching multiple extra
-  # indexes (whl/cpu + whl/test/cpu) or the PyTorch test channel (which carries
-  # a stale packaging==22.0 wheel), uv's default first-index strategy stops at
-  # the first index that carries the package name and fails to find RC torch
-  # builds or newer PyPI dependencies.
-  if (
-      unsafe_best_match
-      or len(indexes) > 1
-      or any("/whl/test/" in idx for idx in indexes)
-  ):
-    args += ["--index-strategy", "unsafe-best-match"]
+  # --index-strategy unsafe-best-match lets the "+cpu" local build, RC test
+  # build, or newer nightly prerelease resolve across the PyTorch extra indexes
+  # while PyPI stays the primary index for non-torch runtime and PEP 517
+  # build-system dependencies (the PyTorch indexes carry setuptools>=78
+  # alongside an outdated packaging<24.2, which breaks source builds on 3.14t).
+  args += ["--index-strategy", "unsafe-best-match"]
   return args
 
 
@@ -315,6 +306,10 @@ def smoke_test(session: nox.Session, device: str, torch_variant: str) -> None:
     # deterministic and must pass -- unlike the unpinned variant it never
     # fails from upstream drift.
     install_args += ["--prerelease=allow", f"torch=={_pinned_nightly_torch()}"]
+  elif torch_variant == "cpu":
+    # Pin the "+cpu" local version so unsafe-best-match selects the CPU build
+    # from the PyTorch CPU index rather than the CUDA wheel on PyPI.
+    install_args.append(f"torch=={_newest_supported_torch()}+cpu")
   else:
     # Pin so the session is deterministic and exercises the newest glue as an
     # exact match. Releases without an exact glue are covered by the
@@ -347,7 +342,7 @@ def intermediate_patch_abi(session: nox.Session, torch_version: str) -> None:
   _install_and_run_smoke_tests(
       session,
       "cpu",
-      f"torch=={torch_version}",
+      f"torch=={torch_version}+cpu",
       *_torch_index_args("cpu"),
   )
 
@@ -370,7 +365,7 @@ def tpu_smoke_all_versions(session: nox.Session, torch_version: str) -> None:
   _install_and_run_smoke_tests(
       session,
       "tpu",
-      f"torch=={torch_version}",
+      f"torch=={torch_version}+cpu",
       *_torch_index_args("cpu"),
   )
 
@@ -399,7 +394,7 @@ def dep_upper_bounds(session: nox.Session) -> None:
       "-r",
       str(req_file),
       # Use pypi for non torch dependencies.
-      *_torch_index_args("cpu", unsafe_best_match=True),
+      *_torch_index_args("cpu"),
   )
 
 

@@ -2385,7 +2385,7 @@ torch_tpu_py_test(
     size = "medium",
     srcs = ["import_test.py"],
     main = "import_test.py",
-    shard_count = 4,
+    shard_count = 5,
     tags = [],
     deps = [
         "//shims/absl_py/testing:absltest",
@@ -2393,6 +2393,7 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
+        "//tests/api:wheel_py_targets",  # build_cleaner: keep
     ],
 )
 

@@ -29,6 +29,12 @@ package(
 )
 
 torch_tpu_py_library(
+    name = "micro",
+    srcs = ["__init__.py"],
+    visibility = ["//:__subpackages__"],
+)
+
+torch_tpu_py_library(
     name = "utils",
     srcs = ["utils.py"],
     visibility = ["//:__subpackages__"],

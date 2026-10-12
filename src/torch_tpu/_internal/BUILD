@@ -32,6 +32,11 @@ package(
     default_visibility = ["//:__subpackages__"],
 )
 
+torch_tpu_py_library(
+    name = "_internal",
+    srcs = ["__init__.py"],
+)
+
 pybind_extension(
     name = "env",
     srcs = ["//csrc/internal:env.cc"],

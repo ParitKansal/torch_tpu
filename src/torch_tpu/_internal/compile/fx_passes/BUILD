@@ -28,6 +28,11 @@ package(
 )
 
 torch_tpu_py_library(
+    name = "fx_passes",
+    srcs = ["__init__.py"],
+)
+
+torch_tpu_py_library(
     name = "detect_causal_mask",
     srcs = ["detect_causal_mask.py"],
     deps = [

@@ -37,6 +37,11 @@ package(
 )
 
 torch_tpu_py_library(
+    name = "init",
+    srcs = ["__init__.py"],
+)
+
+torch_tpu_py_library(
     name = "_distributed_module",
     srcs = ["_distributed_module.py"],
     deps = [

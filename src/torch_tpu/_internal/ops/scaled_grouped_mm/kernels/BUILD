@@ -21,6 +21,11 @@ package(
 )
 
 torch_tpu_py_library(
+    name = "kernels",
+    srcs = ["__init__.py"],
+)
+
+torch_tpu_py_library(
     name = "rowwise_scaled_grouped_mm_kernel",
     srcs = ["rowwise_scaled_grouped_mm_kernel.py"],
     deps = [

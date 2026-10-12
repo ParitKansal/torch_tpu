@@ -33,6 +33,11 @@ package(
 )
 
 torch_tpu_py_library(
+    name = "device_utils",
+    srcs = ["__init__.py"],
+)
+
+torch_tpu_py_library(
     name = "annotations",
     srcs = ["annotations.py"],
     deps = [

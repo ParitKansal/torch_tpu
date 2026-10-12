@@ -29,6 +29,11 @@ package(
 )
 
 torch_tpu_py_library(
+    name = "pooling",
+    srcs = ["__init__.py"],
+)
+
+torch_tpu_py_library(
     name = "patch",
     srcs = [
         "patch.py",

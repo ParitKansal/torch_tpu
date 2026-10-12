@@ -24,6 +24,11 @@ package(
     default_visibility = ["//:__subpackages__"],
 )
 
+torch_tpu_py_library(
+    name = "kernels",
+    srcs = ["__init__.py"],
+)
+
 # Shared build-time generator. Dispatches to a per-recipe generator registered
 # in `_RECIPE_GENERATORS`, so every block-scaling recipe must be listed in deps.
 pytype_strict_library(

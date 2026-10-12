@@ -28,7 +28,9 @@ versions. This test opens the built wheel (`WHEEL_PATH`) and asserts:
     the XLA commit it must share, ship under torch_tpu/include/, the header
     behind its opt-in guard;
   * each per-version torch common exports the tensor_buffer API for external
-    plugins.
+    plugins;
+  * every Python subpackage directory under `torch_tpu/` contains an
+    `__init__.py` file.
 """
 
 from collections.abc import Sequence, Set
@@ -203,6 +205,38 @@ class WheelStructureTest(absltest.TestCase):  # ABSLTEST_OK=Wheel test
     self.assertIn(_API_HEADER_GUARD, header.splitlines())
     commit = (self._wheel_root / _API_XLA_COMMIT).read_text().strip()
     self.assertRegex(commit, r"^[0-9a-f]{40}$")
+
+  def test_every_python_package_dir_has_init_py(self):
+    expected_inits: set[str] = set()
+    actual_inits: set[str] = set()
+    for name in self._names:
+      path = pathlib.PurePosixPath(name)
+      if not path.parts or path.parts[0] != "torch_tpu":
+        continue
+      if path.name == "__init__.py":
+        actual_inits.add(name)
+        continue
+      # Exclude C++ shared libraries (`libxla_base.so`, `lib*_common.so`), which
+      # start with `lib`, from Python C++ extension glues. If a non-Python `.so`
+      # without a `lib` prefix (or a Python extension starting with `lib`) is
+      # ever added to the wheel, update this filter to list those paths or
+      # directories explicitly.
+      is_python_or_glue = path.suffix == ".py" or (
+          path.suffix == ".so" and not path.name.startswith("lib")
+      )
+      if not is_python_or_glue:
+        continue
+      for parent in path.parents:
+        if not parent.parts or parent.parts[0] != "torch_tpu":
+          break
+        expected_inits.add(f"{parent.as_posix()}/__init__.py")
+    missing = sorted(expected_inits - actual_inits)
+    self.assertEmpty(
+        missing,
+        "Every Python subpackage directory in the wheel must contain"
+        " __init__.py so pkgutil.walk_packages can walk it; missing:"
+        f" {missing}",
+    )
 
   def test_torch_common_exports_tensor_buffer_api(self):
     versions = self._built_versions()

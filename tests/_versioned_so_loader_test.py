@@ -12,17 +12,55 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the version-dispatch selection logic."""
+"""Tests for the version-dispatch selection and import hook logic."""
 
+from collections.abc import Iterator
+import contextlib
+import importlib
+import importlib.machinery
+import importlib.util
 import pathlib
+import pkgutil
 import sys
+import threading
 import types
+from typing import Final
 from unittest import mock
+import zipfile
 
 from absl.testing import absltest
 from absl.testing import parameterized
 from torch_tpu import _versioned_so_loader as loader
 from tests import seed_test_utils
+
+_IMPORT_STATE_LOCK: Final[threading.Lock] = threading.Lock()
+
+
+@contextlib.contextmanager
+def _isolated_import_state() -> Iterator[None]:
+  """Saves and restores process-global import state under a lock."""
+  with _IMPORT_STATE_LOCK:
+    saved_path = sys.path[:]
+    saved_hooks = sys.path_hooks[:]
+    saved_cache = dict(sys.path_importer_cache)
+    saved_modules = set(sys.modules)
+    try:
+      yield
+    finally:
+      sys.path[:] = saved_path
+      sys.path_hooks[:] = saved_hooks
+      sys.path_importer_cache.clear()
+      sys.path_importer_cache.update(saved_cache)
+      for mod_name in set(sys.modules) - saved_modules:
+        sys.modules.pop(mod_name, None)
+
+
+@contextlib.contextmanager
+def _fake_installed_torch(version: str = "2.12.0") -> Iterator[None]:
+  """Fakes the installed `torch` module in `sys.modules`."""
+  fake_torch = types.SimpleNamespace(__version__=version)
+  with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+    yield
 
 
 class ResolveSuffixTest(seed_test_utils.RepeatableTest):
@@ -135,6 +173,234 @@ class DiscoverBuiltSuffixesTest(seed_test_utils.RepeatableTest):
     root = pathlib.Path(self.create_tempdir().full_path)
     self._touch(root, "_internal/env.so")
     self.assertEqual(loader.discover_built_suffixes(root), frozenset())
+
+
+class PathEntryFinderAndHookTest(seed_test_utils.RepeatableTest):
+
+  def setUp(self) -> None:
+    super().setUp()
+    self.enter_context(_isolated_import_state())
+
+  def _write_file(
+      self, root: pathlib.Path, rel: str, content: str = ""
+  ) -> pathlib.Path:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+  def _make_fake_package(self) -> tuple[pathlib.Path, pathlib.Path]:
+    site_dir = pathlib.Path(self.create_tempdir().full_path)
+    pkg_dir = site_dir / "fake_tt"
+    self._write_file(pkg_dir, "__init__.py")
+    self._write_file(pkg_dir, "helper.py", 'VALUE = "top"\n')
+    self._write_file(pkg_dir, "_internal/__init__.py")
+    self._write_file(pkg_dir, "_internal/env_2_11_0.so")
+    self._write_file(pkg_dir, "_internal/env_2_12_0.so")
+    self._write_file(pkg_dir, "_internal/env_utils.py", 'VALUE = "internal"\n')
+    self._write_file(pkg_dir, "_internal/sub/__init__.py")
+    self._write_file(pkg_dir, "_internal/sub/leaf_2_11_0.so")
+    self._write_file(pkg_dir, "_internal/sub/leaf_2_12_0.so")
+    # Non-package directory without __init__.py (holds shared C++ libraries).
+    self._write_file(pkg_dir, "csrc/common/libxla_base.so")
+    self._write_file(pkg_dir, "csrc/common/libpywrap_2_12_0_common.so")
+
+    sys.path.insert(0, str(site_dir))
+    sys.path_importer_cache.pop(str(site_dir), None)
+    return site_dir, pkg_dir
+
+  def test_walk_packages_discovers_all_subpackages_and_unversioned_modules(
+      self,
+  ) -> None:
+    _, pkg_dir = self._make_fake_package()
+    with _fake_installed_torch():
+      loader.install_hook(pkg_dir)
+
+    import fake_tt  # pytype: disable=import-error  # pyrefly: ignore[missing-import]
+
+    discovered = [
+        (mod.name, mod.ispkg)
+        for mod in pkgutil.walk_packages(fake_tt.__path__, "fake_tt.")
+    ]
+    self.assertEqual(
+        discovered,
+        [
+            ("fake_tt._internal", True),
+            ("fake_tt._internal.env", False),
+            ("fake_tt._internal.env_utils", False),
+            ("fake_tt._internal.sub", True),
+            ("fake_tt._internal.sub.leaf", False),
+            ("fake_tt.helper", False),
+        ],
+    )
+
+  def test_find_spec_routes_unversioned_name_to_resolved_glue(self) -> None:
+    _, pkg_dir = self._make_fake_package()
+    with _fake_installed_torch():
+      loader.install_hook(pkg_dir)
+
+    import fake_tt._internal  # pylint: disable=unused-import  # ruff: ignore[unused-import]  # pytype: disable=import-error  # pyrefly: ignore[missing-import]
+
+    spec = importlib.util.find_spec("fake_tt._internal.env")
+    self.assertIsNotNone(spec)
+    assert spec is not None
+    self.assertEqual(spec.name, "fake_tt._internal.env")
+    self.assertEqual(spec.origin, str(pkg_dir / "_internal/env_2_12_0.so"))
+    self.assertIsInstance(spec.loader, loader.ExtensionProxyLoader)
+
+  def test_pure_python_module_imports_normally(self) -> None:
+    _, pkg_dir = self._make_fake_package()
+    with _fake_installed_torch():
+      loader.install_hook(pkg_dir)
+
+    from fake_tt._internal import env_utils  # pylint: disable=g-import-not-at-top  # pytype: disable=import-error  # pyrefly: ignore[missing-import]
+
+    self.assertEqual(env_utils.VALUE, "internal")
+
+  def test_version_suffixed_glue_names_are_hidden_from_import(self) -> None:
+    _, pkg_dir = self._make_fake_package()
+    with _fake_installed_torch():
+      loader.install_hook(pkg_dir)
+
+    import fake_tt._internal  # pylint: disable=unused-import  # ruff: ignore[unused-import]  # pytype: disable=import-error  # pyrefly: ignore[missing-import]
+
+    self.assertIsNone(importlib.util.find_spec("fake_tt._internal.env_2_12_0"))
+    self.assertIsNone(importlib.util.find_spec("fake_tt._internal.env_2_11_0"))
+    with self.assertRaises(ModuleNotFoundError):  # ASSERT_RAISES_OK=loader
+      importlib.import_module("fake_tt._internal.env_2_12_0")
+
+  def test_package_takes_precedence_over_versioned_glue(self) -> None:
+    _, pkg_dir = self._make_fake_package()
+    self._write_file(pkg_dir, "_internal/conflict/__init__.py")
+    self._write_file(pkg_dir, "_internal/conflict_2_12_0.so")
+    with _fake_installed_torch():
+      loader.install_hook(pkg_dir)
+
+    import fake_tt._internal  # pytype: disable=import-error  # pyrefly: ignore[missing-import]
+
+    internal_modules = {
+        m.name: m.ispkg
+        for m in pkgutil.iter_modules(
+            fake_tt._internal.__path__, "fake_tt._internal."
+        )
+    }
+    self.assertEqual(internal_modules.get("fake_tt._internal.conflict"), True)
+
+    spec = importlib.util.find_spec("fake_tt._internal.conflict")
+    self.assertIsNotNone(spec)
+    assert spec is not None
+    self.assertIsNotNone(spec.submodule_search_locations)
+
+  def test_install_hook_evicts_cached_file_finder_for_package_dir(self) -> None:
+    _, pkg_dir = self._make_fake_package()
+    # Simulate torch_tpu/__init__.py importing _tcmalloc_check before calling
+    # install_hook, which populates sys.path_importer_cache with FileFinder.
+    self.assertIsInstance(
+        pkgutil.get_importer(str(pkg_dir)), importlib.machinery.FileFinder
+    )
+    self.assertIsInstance(
+        pkgutil.get_importer(str(pkg_dir / "_internal")),
+        importlib.machinery.FileFinder,
+    )
+
+    with _fake_installed_torch():
+      loader.install_hook(pkg_dir)
+
+    self.assertIsInstance(
+        pkgutil.get_importer(str(pkg_dir)),
+        loader.VersionDispatchPathEntryFinder,
+    )
+    self.assertIsInstance(
+        pkgutil.get_importer(str(pkg_dir / "_internal")),
+        loader.VersionDispatchPathEntryFinder,
+    )
+
+  def test_install_hook_is_idempotent_for_same_package_dir(self) -> None:
+    _, pkg_dir = self._make_fake_package()
+    with _fake_installed_torch():
+      loader.install_hook(pkg_dir)
+      loader.install_hook(pkg_dir)
+
+    hooks = [
+        h
+        for h in sys.path_hooks
+        if isinstance(h, loader._VersionDispatchPathHook)
+        and h.package_dir.resolve() == pkg_dir.resolve()
+    ]
+    self.assertLen(hooks, 1)
+
+  def test_install_hook_is_noop_when_no_versioned_glues_exist(self) -> None:
+    unversioned_dir = pathlib.Path(self.create_tempdir().full_path) / "plain_tt"
+    self._write_file(unversioned_dir, "__init__.py")
+    self._write_file(unversioned_dir, "_internal/env.so")
+
+    hooks_before = sys.path_hooks[:]
+    cache_before = dict(sys.path_importer_cache)
+    with _fake_installed_torch():
+      loader.install_hook(unversioned_dir)
+
+    self.assertEqual(sys.path_hooks, hooks_before)
+    self.assertEqual(sys.path_importer_cache, cache_before)
+
+  def test_non_directory_path_entry_falls_through_to_zipimporter(self) -> None:
+    _, pkg_dir = self._make_fake_package()
+    zip_path = pkg_dir / "nested.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+      zf.writestr("zipped_mod.py", "X = 1\n")
+
+    default_zip_importer = pkgutil.get_importer(str(zip_path))
+    self.assertIsNotNone(default_zip_importer)
+    sys.path_importer_cache.pop(str(zip_path), None)
+
+    with _fake_installed_torch():
+      loader.install_hook(pkg_dir)
+
+    importer = pkgutil.get_importer(str(zip_path))
+    self.assertIsNotNone(importer)
+    self.assertNotIsInstance(importer, loader.VersionDispatchPathEntryFinder)
+    self.assertIsInstance(importer, type(default_zip_importer))
+
+  def test_directories_outside_package_dir_use_default_finder(self) -> None:
+    site_dir, pkg_dir = self._make_fake_package()
+    other_dir = site_dir / "other_pkg"
+    self._write_file(other_dir, "__init__.py")
+
+    with _fake_installed_torch():
+      loader.install_hook(pkg_dir)
+
+    self.assertIsInstance(
+        pkgutil.get_importer(str(other_dir)),
+        importlib.machinery.FileFinder,
+    )
+
+  def test_extension_proxy_loader_passes_unversioned_spec_name_to_create_module(
+      self,
+  ) -> None:
+    class FakeRealLoader:
+
+      def __init__(self) -> None:
+        self.seen_name: str | None = None
+        self.executed_module: types.ModuleType | None = None
+
+      def create_module(
+          self, spec: importlib.machinery.ModuleSpec
+      ) -> types.ModuleType:
+        self.seen_name = spec.name
+        return types.ModuleType(spec.name)
+
+      def exec_module(self, module: types.ModuleType) -> None:
+        self.executed_module = module
+
+    real_loader = FakeRealLoader()
+    proxy = loader.ExtensionProxyLoader(
+        real_loader, "fake_tt._internal.env", "fake_tt._internal.env_2_12_0"
+    )
+    spec = importlib.machinery.ModuleSpec("fake_tt._internal.env_2_12_0", proxy)
+    mod = proxy.create_module(spec)
+    self.assertEqual(real_loader.seen_name, "fake_tt._internal.env")
+    self.assertEqual(spec.name, "fake_tt._internal.env_2_12_0")
+    proxy.exec_module(mod)
+    self.assertIs(real_loader.executed_module, mod)
 
 
 if __name__ == "__main__":

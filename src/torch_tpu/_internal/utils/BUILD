@@ -33,6 +33,11 @@ package(
 )
 
 torch_tpu_py_library(
+    name = "init",
+    srcs = ["__init__.py"],
+)
+
+torch_tpu_py_library(
     name = "utils",
     srcs = ["utils.py"],
     tags = [

@@ -28,6 +28,11 @@ package(
 )
 
 torch_tpu_py_library(
+    name = "optimizers",
+    srcs = ["__init__.py"],
+)
+
+torch_tpu_py_library(
     name = "optim",
     srcs = ["optim.py"],
     deps = [

@@ -30,6 +30,11 @@ package(
 )
 
 torch_tpu_py_library(
+    name = "device",
+    srcs = ["__init__.py"],
+)
+
+torch_tpu_py_library(
     name = "_device_module",
     srcs = ["_device_module.py"],
     deps = [

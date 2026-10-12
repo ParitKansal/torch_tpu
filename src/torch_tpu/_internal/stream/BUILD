@@ -24,6 +24,11 @@ package(
 )
 
 torch_tpu_py_library(
+    name = "stream",
+    srcs = ["__init__.py"],
+)
+
+torch_tpu_py_library(
     name = "streams",
     srcs = ["streams.py"],
     deps = [

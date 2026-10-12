@@ -31,6 +31,11 @@ package(
     default_visibility = ["//:__subpackages__"],
 )
 
+torch_tpu_py_library(
+    name = "benchmarks",
+    srcs = ["__init__.py"],
+)
+
 oss_target(
     torch_tpu_py_library,
     name = "export_adapter",

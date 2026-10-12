@@ -42,6 +42,11 @@ pytype_strict_binary(
 #
 # GENERATED_TEST_TARGETS_BEGIN
 torch_tpu_torch_test(
+    name = "autograd_functional_test",
+    torch_test_module = "autograd/test_functional",
+)
+
+torch_tpu_torch_test(
     name = "complex_tensor_complex_tensor_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "complex_tensor/test_complex_tensor",
@@ -50,6 +55,37 @@ torch_tpu_torch_test(
 torch_tpu_torch_test(
     name = "distributed_checkpoint__experimental_staging_test",
     torch_test_module = "distributed/checkpoint/_experimental/test_staging",
+)
+
+torch_tpu_torch_test(
+    name = "distributed_fsdp_distributed_checkpoint_test",
+    torch_test_module = "distributed/fsdp/test_distributed_checkpoint",
+)
+
+torch_tpu_torch_test(
+    name = "distributed_pipelining_backward_test",
+    torch_test_module = "distributed/pipelining/test_backward",
+)
+
+torch_tpu_torch_test(
+    name = "distributed_pipelining_microbatch_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "distributed/pipelining/test_microbatch",
+)
+
+torch_tpu_torch_test(
+    name = "distributed_pipelining_schedule_test",
+    torch_test_module = "distributed/pipelining/test_schedule",
+)
+
+torch_tpu_torch_test(
+    name = "distributed_pipelining_transformer_test",
+    torch_test_module = "distributed/pipelining/test_transformer",
+)
+
+torch_tpu_torch_test(
+    name = "distributed_pipelining_unflatten_test",
+    torch_test_module = "distributed/pipelining/test_unflatten",
 )
 
 torch_tpu_torch_test(
@@ -138,6 +174,22 @@ torch_tpu_torch_test(
 )
 
 torch_tpu_torch_test(
+    name = "dynamo_python_dispatcher_test",
+    torch_test_module = "dynamo/test_python_dispatcher",
+)
+
+torch_tpu_torch_test(
+    name = "dynamo_streams_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "dynamo/test_streams",
+)
+
+torch_tpu_torch_test(
+    name = "dynamo_tp_richcompare_test",
+    torch_test_module = "dynamo/test_tp_richcompare",
+)
+
+torch_tpu_torch_test(
     name = "dynamo_unspec_test",
     torch_test_module = "dynamo/test_unspec",
 )
@@ -151,6 +203,34 @@ torch_tpu_torch_test(
     name = "export_hop_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "export/test_hop",
+)
+
+torch_tpu_torch_test(
+    name = "export_opinfo_schema_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "export/test_opinfo_schema",
+)
+
+torch_tpu_torch_test(
+    name = "export_serialize_test",
+    torch_test_module = "export/test_serialize",
+)
+
+torch_tpu_torch_test(
+    name = "export_torchbind_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "export/test_torchbind",
+)
+
+torch_tpu_torch_test(
+    name = "functorch_dims_test",
+    torch_test_module = "functorch/test_dims",
+)
+
+torch_tpu_torch_test(
+    name = "higher_order_ops_print_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "higher_order_ops/test_print",
 )
 
 torch_tpu_torch_test(
@@ -181,6 +261,17 @@ torch_tpu_torch_test(
     name = "inductor_inductor_scheduler_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "inductor/test_inductor_scheduler",
+)
+
+torch_tpu_torch_test(
+    name = "inductor_selective_lowering_test",
+    torch_test_module = "inductor/test_selective_lowering",
+)
+
+torch_tpu_torch_test(
+    name = "inductor_torchinductor_codegen_dynamic_shapes_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "inductor/test_torchinductor_codegen_dynamic_shapes",
 )
 
 torch_tpu_torch_test(
@@ -249,6 +340,11 @@ torch_tpu_torch_test(
     name = "nn_multihead_attention_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "nn/test_multihead_attention",
+)
+
+torch_tpu_torch_test(
+    name = "nn_packed_sequence_test",
+    torch_test_module = "nn/test_packed_sequence",
 )
 
 torch_tpu_torch_test(
@@ -420,6 +516,12 @@ torch_tpu_torch_test(
 )
 
 torch_tpu_torch_test(
+    name = "maskedtensor_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "test_maskedtensor",
+)
+
+torch_tpu_torch_test(
     name = "matmul_cuda_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_matmul_cuda",
@@ -469,6 +571,12 @@ torch_tpu_torch_test(
     name = "numpy_interop_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_numpy_interop",
+)
+
+torch_tpu_torch_test(
+    name = "opaque_obj_v2_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "test_opaque_obj_v2",
 )
 
 torch_tpu_torch_test(
@@ -526,6 +634,11 @@ torch_tpu_torch_test(
 )
 
 torch_tpu_torch_test(
+    name = "proxy_tensor_test",
+    torch_test_module = "test_proxy_tensor",
+)
+
+torch_tpu_torch_test(
     name = "python_dispatch_test",
     torch_test_module = "test_python_dispatch",
 )
@@ -548,6 +661,12 @@ torch_tpu_torch_test(
     notap = "b/563402379",  # NOTAP_OK=torch tests
     shard_count = 8,
     torch_test_module = "test_scatter_gather_ops",
+)
+
+torch_tpu_torch_test(
+    name = "schema_check_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "test_schema_check",
 )
 
 torch_tpu_torch_test(
@@ -588,9 +707,19 @@ torch_tpu_torch_test(
 )
 
 torch_tpu_torch_test(
+    name = "sparse_semi_structured_test",
+    torch_test_module = "test_sparse_semi_structured",
+)
+
+torch_tpu_torch_test(
     name = "spectral_ops_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_spectral_ops",
+)
+
+torch_tpu_torch_test(
+    name = "stateless_test",
+    torch_test_module = "test_stateless",
 )
 
 torch_tpu_torch_test(

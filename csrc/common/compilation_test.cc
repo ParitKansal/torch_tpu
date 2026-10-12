@@ -16,7 +16,6 @@
 
 #include "csrc/common/compilation.h"
 
-#include <exception>
 #include <string>
 
 #include "absl/log/absl_check.h"

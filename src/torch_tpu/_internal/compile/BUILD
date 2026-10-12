@@ -87,11 +87,18 @@ torch_tpu_py_library(
     ],
     deps = [
         ":debug",
+        ":flex_attention_redirect",
         ":grouped_mm_meta",
         ":scan",
         ":tpu_backend",
         "//shims/torch:pytorch",
     ],
+)
+
+torch_tpu_py_library(
+    name = "flex_attention_redirect",
+    srcs = ["flex_attention_redirect.py"],
+    deps = ["//shims/torch:pytorch"],
 )
 
 torch_tpu_py_library(

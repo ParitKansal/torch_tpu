@@ -28,6 +28,23 @@ package(
 exports_files(["data/goldfish.jpg"])
 
 torch_tpu_py_test(
+    name = "equal_square_tile_test",
+    srcs = ["equal_square_tile_test.py"],
+    tags = [
+        "requires-net:external",
+        "requires-tpu-v5lite",
+    ],
+    deps = [
+        "//shims/absl_py/testing:absltest",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+        "//src/torch_tpu/_internal/compile:flex_attention_redirect",
+        "//src/torch_tpu/_internal/utils:test_utils",
+        "//tests:seed_test_utils",
+    ],
+)
+
+torch_tpu_py_test(
     name = "detect_causal_mask_test",
     srcs = ["detect_causal_mask_test.py"],
     # Run on single-chip TPU v7 for faster TorchDynamo/Inductor compilation

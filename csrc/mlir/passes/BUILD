@@ -87,6 +87,41 @@ torch_tpu_cc_test(
 )
 
 torch_tpu_cc_library(
+    name = "partition_concat_softmax_and_deinterleave",
+    srcs = ["partition_concat_softmax_and_deinterleave.cc"],
+    hdrs = ["partition_concat_softmax_and_deinterleave.h"],
+    deps = [
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SideEffectInterfaces",
+        "@llvm-project//mlir:Support",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+torch_tpu_cc_test(
+    name = "partition_concat_softmax_and_deinterleave_test",
+    srcs = ["partition_concat_softmax_and_deinterleave_test.cc"],
+    deps = [
+        ":partition_concat_softmax_and_deinterleave",
+        "//csrc/common:oss_test_main",
+        "//csrc/mlir:pipeline",
+        "@com_google_absl//absl/status:status_matchers",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Parser",
+        "@llvm-project//mlir:Support",
+        "@stablehlo//:reference_api",
+        "@stablehlo//:reference_configuration",
+        "@stablehlo//:register",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+torch_tpu_cc_library(
     name = "reassociate_norm_weights",
     srcs = ["reassociate_norm_weights.cc"],
     hdrs = ["reassociate_norm_weights.h"],

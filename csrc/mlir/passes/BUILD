@@ -101,4 +101,35 @@ torch_tpu_cc_library(
     ],
 )
 
+torch_tpu_cc_library(
+    name = "sink_projection_reshapes",
+    srcs = ["sink_projection_reshapes.cc"],
+    hdrs = ["sink_projection_reshapes.h"],
+    deps = [
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SideEffectInterfaces",
+        "@llvm-project//mlir:Support",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+torch_tpu_cc_test(
+    name = "sink_projection_reshapes_test",
+    srcs = ["sink_projection_reshapes_test.cc"],
+    deps = [
+        "//csrc/common:oss_test_main",
+        "//csrc/mlir:pipeline",
+        "@com_google_absl//absl/status:status_matchers",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Parser",
+        "@stablehlo//:register",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
 torch_tpu_package_end()

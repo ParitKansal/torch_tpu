@@ -25,6 +25,7 @@
 #include "csrc/mlir/passes/fold_concat_softmax.h"
 #include "csrc/mlir/passes/lower_separable_gather_to_dot.h"
 #include "csrc/mlir/passes/reassociate_norm_weights.h"
+#include "csrc/mlir/passes/sink_projection_reshapes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -51,6 +52,7 @@ void AddShloPasses(mlir::PassManager& pm) {
   pm.addNestedPass<mlir::func::FuncOp>(
       mlir::stablehlo::createStablehloTargetIndependentOptimizationPass());
   pm.addNestedPass<mlir::func::FuncOp>(createFoldConcatSoftmaxPass());
+  pm.addNestedPass<mlir::func::FuncOp>(createSinkProjectionReshapesPass());
 }
 
 }  // namespace

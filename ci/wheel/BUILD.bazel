@@ -143,7 +143,7 @@ genrule(
         "//csrc/api:tensor_buffer.h",
     ],
     outs = ["api_headers_pkg/torch_tpu/include/csrc/api/tensor_buffer.h"],
-    cmd = "cat $(location :api_header_guard) $(location //csrc/api:tensor_buffer.h) > $@",
+    cmd = "cat $(execpath :api_header_guard) $(execpath //csrc/api:tensor_buffer.h) > $@",
 )
 
 # The XLA commit this build compiled against; the extension must use the same
@@ -222,8 +222,8 @@ py_wheel(
 )
 
 _COMMON_ENV = {
-    "WHEEL_PATH": "$(location :torch_tpu_wheel)",
-    "PYPROJECT_PATH": "$(location //:pyproject.toml)",
+    "WHEEL_PATH": "$(rootpath :torch_tpu_wheel)",
+    "PYPROJECT_PATH": "$(rootpath //:pyproject.toml)",
 }
 
 torch_tpu_py_test(
@@ -256,11 +256,22 @@ pytype_strict_binary(
     visibility = ["//visibility:public"],
 )
 
+pytype_strict_binary(
+    name = "check_pytorch_abi_hwm_diff",
+    srcs = ["check_pytorch_abi_hwm_diff.py"],
+    main = "check_pytorch_abi_hwm_diff.py",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pytorch_abi_symbols",
+    ],
+)
+
 pytype_strict_contrib_test(
     name = "pytorch_abi_symbols_test",
     size = "small",
     srcs = ["pytorch_abi_symbols_test.py"],
     deps = [
+        ":check_pytorch_abi_hwm_diff",
         ":pytorch_abi_symbols",
         "//shims/absl_py/testing:absltest",
     ],
@@ -279,9 +290,9 @@ torch_tpu_py_test(
         "@pypi_torch_2_15_0_314//:whl",
     ],
     env = {
-        "PYTORCH_2_15_0_SYMBOLS_PATH": "$(location pytorch_symbols_2_15_0.txt)",
-        "PYTORCH_2_15_0_WHEEL_PATH": "$(location @pypi_torch_2_15_0_314//:whl)",
-        "WHEEL_PATH": "$(location :torch_tpu_wheel)",
+        "PYTORCH_2_15_0_SYMBOLS_PATH": "$(rootpath pytorch_symbols_2_15_0.txt)",
+        "PYTORCH_2_15_0_WHEEL_PATH": "$(rootpath @pypi_torch_2_15_0_314//:whl)",
+        "WHEEL_PATH": "$(rootpath :torch_tpu_wheel)",
     },
     is_wheel_test = True,
     # Only meaningful against the wheel we actually ship, so it is skipped as

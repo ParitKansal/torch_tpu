@@ -297,6 +297,46 @@ jobs:
           PYTHON_VERSION: ${{ needs.setup.outputs.default_python_version }}
         run: uvx nox --force-python "${PYTHON_VERSION}" -s dep_upper_bounds
 
+  test_wheel_pytorch_abi_hwm:
+    name: "Test wheel PyTorch ABI high-water mark (Python ${{ needs.setup.outputs.default_python_version }})"
+    needs: [build_wheels, setup]
+    if: needs.setup.outputs.should_build == 'true'
+    runs-on: linux-x86-n4-16
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Keep the current commit's first parent fetchable
+          # to resolve the diffbase SHA below.
+          fetch-depth: 2
+      # Git security patch (CVE-2022-24765) blocks root from operating on runner-owned directories:
+      # https://github.blog/open-source/git/git-security-vulnerability-announced/#cve-2022-24765.
+      # Tell Git explicitly to trust the workspace `/__w/torch_tpu/torch_tpu` inside this ephemeral
+      # container.
+      - name: Fix Git Workspace Ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Download Wheel from GCS
+        env:
+          PYTHON_VERSION: ${{ needs.setup.outputs.default_python_version }}
+          GCS_WHEEL_DIR: ${{ needs.build_wheels.outputs.gcs_wheel_dir }}
+        run: |
+          mkdir dist
+          PYTHON_VER_CLEAN=$(echo "${PYTHON_VERSION}" | tr -d '.')
+          gcloud storage cp "${GCS_WHEEL_DIR}*-cp*-cp${PYTHON_VER_CLEAN}-*.whl" dist/
+      - name: Wait For Connection
+        uses: google-ml-infra/actions/ci_connection@08e5394bb8179c66a50ac783fb8b2501a034c06f
+        with:
+          halt-dispatch-input: ${{ inputs.halt-for-connection }}
+      - name: Check PyTorch ABI symbol high-water mark against diffbase
+        run: >-
+          python3 ci/wheel/check_pytorch_abi_hwm_diff.py
+          --base-sha="${{ inputs.override_base_sha }}"
+          --head-sha="${{ inputs.override_current_sha || github.sha }}"
+          --python-version="${{ needs.setup.outputs.default_python_version }}"
+
   test_wheels_tpu:
     name: Test wheel on ${{ matrix.custom_name || 'TPU' }} (Python ${{ matrix.python_version }})
     needs: [build_wheels, setup]
@@ -432,6 +472,7 @@ jobs:
       - test_wheels_cpu
       - test_wheel_intermediate_patches
       - test_wheel_dep_upper_bounds
+      - test_wheel_pytorch_abi_hwm
       - test_wheels_tpu
       - test_wheel_tpu_nightly
     if: ${{ always() }}
@@ -445,6 +486,7 @@ jobs:
           TEST_WHEELS_CPU_RESULT: ${{ needs.test_wheels_cpu.result }}
           TEST_INTERMEDIATE_PATCHES_RESULT: ${{ needs.test_wheel_intermediate_patches.result }}
           TEST_DEP_UPPER_BOUNDS_RESULT: ${{ needs.test_wheel_dep_upper_bounds.result }}
+          TEST_PYTORCH_ABI_HWM_RESULT: ${{ needs.test_wheel_pytorch_abi_hwm.result }}
           TEST_WHEELS_TPU_RESULT: ${{ needs.test_wheels_tpu.result }}
           TEST_TPU_NIGHTLY_RESULT: ${{ needs.test_wheel_tpu_nightly.result }}
         run: |
@@ -464,6 +506,7 @@ jobs:
             "test_wheels_cpu:${TEST_WHEELS_CPU_RESULT}" \
             "test_wheel_intermediate_patches:${TEST_INTERMEDIATE_PATCHES_RESULT}" \
             "test_wheel_dep_upper_bounds:${TEST_DEP_UPPER_BOUNDS_RESULT}" \
+            "test_wheel_pytorch_abi_hwm:${TEST_PYTORCH_ABI_HWM_RESULT}" \
             "test_wheels_tpu:${TEST_WHEELS_TPU_RESULT}" \
             "test_wheel_tpu_nightly:${TEST_TPU_NIGHTLY_RESULT}"; do
             job_name="${entry%%:*}"

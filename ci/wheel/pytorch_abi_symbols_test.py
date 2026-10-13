@@ -19,6 +19,8 @@ import contextlib
 import functools
 import hashlib
 import http.server
+import io
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -26,6 +28,7 @@ import threading
 import zipfile
 
 from absl.testing import absltest
+from ci.wheel import check_pytorch_abi_hwm_diff
 from ci.wheel import pytorch_abi_symbols
 
 
@@ -571,6 +574,140 @@ class PytorchAbiSymbolsTest(absltest.TestCase):
         pytorch_abi_symbols.load_symbols(symbols_file),
         frozenset({"_ZN3c105ErrorC1Ev", "_ZN2at4_ops3sum4callEv"}),
     )
+
+  def test_check_pytorch_abi_hwm_diff_script(self) -> None:
+    test_repo = self.work_dir / "git_repo"
+    (test_repo / "ci" / "wheel").mkdir(parents=True, exist_ok=True)
+
+    git_env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "LC_ALL": "C",
+    }
+
+    def run_git(*args: str) -> str:
+      return subprocess.run(
+          ["git", *args],
+          cwd=test_repo,
+          env=git_env,
+          capture_output=True,
+          text=True,
+          check=True,
+      ).stdout.strip()
+
+    run_git("init", "-b", "release/0.2.0")
+    run_git("config", "user.name", "Test User")
+    run_git("config", "user.email", "test@example.com")
+    run_git("config", "commit.gpgsign", "false")
+
+    symbol_file = test_repo / "ci" / "wheel" / "pytorch_symbols_2_15_0.txt"
+    pytorch_abi_symbols.update_high_water_mark(
+        symbol_file,
+        ["_ZN3c105ErrorC1Ev"],
+        version="2.15.0",
+        reset=True,
+    )
+    run_git("add", ".")
+    run_git("commit", "-m", "Base commit")
+    base_sha = run_git("rev-parse", "HEAD")
+
+    (test_repo / "change.txt").write_text("pr change\n", encoding="utf-8")
+    run_git("add", "change.txt")
+    run_git("commit", "-m", "PR commit")
+    head_sha = run_git("rev-parse", "HEAD")
+
+    base_glues_dir = self.work_dir / "base_glues"
+    child_unpacked_dir = self.work_dir / "child_unpacked"
+    dist_dir = test_repo / "dist"
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    child_whl = dist_dir / "torch_tpu-0.2.0-cp314-cp314-linux_x86_64.whl"
+
+    def build_wheels(
+        base_syms: Sequence[str], child_syms: Sequence[str]
+    ) -> None:
+      _compile_stub_so(
+          base_glues_dir / "torch_tpu/_internal/env_2_15_0.so",
+          undefined_symbols=base_syms,
+      )
+      _compile_stub_so(
+          child_unpacked_dir / "torch_tpu/_internal/env_2_15_0.so",
+          undefined_symbols=child_syms,
+      )
+      with zipfile.ZipFile(child_whl, "w") as zf:
+        for p in child_unpacked_dir.rglob("*"):
+          if p.is_file():
+            zf.write(p, p.relative_to(child_unpacked_dir).as_posix())
+
+    def run_hwm_diff(
+        *extra_args: str,
+    ) -> tuple[int, str, str]:
+      stdout_buf = io.StringIO()
+      stderr_buf = io.StringIO()
+      with (
+          contextlib.redirect_stdout(stdout_buf),
+          contextlib.redirect_stderr(stderr_buf),
+      ):
+        rc = check_pytorch_abi_hwm_diff.main([
+            f"--repo-root={test_repo}",
+            f"--base-sha={base_sha}",
+            f"--head-sha={head_sha}",
+            f"--base-wheel-dir={base_glues_dir}",
+            f"--wheel-dir={dist_dir}",
+            *extra_args,
+        ])
+      return rc, stdout_buf.getvalue(), stderr_buf.getvalue()
+
+    # 1. Missing wheel in wheel_dir fails cleanly.
+    rc, _, err = run_hwm_diff()
+    self.assertEqual(rc, 1)
+    self.assertIn("Expected exactly one torch_tpu-*.whl", err)
+
+    # 2. Missing symbol file fails cleanly.
+    build_wheels(["_ZN3c105ErrorC1Ev"], ["_ZN3c105ErrorC1Ev"])
+    rc, _, err = run_hwm_diff("--symbol-file=ci/wheel/nonexistent.txt")
+    self.assertEqual(rc, 1)
+    self.assertIn("does not exist", err)
+
+    # 3. Unchanged symbols between diffbase and child succeeds.
+    rc, _, err = run_hwm_diff()
+    self.assertEqual(rc, 0, msg=err)
+
+    # 4. Pre-existing / upstream drift already present on the diffbase (not
+    # introduced by the child) does not move the HWM between diffbase and child,
+    # so the check succeeds.
+    build_wheels(
+        ["_ZN3c105ErrorC1Ev", "_ZN2at4_ops3sum4callEv"],
+        ["_ZN3c105ErrorC1Ev", "_ZN2at4_ops3sum4callEv"],
+    )
+    rc, _, err = run_hwm_diff()
+    self.assertEqual(rc, 0, msg=err)
+
+    # 5. Child introduces a new PyTorch symbol without updating the HWM file ->
+    # fails and prompts the user to run the HWM updater in their PR.
+    build_wheels(
+        ["_ZN3c105ErrorC1Ev"],
+        ["_ZN3c105ErrorC1Ev", "_ZN5torch7Library4_defEv"],
+    )
+    rc, out, err = run_hwm_diff()
+    self.assertEqual(rc, 1)
+    combined_out = out + "\n" + err
+    self.assertIn("torch::Library::_def()", combined_out)
+    self.assertIn(
+        "python3 ci/wheel/pytorch_abi_symbols.py update", combined_out
+    )
+
+    # 6. Once the user runs the HWM updater in their PR, the check succeeds.
+    pytorch_abi_symbols.update_high_water_mark(
+        symbol_file,
+        ["_ZN3c105ErrorC1Ev", "_ZN5torch7Library4_defEv"],
+        version="2.15.0",
+    )
+    run_git("add", "ci/wheel/pytorch_symbols_2_15_0.txt")
+    run_git("commit", "-m", "Update HWM")
+    head_sha = run_git("rev-parse", "HEAD")
+    rc, _, err = run_hwm_diff()
+    self.assertEqual(rc, 0, msg=err)
 
 
 if __name__ == "__main__":

@@ -16,8 +16,10 @@
 
 #include "csrc/mlir/passes/fold_concat_softmax.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -596,6 +598,552 @@ void PartitionSmallTailConcatSoftmax(mlir::func::FuncOp func) {
   EraseTriviallyDeadOps(func);
 }
 
+int64_t ProductOfPrefix(llvm::ArrayRef<int64_t> shape, int64_t end_dim) {
+  if (end_dim <= 0) {
+    return 1;
+  }
+  int64_t prod = 1;
+  const int64_t limit = std::min(end_dim, static_cast<int64_t>(shape.size()));
+  for (int64_t i = 0; i < limit; ++i) {
+    prod *= shape[i];
+  }
+  return prod;
+}
+
+llvm::SmallVector<int64_t> GetNonUnitDimSizes(llvm::ArrayRef<int64_t> shape) {
+  llvm::SmallVector<int64_t> sizes;
+  for (int64_t d : shape) {
+    if (d != 1) {
+      sizes.push_back(d);
+    }
+  }
+  return sizes;
+}
+
+bool ComputeSqueezedPermutation(llvm::ArrayRef<int64_t> in_shape,
+                                llvm::ArrayRef<int64_t> perm,
+                                llvm::SmallVectorImpl<int64_t>& squeezed_perm) {
+  if (in_shape.size() != perm.size()) {
+    return false;
+  }
+  llvm::SmallVector<int64_t> axis_to_squeezed(in_shape.size(), -1);
+  int64_t next_idx = 0;
+  for (size_t i = 0; i < in_shape.size(); ++i) {
+    if (in_shape[i] != 1) {
+      axis_to_squeezed[i] = next_idx++;
+    }
+  }
+  squeezed_perm.clear();
+  squeezed_perm.reserve(next_idx);
+  for (int64_t d : perm) {
+    if (d < 0 || d >= static_cast<int64_t>(in_shape.size())) {
+      return false;
+    }
+    if (axis_to_squeezed[d] != -1) {
+      squeezed_perm.push_back(axis_to_squeezed[d]);
+    }
+  }
+  return static_cast<int64_t>(squeezed_perm.size()) == next_idx;
+}
+
+mlir::Value PeelUnitDimPreservingReshapes(
+    mlir::Value val, llvm::ArrayRef<int64_t> non_unit_sizes) {
+  while (auto resh = val.getDefiningOp<mlir::stablehlo::ReshapeOp>()) {
+    auto in_type =
+        mlir::dyn_cast<mlir::RankedTensorType>(resh.getOperand().getType());
+    if (!in_type || !in_type.hasStaticShape()) {
+      break;
+    }
+    if (GetNonUnitDimSizes(in_type.getShape()) != non_unit_sizes) {
+      break;
+    }
+    val = resh.getOperand();
+  }
+  return val;
+}
+
+mlir::Value EmitReshapeIfNeeded(mlir::OpBuilder& builder, mlir::Location loc,
+                                mlir::Value val,
+                                mlir::RankedTensorType dst_type) {
+  if (val.getType() == dst_type) {
+    return val;
+  }
+  if (auto resh = val.getDefiningOp<mlir::stablehlo::ReshapeOp>()) {
+    val = resh.getOperand();
+  }
+  if (val.getType() == dst_type) {
+    return val;
+  }
+  return builder.create<mlir::stablehlo::ReshapeOp>(loc, dst_type, val);
+}
+
+// Emits `reshape(transpose(val, perm), out_type)` while stripping unit-size
+// dimensions (`size == 1`) before the transpose and composing with a single-use
+// producer transpose when present. If `perm` preserves the relative order of
+// all non-unit dimensions of `val`, no `stablehlo.transpose` is emitted.
+mlir::Value EmitSqueezedTranspose(mlir::OpBuilder& builder, mlir::Location loc,
+                                  mlir::Value val, llvm::ArrayRef<int64_t> perm,
+                                  mlir::RankedTensorType out_type) {
+  auto in_type = mlir::dyn_cast<mlir::RankedTensorType>(val.getType());
+  if (!in_type || !in_type.hasStaticShape()) {
+    return nullptr;
+  }
+  llvm::SmallVector<int64_t> non_unit_sizes =
+      GetNonUnitDimSizes(in_type.getShape());
+  llvm::SmallVector<int64_t> squeezed_perm;
+  if (!ComputeSqueezedPermutation(in_type.getShape(), perm, squeezed_perm)) {
+    return nullptr;
+  }
+
+  val = PeelUnitDimPreservingReshapes(val, non_unit_sizes);
+  if (auto prev_tr = val.getDefiningOp<mlir::stablehlo::TransposeOp>();
+      prev_tr && prev_tr->hasOneUse()) {
+    auto prev_in_type =
+        mlir::dyn_cast<mlir::RankedTensorType>(prev_tr.getOperand().getType());
+    llvm::SmallVector<int64_t> prev_squeezed_perm;
+    if (prev_in_type && prev_in_type.hasStaticShape() &&
+        ComputeSqueezedPermutation(prev_in_type.getShape(),
+                                   prev_tr.getPermutation(),
+                                   prev_squeezed_perm) &&
+        prev_squeezed_perm.size() == squeezed_perm.size()) {
+      llvm::SmallVector<int64_t> composed_perm(squeezed_perm.size());
+      for (size_t i = 0; i < squeezed_perm.size(); ++i) {
+        composed_perm[i] = prev_squeezed_perm[squeezed_perm[i]];
+      }
+      squeezed_perm = std::move(composed_perm);
+      non_unit_sizes = GetNonUnitDimSizes(prev_in_type.getShape());
+      val = PeelUnitDimPreservingReshapes(prev_tr.getOperand(), non_unit_sizes);
+    }
+  }
+
+  if (IsIdentityBroadcastDims(squeezed_perm,
+                              static_cast<int64_t>(squeezed_perm.size()))) {
+    return EmitReshapeIfNeeded(builder, loc, val, out_type);
+  }
+
+  auto squeezed_in_type =
+      mlir::RankedTensorType::get(non_unit_sizes, out_type.getElementType());
+  mlir::Value squeezed_in =
+      EmitReshapeIfNeeded(builder, loc, val, squeezed_in_type);
+  mlir::Value tr = builder.create<mlir::stablehlo::TransposeOp>(
+      loc, squeezed_in, builder.getDenseI64ArrayAttr(squeezed_perm));
+  return EmitReshapeIfNeeded(builder, loc, tr, out_type);
+}
+
+bool IsScalarZeroConstant(mlir::Value val) {
+  while (true) {
+    val = StripOptionalConvert(val);
+    if (auto resh = val.getDefiningOp<mlir::stablehlo::ReshapeOp>()) {
+      val = resh.getOperand();
+      continue;
+    }
+    if (auto bcast = val.getDefiningOp<mlir::stablehlo::BroadcastInDimOp>()) {
+      val = bcast.getOperand();
+      continue;
+    }
+    break;
+  }
+  auto const_op = val.getDefiningOp<mlir::stablehlo::ConstantOp>();
+  if (!const_op) {
+    return false;
+  }
+  auto dense_attr =
+      mlir::dyn_cast<mlir::DenseElementsAttr>(const_op.getValue());
+  if (!dense_attr || !dense_attr.isSplat()) {
+    return false;
+  }
+  mlir::Type elem_type = dense_attr.getElementType();
+  if (mlir::isa<mlir::FloatType>(elem_type)) {
+    return dense_attr.getSplatValue<llvm::APFloat>().isZero();
+  }
+  if (mlir::isa<mlir::IntegerType>(elem_type)) {
+    return dense_attr.getSplatValue<llvm::APInt>().isZero();
+  }
+  return false;
+}
+
+bool MatchDisjointUnitPadOp(mlir::Value val,
+                            mlir::RankedTensorType expected_out_type,
+                            int64_t& pad_dim, int64_t& slot,
+                            mlir::Value& slice_val) {
+  auto pad_op = val.getDefiningOp<mlir::stablehlo::PadOp>();
+  if (!pad_op || pad_op.getType() != expected_out_type ||
+      !IsScalarZeroConstant(pad_op.getPaddingValue())) {
+    return false;
+  }
+  auto in_type =
+      mlir::dyn_cast<mlir::RankedTensorType>(pad_op.getOperand().getType());
+  if (!in_type || !in_type.hasStaticShape() ||
+      in_type.getRank() != expected_out_type.getRank()) {
+    return false;
+  }
+  llvm::ArrayRef<int64_t> low = pad_op.getEdgePaddingLow();
+  llvm::ArrayRef<int64_t> high = pad_op.getEdgePaddingHigh();
+  llvm::ArrayRef<int64_t> interior = pad_op.getInteriorPadding();
+  const int64_t rank = expected_out_type.getRank();
+  int64_t detected_dim = -1;
+  for (int64_t i = 0; i < rank; ++i) {
+    if (interior[i] != 0) {
+      return false;
+    }
+    if (low[i] == 0 && high[i] == 0) {
+      if (in_type.getDimSize(i) != expected_out_type.getDimSize(i)) {
+        return false;
+      }
+      continue;
+    }
+    if (detected_dim != -1 || in_type.getDimSize(i) != 1 || low[i] < 0 ||
+        high[i] < 0 ||
+        low[i] + 1 + high[i] != expected_out_type.getDimSize(i)) {
+      return false;
+    }
+    detected_dim = i;
+  }
+  if (detected_dim == -1) {
+    return false;
+  }
+  if (pad_dim == -1) {
+    pad_dim = detected_dim;
+  } else if (pad_dim != detected_dim) {
+    return false;
+  }
+  slot = low[detected_dim];
+  slice_val = pad_op.getOperand();
+  return true;
+}
+
+bool CollectDisjointPadAddLeaves(mlir::stablehlo::AddOp root_add,
+                                 mlir::RankedTensorType out_type,
+                                 int64_t& pad_dim,
+                                 llvm::SmallVectorImpl<mlir::Value>& slots) {
+  pad_dim = -1;
+  slots.clear();
+  int64_t leaf_count = 0;
+  llvm::SmallVector<mlir::Value> worklist = {root_add.getLhs(),
+                                             root_add.getRhs()};
+  while (!worklist.empty()) {
+    mlir::Value cur = worklist.pop_back_val();
+    if (auto add_op = cur.getDefiningOp<mlir::stablehlo::AddOp>();
+        add_op && add_op->hasOneUse()) {
+      worklist.push_back(add_op.getLhs());
+      worklist.push_back(add_op.getRhs());
+      continue;
+    }
+    int64_t slot = -1;
+    mlir::Value slice_val;
+    if (!MatchDisjointUnitPadOp(cur, out_type, pad_dim, slot, slice_val)) {
+      return false;
+    }
+    if (slots.empty()) {
+      const int64_t k = out_type.getDimSize(pad_dim);
+      if (k < 2) {
+        return false;
+      }
+      slots.assign(k, nullptr);
+    }
+    if (slot < 0 || slot >= static_cast<int64_t>(slots.size()) || slots[slot]) {
+      return false;
+    }
+    slots[slot] = slice_val;
+    ++leaf_count;
+  }
+  return !slots.empty() && leaf_count == static_cast<int64_t>(slots.size());
+}
+
+void SinkUnitConcatThroughTransposeAndReshape(
+    mlir::stablehlo::ConcatenateOp concat_op) {
+  int64_t c = static_cast<int64_t>(concat_op.getDimension());
+  const int64_t k = static_cast<int64_t>(concat_op.getInputs().size());
+  while (concat_op->hasOneUse()) {
+    auto concat_type =
+        mlir::dyn_cast<mlir::RankedTensorType>(concat_op.getType());
+    if (!concat_type || !concat_type.hasStaticShape() ||
+        concat_type.getDimSize(c) != k) {
+      break;
+    }
+    mlir::Operation* user = *concat_op->user_begin();
+    if (auto tr_op = mlir::dyn_cast<mlir::stablehlo::TransposeOp>(user)) {
+      auto tr_type = mlir::dyn_cast<mlir::RankedTensorType>(tr_op.getType());
+      if (!tr_type || !tr_type.hasStaticShape()) {
+        break;
+      }
+      llvm::ArrayRef<int64_t> perm = tr_op.getPermutation();
+      int64_t new_c = -1;
+      for (int64_t j = 0; j < static_cast<int64_t>(perm.size()); ++j) {
+        if (perm[j] == c) {
+          new_c = j;
+          break;
+        }
+      }
+      if (new_c == -1) {
+        break;
+      }
+      llvm::SmallVector<int64_t> per_op_shape(tr_type.getShape().begin(),
+                                              tr_type.getShape().end());
+      per_op_shape[new_c] = 1;
+      auto per_op_type =
+          mlir::RankedTensorType::get(per_op_shape, tr_type.getElementType());
+      mlir::OpBuilder builder(tr_op);
+      llvm::SmallVector<mlir::Value> new_operands;
+      new_operands.reserve(k);
+      bool ok = true;
+      for (mlir::Value op_val : concat_op.getInputs()) {
+        mlir::Value tr_val = EmitSqueezedTranspose(builder, tr_op.getLoc(),
+                                                   op_val, perm, per_op_type);
+        if (!tr_val) {
+          ok = false;
+          break;
+        }
+        new_operands.push_back(tr_val);
+      }
+      if (!ok) {
+        break;
+      }
+      auto new_concat = builder.create<mlir::stablehlo::ConcatenateOp>(
+          tr_op.getLoc(), tr_type, new_operands,
+          builder.getI64IntegerAttr(new_c));
+      tr_op.replaceAllUsesWith(new_concat.getResult());
+      tr_op.erase();
+      concat_op.erase();
+      concat_op = new_concat;
+      c = new_c;
+      continue;
+    }
+    if (auto resh_op = mlir::dyn_cast<mlir::stablehlo::ReshapeOp>(user)) {
+      auto resh_type =
+          mlir::dyn_cast<mlir::RankedTensorType>(resh_op.getType());
+      if (!resh_type || !resh_type.hasStaticShape()) {
+        break;
+      }
+      const int64_t prefix_prod = ProductOfPrefix(concat_type.getShape(), c);
+      llvm::ArrayRef<int64_t> out_shape = resh_type.getShape();
+      int64_t out_c = -1;
+      int64_t running_prefix = 1;
+      for (int64_t j = 0; j < static_cast<int64_t>(out_shape.size()); ++j) {
+        if (running_prefix == prefix_prod && out_shape[j] >= k &&
+            out_shape[j] % k == 0) {
+          out_c = j;
+          break;
+        }
+        running_prefix *= out_shape[j];
+      }
+      if (out_c == -1) {
+        break;
+      }
+      const int64_t slice_width = out_shape[out_c] / k;
+      llvm::SmallVector<int64_t> per_op_shape(out_shape.begin(),
+                                              out_shape.end());
+      per_op_shape[out_c] = slice_width;
+      auto per_op_type =
+          mlir::RankedTensorType::get(per_op_shape, resh_type.getElementType());
+      mlir::OpBuilder builder(resh_op);
+      llvm::SmallVector<mlir::Value> new_operands;
+      new_operands.reserve(k);
+      for (mlir::Value op_val : concat_op.getInputs()) {
+        new_operands.push_back(EmitReshapeIfNeeded(builder, resh_op.getLoc(),
+                                                   op_val, per_op_type));
+      }
+      auto new_concat = builder.create<mlir::stablehlo::ConcatenateOp>(
+          resh_op.getLoc(), resh_type, new_operands,
+          builder.getI64IntegerAttr(out_c));
+      resh_op.replaceAllUsesWith(new_concat.getResult());
+      resh_op.erase();
+      concat_op.erase();
+      concat_op = new_concat;
+      c = out_c;
+      if (slice_width != 1) {
+        break;
+      }
+      continue;
+    }
+    break;
+  }
+}
+
+// Folds sums of K >= 2 disjoint zero-padded unit-slice `stablehlo.pad` ops
+// (emitted by `select_backward` stacks) into `stablehlo.concatenate`, and
+// commutes trailing `transpose` and `reshape` ops across the concatenation so
+// that concatenation happens along the contiguous feature dimension rather
+// than a small unaligned stacked dimension.
+void FoldDisjointPadAddToConcat(mlir::func::FuncOp func) {
+  llvm::SmallVector<mlir::stablehlo::AddOp> root_adds;
+  func.walk([&](mlir::stablehlo::AddOp op) {
+    if (op->hasOneUse() &&
+        mlir::isa<mlir::stablehlo::AddOp>(*op->user_begin())) {
+      return;
+    }
+    root_adds.push_back(op);
+  });
+
+  for (mlir::stablehlo::AddOp root_add : root_adds) {
+    if (!root_add || root_add->use_empty()) {
+      continue;
+    }
+    auto out_type = mlir::dyn_cast<mlir::RankedTensorType>(root_add.getType());
+    if (!out_type || !out_type.hasStaticShape() || out_type.getRank() < 1) {
+      continue;
+    }
+    int64_t pad_dim = -1;
+    llvm::SmallVector<mlir::Value> slots;
+    if (!CollectDisjointPadAddLeaves(root_add, out_type, pad_dim, slots)) {
+      continue;
+    }
+    mlir::OpBuilder builder(root_add);
+    auto concat_op = builder.create<mlir::stablehlo::ConcatenateOp>(
+        root_add.getLoc(), out_type, slots, builder.getI64IntegerAttr(pad_dim));
+    root_add.replaceAllUsesWith(concat_op.getResult());
+    SinkUnitConcatThroughTransposeAndReshape(concat_op);
+  }
+  EraseTriviallyDeadOps(func);
+}
+
+mlir::Value CreateSingleDimSlice(mlir::OpBuilder& builder, mlir::Location loc,
+                                 mlir::Value val,
+                                 mlir::RankedTensorType val_type, int64_t dim,
+                                 int64_t start_idx, int64_t limit_idx) {
+  const int64_t rank = val_type.getRank();
+  llvm::SmallVector<int64_t> starts(rank, 0);
+  llvm::SmallVector<int64_t> limits(val_type.getShape().begin(),
+                                    val_type.getShape().end());
+  llvm::SmallVector<int64_t> strides(rank, 1);
+  starts[dim] = start_idx;
+  limits[dim] = limit_idx;
+  return builder.create<mlir::stablehlo::SliceOp>(
+      loc, val, builder.getDenseI64ArrayAttr(starts),
+      builder.getDenseI64ArrayAttr(limits),
+      builder.getDenseI64ArrayAttr(strides));
+}
+
+bool TryFoldPackedTransposeReshapeSlice(mlir::stablehlo::SliceOp slice_op) {
+  auto slice_type = mlir::dyn_cast<mlir::RankedTensorType>(slice_op.getType());
+  auto resh_op =
+      slice_op.getOperand().getDefiningOp<mlir::stablehlo::ReshapeOp>();
+  if (!slice_type || !slice_type.hasStaticShape() || !resh_op) {
+    return false;
+  }
+  auto resh_type = mlir::dyn_cast<mlir::RankedTensorType>(resh_op.getType());
+  auto tr_op =
+      resh_op.getOperand().getDefiningOp<mlir::stablehlo::TransposeOp>();
+  if (!resh_type || !resh_type.hasStaticShape() || !tr_op) {
+    return false;
+  }
+  auto tr_type = mlir::dyn_cast<mlir::RankedTensorType>(tr_op.getType());
+  auto tr_in_type =
+      mlir::dyn_cast<mlir::RankedTensorType>(tr_op.getOperand().getType());
+  if (!tr_type || !tr_type.hasStaticShape() || !tr_in_type ||
+      !tr_in_type.hasStaticShape()) {
+    return false;
+  }
+
+  llvm::ArrayRef<int64_t> starts = slice_op.getStartIndices();
+  llvm::ArrayRef<int64_t> limits = slice_op.getLimitIndices();
+  llvm::ArrayRef<int64_t> strides = slice_op.getStrides();
+  const int64_t m = resh_type.getRank();
+  int64_t sd = -1;
+  for (int64_t j = 0; j < m; ++j) {
+    if (strides[j] != 1) {
+      return false;
+    }
+    if (starts[j] == 0 && limits[j] == resh_type.getDimSize(j)) {
+      continue;
+    }
+    if (sd != -1) {
+      return false;
+    }
+    sd = j;
+  }
+  if (sd == -1) {
+    return false;
+  }
+  const int64_t slice_len = limits[sd] - starts[sd];
+  const int64_t r_sd = resh_type.getDimSize(sd);
+  if (slice_len <= 0 || r_sd % slice_len != 0 || starts[sd] % slice_len != 0) {
+    return false;
+  }
+  const int64_t k = r_sd / slice_len;
+  const int64_t slot = starts[sd] / slice_len;
+  if (k < 2 || slot < 0 || slot >= k) {
+    return false;
+  }
+
+  const int64_t prefix_prod = ProductOfPrefix(resh_type.getShape(), sd);
+  int64_t t = -1;
+  int64_t running_prefix = 1;
+  for (int64_t i = 0; i < tr_type.getRank(); ++i) {
+    if (running_prefix == prefix_prod && tr_type.getDimSize(i) == k) {
+      t = i;
+      break;
+    }
+    running_prefix *= tr_type.getDimSize(i);
+  }
+  if (t == -1) {
+    return false;
+  }
+
+  llvm::ArrayRef<int64_t> perm = tr_op.getPermutation();
+  const int64_t orig_d = perm[t];
+  mlir::Value in_val = tr_op.getOperand();
+  mlir::OpBuilder builder(slice_op);
+  mlir::Location loc = slice_op.getLoc();
+
+  llvm::SmallVector<int64_t> sliced_in_shape(tr_in_type.getShape().begin(),
+                                             tr_in_type.getShape().end());
+  sliced_in_shape[orig_d] = 1;
+  auto sliced_in_type =
+      mlir::RankedTensorType::get(sliced_in_shape, slice_type.getElementType());
+
+  mlir::Value sliced_in;
+  if (auto in_resh = in_val.getDefiningOp<mlir::stablehlo::ReshapeOp>()) {
+    auto src_type =
+        mlir::dyn_cast<mlir::RankedTensorType>(in_resh.getOperand().getType());
+    if (src_type && src_type.hasStaticShape()) {
+      const int64_t in_prefix = ProductOfPrefix(tr_in_type.getShape(), orig_d);
+      int64_t src_d = -1;
+      int64_t src_running_prefix = 1;
+      for (int64_t j = 0; j < src_type.getRank(); ++j) {
+        if (src_running_prefix == in_prefix && src_type.getDimSize(j) >= k &&
+            src_type.getDimSize(j) % k == 0) {
+          src_d = j;
+          break;
+        }
+        src_running_prefix *= src_type.getDimSize(j);
+      }
+      if (src_d != -1) {
+        const int64_t chunk = src_type.getDimSize(src_d) / k;
+        mlir::Value sliced_src =
+            CreateSingleDimSlice(builder, loc, in_resh.getOperand(), src_type,
+                                 src_d, slot * chunk, (slot + 1) * chunk);
+        sliced_in =
+            EmitReshapeIfNeeded(builder, loc, sliced_src, sliced_in_type);
+      }
+    }
+  }
+  if (!sliced_in) {
+    sliced_in = CreateSingleDimSlice(builder, loc, in_val, tr_in_type, orig_d,
+                                     slot, slot + 1);
+  }
+
+  mlir::Value replacement =
+      EmitSqueezedTranspose(builder, loc, sliced_in, perm, slice_type);
+  if (!replacement) {
+    return false;
+  }
+  slice_op.replaceAllUsesWith(replacement);
+  return true;
+}
+
+// Folds `slice(reshape(transpose(x)))` where the slice extracts a single index
+// `slot in [0, K)` along a transposed dimension of `x` (such as packed QKV
+// projections) into a direct slice on `x` before the transpose/reshape.
+void FoldPackedTransposeReshapeSlice(mlir::func::FuncOp func) {
+  llvm::SmallVector<mlir::stablehlo::SliceOp> slice_ops;
+  func.walk([&](mlir::stablehlo::SliceOp op) { slice_ops.push_back(op); });
+  for (mlir::stablehlo::SliceOp slice_op : slice_ops) {
+    TryFoldPackedTransposeReshapeSlice(slice_op);
+  }
+  EraseTriviallyDeadOps(func);
+}
+
 struct FoldConcatSoftmaxPass
     : public mlir::PassWrapper<FoldConcatSoftmaxPass,
                                mlir::OperationPass<mlir::func::FuncOp>> {
@@ -603,12 +1151,15 @@ struct FoldConcatSoftmaxPass
 
   llvm::StringRef getArgument() const override { return "fold-concat-softmax"; }
   llvm::StringRef getDescription() const override {
-    return "Folds shift-invariant softmax pre-subtractions and partitions "
-           "softmax across small tail concatenations.";
+    return "Folds shift-invariant softmax pre-subtractions, partitions "
+           "softmax across small tail concatenations, and folds disjoint "
+           "pad-add stacks and packed transpose-reshape-slice patterns.";
   }
 
   void runOnOperation() override {
     mlir::func::FuncOp func = getOperation();
+    FoldDisjointPadAddToConcat(func);
+    FoldPackedTransposeReshapeSlice(func);
     FoldShiftInvariantPreSubtraction(func);
     PartitionSmallTailConcatSoftmax(func);
   }

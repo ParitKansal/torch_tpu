@@ -289,5 +289,200 @@ module {
   EXPECT_EQ(max_reduce_count, 2);
 }
 
+TEST(PipelineTest,
+     FoldsDisjointPadAddSelectBackwardAndCommutesTransposeReshape) {
+  static constexpr const char* kIr = R"mlir(
+module {
+  func.func @main(%dq: tensor<142x32x8x64xbf16>, %dk: tensor<142x32x8x64xbf16>, %dv: tensor<142x32x8x64xbf16>) -> tensor<4544x1536xbf16> {
+    %zero = stablehlo.constant dense<0.000000e+00> : tensor<bf16>
+    %r_v = stablehlo.reshape %dv : (tensor<142x32x8x64xbf16>) -> tensor<1x142x32x512xbf16>
+    %p_v = stablehlo.pad %r_v, %zero, low = [2, 0, 0, 0], high = [0, 0, 0, 0], interior = [0, 0, 0, 0] : (tensor<1x142x32x512xbf16>, tensor<bf16>) -> tensor<3x142x32x512xbf16>
+    %r_k = stablehlo.reshape %dk : (tensor<142x32x8x64xbf16>) -> tensor<1x142x32x512xbf16>
+    %p_k = stablehlo.pad %r_k, %zero, low = [1, 0, 0, 0], high = [1, 0, 0, 0], interior = [0, 0, 0, 0] : (tensor<1x142x32x512xbf16>, tensor<bf16>) -> tensor<3x142x32x512xbf16>
+    %add1 = stablehlo.add %p_v, %p_k : tensor<3x142x32x512xbf16>
+    %r_q = stablehlo.reshape %dq : (tensor<142x32x8x64xbf16>) -> tensor<1x142x32x512xbf16>
+    %p_q = stablehlo.pad %r_q, %zero, low = [0, 0, 0, 0], high = [2, 0, 0, 0], interior = [0, 0, 0, 0] : (tensor<1x142x32x512xbf16>, tensor<bf16>) -> tensor<3x142x32x512xbf16>
+    %add2 = stablehlo.add %add1, %p_q : tensor<3x142x32x512xbf16>
+    %tr = stablehlo.transpose %add2, dims = [1, 2, 0, 3] : (tensor<3x142x32x512xbf16>) -> tensor<142x32x3x512xbf16>
+    %out = stablehlo.reshape %tr : (tensor<142x32x3x512xbf16>) -> tensor<4544x1536xbf16>
+    return %out : tensor<4544x1536xbf16>
+  }
+}
+)mlir";
+
+  mlir::DialectRegistry registry;
+  mlir::stablehlo::registerAllDialects(registry);
+  mlir::MLIRContext context(registry);
+  context.loadAllAvailableDialects();
+
+  mlir::OwningOpRef<mlir::ModuleOp> module =
+      mlir::parseSourceString<mlir::ModuleOp>(kIr, &context);
+  ASSERT_TRUE(module);
+
+  EXPECT_THAT(RunTorchTpuOptimizationPasses(*module, &context), IsOk());
+
+  int pad_count = 0;
+  int add_count = 0;
+  int transpose_count = 0;
+  int concat_count = 0;
+  int64_t concat_dim = -1;
+
+  module->walk([&](mlir::Operation* op) {
+    if (mlir::isa<mlir::stablehlo::PadOp>(op)) {
+      ++pad_count;
+    }
+    if (mlir::isa<mlir::stablehlo::AddOp>(op)) {
+      ++add_count;
+    }
+    if (mlir::isa<mlir::stablehlo::TransposeOp>(op)) {
+      ++transpose_count;
+    }
+    if (auto concat = mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(op)) {
+      ++concat_count;
+      concat_dim = static_cast<int64_t>(concat.getDimension());
+    }
+  });
+
+  EXPECT_EQ(pad_count, 0);
+  EXPECT_EQ(add_count, 0);
+  EXPECT_EQ(transpose_count, 0);
+  EXPECT_EQ(concat_count, 1);
+  EXPECT_EQ(concat_dim, 1);
+
+  mlir::func::FuncOp main_fn = module->lookupSymbol<mlir::func::FuncOp>("main");
+  ASSERT_TRUE(main_fn);
+  ASSERT_EQ(main_fn.getFunctionType().getNumResults(), 1);
+  EXPECT_EQ(main_fn.getFunctionType().getResult(0),
+            mlir::RankedTensorType::get({4544, 1536},
+                                        mlir::BFloat16Type::get(&context)));
+
+  mlir::stablehlo::ConcatenateOp final_concat;
+  module->walk([&](mlir::stablehlo::ConcatenateOp op) { final_concat = op; });
+  ASSERT_TRUE(final_concat);
+  ASSERT_EQ(final_concat.getInputs().size(), 3);
+  auto get_root_val = [](mlir::Value val) -> mlir::Value {
+    while (auto resh = val.getDefiningOp<mlir::stablehlo::ReshapeOp>()) {
+      val = resh.getOperand();
+    }
+    return val;
+  };
+  EXPECT_EQ(get_root_val(final_concat.getInputs()[0]), main_fn.getArgument(0));
+  EXPECT_EQ(get_root_val(final_concat.getInputs()[1]), main_fn.getArgument(1));
+  EXPECT_EQ(get_root_val(final_concat.getInputs()[2]), main_fn.getArgument(2));
+
+  auto ret_op = mlir::dyn_cast<mlir::func::ReturnOp>(
+      main_fn.getBody().front().getTerminator());
+  ASSERT_TRUE(ret_op);
+  ASSERT_EQ(ret_op.getNumOperands(), 1);
+  EXPECT_EQ(ret_op.getOperand(0), final_concat.getResult());
+}
+
+TEST(PipelineTest, FoldsPackedProjectionTransposeReshapeSlice) {
+  static constexpr const char* kIr = R"mlir(
+module {
+  func.func @main(%proj: tensor<4544x1536xbf16>) -> (tensor<142x32x8x64xbf16>, tensor<142x32x8x64xbf16>, tensor<142x32x8x64xbf16>) {
+    %r0 = stablehlo.reshape %proj : (tensor<4544x1536xbf16>) -> tensor<142x32x3x512xbf16>
+    %tr = stablehlo.transpose %r0, dims = [2, 0, 1, 3] : (tensor<142x32x3x512xbf16>) -> tensor<3x142x32x512xbf16>
+    %r1 = stablehlo.reshape %tr : (tensor<3x142x32x512xbf16>) -> tensor<426x32x8x64xbf16>
+    %q = stablehlo.slice %r1 [0:142, 0:32, 0:8, 0:64] : (tensor<426x32x8x64xbf16>) -> tensor<142x32x8x64xbf16>
+    %k = stablehlo.slice %r1 [142:284, 0:32, 0:8, 0:64] : (tensor<426x32x8x64xbf16>) -> tensor<142x32x8x64xbf16>
+    %v = stablehlo.slice %r1 [284:426, 0:32, 0:8, 0:64] : (tensor<426x32x8x64xbf16>) -> tensor<142x32x8x64xbf16>
+    return %q, %k, %v : tensor<142x32x8x64xbf16>, tensor<142x32x8x64xbf16>, tensor<142x32x8x64xbf16>
+  }
+}
+)mlir";
+
+  mlir::DialectRegistry registry;
+  mlir::stablehlo::registerAllDialects(registry);
+  mlir::MLIRContext context(registry);
+  context.loadAllAvailableDialects();
+
+  mlir::OwningOpRef<mlir::ModuleOp> module =
+      mlir::parseSourceString<mlir::ModuleOp>(kIr, &context);
+  ASSERT_TRUE(module);
+
+  EXPECT_THAT(RunTorchTpuOptimizationPasses(*module, &context), IsOk());
+
+  int transpose_count = 0;
+  int slice_count = 0;
+  int dim3_value_count = 0;
+
+  module->walk([&](mlir::Operation* op) {
+    if (mlir::isa<mlir::stablehlo::TransposeOp>(op)) {
+      ++transpose_count;
+    }
+    if (mlir::isa<mlir::stablehlo::SliceOp>(op)) {
+      ++slice_count;
+    }
+    for (mlir::Value res : op->getResults()) {
+      if (auto rtt = mlir::dyn_cast<mlir::RankedTensorType>(res.getType())) {
+        for (int64_t d : rtt.getShape()) {
+          if (d == 3 || d == 426) {
+            ++dim3_value_count;
+          }
+        }
+      }
+    }
+  });
+
+  EXPECT_EQ(transpose_count, 0);
+  EXPECT_EQ(slice_count, 3);
+  EXPECT_EQ(dim3_value_count, 0);
+
+  mlir::func::FuncOp main_fn = module->lookupSymbol<mlir::func::FuncOp>("main");
+  ASSERT_TRUE(main_fn);
+  auto ret_op = mlir::dyn_cast<mlir::func::ReturnOp>(
+      main_fn.getBody().front().getTerminator());
+  ASSERT_TRUE(ret_op);
+  ASSERT_EQ(ret_op.getNumOperands(), 3);
+
+  llvm::SmallVector<mlir::stablehlo::SliceOp> slices;
+  module->walk([&](mlir::stablehlo::SliceOp op) { slices.push_back(op); });
+  ASSERT_EQ(slices.size(), 3);
+  llvm::sort(slices,
+             [](mlir::stablehlo::SliceOp a, mlir::stablehlo::SliceOp b) {
+               return a.getStartIndices()[1] < b.getStartIndices()[1];
+             });
+
+  EXPECT_EQ(slices[0].getStartIndices(), llvm::ArrayRef<int64_t>({0, 0}));
+  EXPECT_EQ(slices[0].getLimitIndices(), llvm::ArrayRef<int64_t>({4544, 512}));
+  EXPECT_EQ(slices[1].getStartIndices(), llvm::ArrayRef<int64_t>({0, 512}));
+  EXPECT_EQ(slices[1].getLimitIndices(), llvm::ArrayRef<int64_t>({4544, 1024}));
+  EXPECT_EQ(slices[2].getStartIndices(), llvm::ArrayRef<int64_t>({0, 1024}));
+  EXPECT_EQ(slices[2].getLimitIndices(), llvm::ArrayRef<int64_t>({4544, 1536}));
+
+  auto get_root_val = [](mlir::Value val) -> mlir::Value {
+    while (auto resh = val.getDefiningOp<mlir::stablehlo::ReshapeOp>()) {
+      val = resh.getOperand();
+    }
+    return val;
+  };
+  EXPECT_EQ(get_root_val(ret_op.getOperand(0)), slices[0].getResult());
+  EXPECT_EQ(get_root_val(ret_op.getOperand(1)), slices[1].getResult());
+  EXPECT_EQ(get_root_val(ret_op.getOperand(2)), slices[2].getResult());
+}
+
+TEST(PipelineTest, HandlesZeroSizeDimensionInTransposeWithoutCrash) {
+  static constexpr const char* kIr = R"mlir(
+module {
+  func.func @main(%arg0: tensor<0x1x32xbf16>) -> tensor<1x0x32xbf16> {
+    %0 = stablehlo.transpose %arg0, dims = [1, 0, 2] : (tensor<0x1x32xbf16>) -> tensor<1x0x32xbf16>
+    return %0 : tensor<1x0x32xbf16>
+  }
+}
+)mlir";
+
+  mlir::DialectRegistry registry;
+  mlir::stablehlo::registerAllDialects(registry);
+  mlir::MLIRContext context(registry);
+  context.loadAllAvailableDialects();
+
+  mlir::OwningOpRef<mlir::ModuleOp> module =
+      mlir::parseSourceString<mlir::ModuleOp>(kIr, &context);
+  ASSERT_TRUE(module);
+
+  EXPECT_THAT(RunTorchTpuOptimizationPasses(*module, &context), IsOk());
+}
+
 }  // namespace
 }  // namespace torch_tpu

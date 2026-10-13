@@ -1543,8 +1543,8 @@ absl::StatusOr<DeviceGroup> ProcessGroupTpu::GatherMemberWorldRanks() {
           << "world rank " << member_world_ranks[i]
           << " out of range for world size " << world_size;
     }
-    TT_RETURN_IF_ERROR(CallStore("store set local_subgroup_ranks", [&] {
-      store_->set("local_subgroup_ranks",
+    TT_RETURN_IF_ERROR(CallStore("store set group_member_world_ranks", [&] {
+      store_->set("group_member_world_ranks",
                   absl::StrJoin(member_world_ranks, ","));
     }));
     return member_world_ranks;
@@ -1555,8 +1555,8 @@ absl::StatusOr<DeviceGroup> ProcessGroupTpu::GatherMemberWorldRanks() {
     store_->set(my_key, std::to_string(topo.world_rank));
   }));
   TT_ASSIGN_OR_RETURN(const std::vector<uint8_t> bytes,
-                      CallStore("store get local_subgroup_ranks", [&] {
-                        return store_->get("local_subgroup_ranks");
+                      CallStore("store get group_member_world_ranks", [&] {
+                        return store_->get("group_member_world_ranks");
                       }));
   const std::string_view csv(reinterpret_cast<const char*>(bytes.data()),
                              bytes.size());
@@ -1572,10 +1572,10 @@ absl::StatusOr<DeviceGroup> ProcessGroupTpu::GatherMemberWorldRanks() {
         << "world rank " << r << " out of range for world size " << world_size;
     member_world_ranks.push_back(r);
   }
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=internal subgroup size invariant
+  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=internal group size invariant
       static_cast<int64_t>(member_world_ranks.size()) == size_,
       error::kInternal)
-      << "expected " << size_ << " subgroup ranks, got "
+      << "expected " << size_ << " group member ranks, got "
       << member_world_ranks.size();
   return member_world_ranks;
 }
@@ -1709,70 +1709,33 @@ ProcessGroupTpu::ProcessGroupTpu(c10::intrusive_ptr<c10d::Store> store,
   addressable_device_id_ =
       pjrt_client->addressable_devices()[0]->global_device_id().value();
 
-  // We support creating "flat" process groups, as well as "2D+ mesh" process
-  // (sub)groups. The (sub)group size must evenly divide the world size, i.e.
-  // the total number of devices.
-  TT_CHECK_THROW(world_size % group_size == 0, error::kInternal)
-      << "TPU slice size (" << world_size << ") must be divisible by "
-      << "process group size (" << group_size << ")";
-
   const bool is_initial_world_pg = WorldTopology().rank_to_device_id.empty();
   if (is_initial_world_pg) {
     TT_THROW_IF_ERROR(InitializeRankToDeviceMappings(world_size));
   }
   const auto& topo = WorldTopology();
-  DeviceGroupList subgroup_member_world_ranks;
   if (is_initial_world_pg) {
     member_world_ranks_.resize(size_);
     std::iota(member_world_ranks_.begin(), member_world_ranks_.end(), 0);
-    subgroup_member_world_ranks = DeviceGroupList({member_world_ranks_});
-  } else if (size_ == 1) {
-    member_world_ranks_ = DeviceGroup{topo.world_rank};
-    std::vector<DeviceGroup> unique_subgroups(world_size);
-    for (int64_t r = 0; r < world_size; ++r) {
-      unique_subgroups[r] = DeviceGroup{r};
-    }
-    // Order subgroups by their leader's physical topology position only. Never
-    // order by world rank: world ranks come from launcher order and would make
-    // the per-slice device_assignment order (and thus Megascale's per-slice
-    // collective pattern) depend on pod launch order. Members within a
-    // subgroup keep PG-rank order.
-    TT_CHECK_THROW(  // ERROR_COV_INFEASIBLE=world topology initialized before
-                     // PGs
-        static_cast<int64_t>(topo.rank_to_topo_order.size()) == world_size,
-        error::kInternal)
-        << "world topology order not initialized";
-    absl::c_sort(
-        unique_subgroups, [&topo](const DeviceGroup& a, const DeviceGroup& b) {
-          return topo.rank_to_topo_order[a[0]] < topo.rank_to_topo_order[b[0]];
-        });
-    subgroup_member_world_ranks =
-        DeviceGroupList(std::move(unique_subgroups), /*normalize=*/false);
-  } else if (size_ == world_size ||
-             dynamic_cast<c10d::PrefixStore*>(store_.get()) != nullptr) {
-    TT_ASSIGN_OR_THROW(const NodeLocalStoreConfig local,
-                       GetNodeLocalStore(world_size));
-    const int64_t gather_id = next_subgroup_gather_id.fetch_add(1);
-    TT_THROW_IF_ERROR(GatherSubgroupsViaNodeLocalStore(
-        store_.get(), local.store, local.local_rank, local.local_world_size,
-        rank_, size_, topo.world_rank, topo.rank_to_device_id,
-        topo.rank_to_topo_order, gather_id, member_world_ranks_,
-        subgroup_member_world_ranks));
   } else {
+    // Only this group's members exchange world ranks; each group compiles for
+    // its own devices only.
     TT_ASSIGN_OR_THROW(member_world_ranks_, GatherMemberWorldRanks());
-    TT_ASSIGN_OR_THROW(subgroup_member_world_ranks,
-                       GatherAllSubgroups(member_world_ranks_, world_size));
   }
   member_device_ids_.resize(size_);
   for (int64_t i = 0; i < size_; ++i) {
     member_device_ids_[i] = topo.rank_to_device_id[member_world_ranks_[i]];
   }
-  PermuteDeviceAssignmentForSubgroups(subgroup_member_world_ranks,
-                                      topo.rank_to_device_id,
-                                      device_assignment_, replica_groups_);
+  // Compile this group's collectives for its own devices only: partition p is
+  // the device of PG rank p. Each process group thus runs independent
+  // executables, and XLA's start-of-program barrier spans only these devices.
+  device_assignment_.assign(member_device_ids_.begin(),
+                            member_device_ids_.end());
+  DeviceGroup local_partitions(size_);
+  std::iota(local_partitions.begin(), local_partitions.end(), 0);
+  replica_groups_ = DeviceGroupList({std::move(local_partitions)});
   ABSL_VLOG(1) << "[ProcessGroupTpu] ctor done: pg_id=" << pg_id
-               << ", elapsed=" << NowMs() - ctor_t0
-               << " ms, num_subgroups=" << subgroup_member_world_ranks.size();
+               << ", elapsed=" << NowMs() - ctor_t0 << " ms";
 
   ABSL_VLOG(1) << "[ProcessGroupTpu] Rank-to-device-id mapping for "
                << "rank=" << rank << ", group_size=" << group_size << ": "
@@ -1782,17 +1745,17 @@ ProcessGroupTpu::ProcessGroupTpu(c10::intrusive_ptr<c10d::Store> store,
                << ", group size: " << getSize()
                << ", device id: " << addressable_device_id_
                << ", group device ids: " << ToString(member_device_ids_)
-               << ", all subgroups: " << ToString(replica_groups_);
+               << ", replica groups: " << ToString(replica_groups_);
 }
 
 void ProcessGroupTpu::shutdown() {}
 
 ProcessGroupTpu::~ProcessGroupTpu() { shutdown(); }
 
-// Sets the subgroups fingerprint in the given param cache keys.
-#define TT_SET_SUBGROUPS_FINGERPRINT(param_keys) \
-  TT_THROW_IF_ERROR(                             \
-      param_keys.SetParam("subgroups_fingerprint", replica_groups_))
+// Sets the replica groups fingerprint in the given param cache keys.
+#define TT_SET_REPLICA_GROUPS_FINGERPRINT(param_keys) \
+  TT_THROW_IF_ERROR(                                  \
+      param_keys.SetParam("replica_groups_fingerprint", replica_groups_))
 
 const DeviceGroupList& ProcessGroupTpu::GetReplicaGroups() const {
   return replica_groups_;
@@ -1801,7 +1764,7 @@ const DeviceGroupList& ProcessGroupTpu::GetReplicaGroups() const {
 c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::allreduce(
     std::vector<at::Tensor>& tensors, const c10d::AllreduceOptions& opts) {
   TT_KERNEL(OpName::kDistributedAllReduce, param_keys, (tensors, opts), {
-    TT_SET_SUBGROUPS_FINGERPRINT(param_keys);
+    TT_SET_REPLICA_GROUPS_FINGERPRINT(param_keys);
     // TODO(vladbelous): Implement support for multiple input/output
     // tensors:
     TT_CHECK_THROW(tensors.size() == 1, error::kPythonNotImplementedError)
@@ -1816,9 +1779,9 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::allreduce(
 
     auto& maybe_materialized_input_tensor = tensor;
 
-    auto op_builder = [subgroups = replica_groups_,
+    auto op_builder = [replica_groups = replica_groups_,
                        reduce_op = opts.reduceOp](mlir::MlirOp input) {
-      return BuildDistributedAllReduceShlo(input, reduce_op, subgroups);
+      return BuildDistributedAllReduceShlo(input, reduce_op, replica_groups);
     };
 
     TT_ASSIGN_OR_THROW(auto output_dtype,
@@ -1979,7 +1942,7 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::allgather(
   TT_KERNEL(
       OpName::kDistributedAllGather, param_keys,
       (output_tensors, input_tensors, opts), {
-        TT_SET_SUBGROUPS_FINGERPRINT(param_keys);
+        TT_SET_REPLICA_GROUPS_FINGERPRINT(param_keys);
         const int64_t group_size = getSize();
         TT_CHECK_THROW(  // ERROR_COV_INFEASIBLE=PyTorch only ever passes
                          // single-element input lists.
@@ -2015,9 +1978,9 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::allgather(
         auto& maybe_materialized_input_tensor = input_tensor;
 
         auto op_builder =
-            [subgroups = replica_groups_](
+            [replica_groups = replica_groups_](
                 mlir::MlirOp input) -> absl::StatusOr<DynamicMlirOpResults> {
-          return BuildDistributedAllGatherShlo(input, subgroups,
+          return BuildDistributedAllGatherShlo(input, replica_groups,
                                                AllGatherOutputMode::kList);
         };
 
@@ -2072,7 +2035,7 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::_allgather_base(
   TT_KERNEL(
       OpName::kDistributedAllGatherIntoTensor, param_keys,
       (output_tensor, input_tensor, opts), {
-        TT_SET_SUBGROUPS_FINGERPRINT(param_keys);
+        TT_SET_REPLICA_GROUPS_FINGERPRINT(param_keys);
         const int64_t world_size = getSize();
         auto input_sizes = input_tensor.sizes();
         auto output_sizes = output_tensor.sizes();
@@ -2137,10 +2100,11 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::_allgather_base(
         auto& maybe_materialized_input_tensor = input_tensor;
 
         auto op_builder =
-            [subgroups = replica_groups_,
+            [replica_groups = replica_groups_,
              output_mode](mlir::MlirOp input) -> absl::StatusOr<mlir::MlirOp> {
-          TT_ASSIGN_OR_RETURN(auto results, BuildDistributedAllGatherShlo(
-                                                input, subgroups, output_mode));
+          TT_ASSIGN_OR_RETURN(
+              auto results, BuildDistributedAllGatherShlo(input, replica_groups,
+                                                          output_mode));
           // `results` must have a single element because this kernel only
           // invokes BuildDistributedAllGatherShlo with kConcat or kStack.
           ABSL_CHECK_EQ(results.size(), 1);  // CRASH_OK
@@ -2206,7 +2170,7 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::gather(
   TT_KERNEL(
       OpName::kDistributedGather, param_keys,
       (output_tensors, input_tensors, opts), {
-        TT_SET_SUBGROUPS_FINGERPRINT(param_keys);
+        TT_SET_REPLICA_GROUPS_FINGERPRINT(param_keys);
         const int64_t rank = getRank();
         const int64_t root_rank = opts.rootRank;
         TT_CHECK_THROW(input_tensors.size() == 1, error::kInvalidArgument)
@@ -2404,7 +2368,7 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::_reduce_scatter_base(
   TT_KERNEL(
       OpName::kDistributedReduceScatterTensor, param_keys,
       (output, input, opts), {
-        TT_SET_SUBGROUPS_FINGERPRINT(param_keys);
+        TT_SET_REPLICA_GROUPS_FINGERPRINT(param_keys);
         TT_THROW_IF_ERROR(
             ValidateReductionOp(opts.reduceOp, input.scalar_type()));
 
@@ -2427,8 +2391,10 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::_reduce_scatter_base(
         auto& maybe_materialized_input_concat_tensor = input_concat;
 
         auto op_builder = [reduce_op = opts.reduceOp,
-                           subgroups = replica_groups_](mlir::MlirOp input) {
-          return BuildDistributedReduceScatterShlo(input, reduce_op, subgroups);
+                           replica_groups =
+                               replica_groups_](mlir::MlirOp input) {
+          return BuildDistributedReduceScatterShlo(input, reduce_op,
+                                                   replica_groups);
         };
 
         TT_ASSIGN_OR_THROW(auto out_dtype,
@@ -2675,7 +2641,7 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::alltoall(
         const bool async = opts.asyncOp;
         TT_THROW_IF_ERROR(param_keys.SetParam("rank", rank));
         TT_THROW_IF_ERROR(param_keys.SetParam("async", async));
-        TT_SET_SUBGROUPS_FINGERPRINT(param_keys);
+        TT_SET_REPLICA_GROUPS_FINGERPRINT(param_keys);
         TT_CHECK_THROW(output_tensors.size() == input_tensors.size(),
                        error::kInvalidArgument)
             << "expected output and input tensors to have the same number of "

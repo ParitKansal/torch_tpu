@@ -42,8 +42,13 @@ struct PallasDeviceAssignment {
 
 // Resolves a single target device assignment across `ops` and `pallas_ops`.
 // If `pallas_ops` is non-empty, its device assignment serves as the
-// authoritative anchor. Differing device assignments emit an explicit
-// diagnostic warning and return an error (or throw if Pallas DAs conflict).
+// authoritative anchor; otherwise the first non-empty op device assignment
+// does. Ops whose device assignments are permutations of the same device set
+// resolve to that one assignment, and their collective attributes are remapped
+// later (see `RemapReplicaOrderInOperation`). Ops on different device sets
+// return kInvalidArgument: collectives over process groups with different
+// members cannot share an executable. Conflicting Pallas mesh device
+// assignments throw.
 absl::StatusOr<std::vector<int64_t>>  // INT_VEC_OK
 ResolveDeviceAssignment(
     absl::Span<const OpDeviceAssignment> ops,
@@ -56,19 +61,21 @@ ResolveDeviceAssignmentForTraversal(
     absl::Span<const SharedDeviceBufferList> execution_order,
     absl::Span<const int64_t> pallas_device_assignment = {});
 
-// Rewrites rank-local collective attributes (`replica_groups`,
-// `source_target_pairs`, and CustomCall `backend_config` replica groups) from
-// `op_da` into partition indices of `resolved_da` using 1-to-1 index
-// permutation.
-absl::Status RewriteAndTileOperationForSubgroup(
+// Remaps the rank-local collective attributes (`replica_groups`,
+// `source_target_pairs`, and CustomCall `backend_config` replica groups) of
+// `root_op` and its nested ops when `op_da` is a permutation of `resolved_da`:
+// rank r of the op becomes the partition of `resolved_da` holding device
+// `op_da[r]`. A no-op if `op_da` is empty or equals `resolved_da`. Returns an
+// error if `op_da` is not a permutation of `resolved_da`.
+absl::Status RemapReplicaOrderInOperation(
     mlir::Operation* absl_nonnull root_op, absl::Span<const int64_t> op_da,
     absl::Span<const int64_t> resolved_da);
 
-// Applies partition-index replica rewriting to all MLIR operations emitted for
+// Applies `RemapReplicaOrderInOperation` to all MLIR operations emitted for
 // `deferred_op` (starting at `first_new_op` in the current block, plus any
-// newly added functions in `new_func_ops`). Returns an error if any rewrite
-// fails.
-absl::Status ApplySubgroupTilingOrReplicaRewriting(
+// newly added functions in `new_func_ops`) when the op's device assignment is
+// a permutation of `resolved_da`. Returns an error if any remap fails.
+absl::Status ApplyReplicaOrderRemapping(
     mlir::Operation* absl_nullable first_new_op,
     absl::Span<const mlir::func::FuncOp> new_func_ops,
     const DeferredOp& deferred_op, absl::Span<const int64_t> resolved_da);

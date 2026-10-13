@@ -37,7 +37,6 @@ import torch
 from torch import distributed as dist
 import torch.multiprocessing as mp
 from torch_tpu._internal import pallas
-from torch_tpu._internal.utils import test_utils as utils
 from torch_tpu._internal.distributed import multiprocessing
 from tests import error_testing as et
 from tests.distributed import distributed_utils
@@ -416,7 +415,7 @@ def run_collective_validation_errors() -> None:
 
 
 def run_conflicting_device_assignments_error() -> None:
-  """Tests that compatible tiled subgroups fuse cleanly while conflicting device assignments fail."""
+  """Tests that fusing ops over different device sets or Pallas meshes fails."""
   dist.init_process_group("tpu")
   rank = dist.get_rank()
   world_size = dist.get_world_size()
@@ -426,18 +425,24 @@ def run_conflicting_device_assignments_error() -> None:
   high = dist.new_group(ranks=list(range(half, world_size)))
   subgroup = low if rank < half else high
 
+  # The world and subgroup collectives run on different device sets, so they
+  # cannot share an executable.
   @torch.compile(backend="tpu", fullgraph=True)
   @torch.tpu.distributed.spmd_safe
-  def compatible_tiled_fn(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+  def mismatched_device_sets_fn(
+      a: torch.Tensor, b: torch.Tensor
+  ) -> torch.Tensor:
     dist.all_reduce(a)
     dist.all_reduce(b, group=subgroup)
     return a + b
 
   x = torch.ones(4, device="tpu")
   y = torch.ones(4, device="tpu")
-  res = compatible_tiled_fn(x, y).cpu()
-  expected = torch.full((4,), float(world_size + half), dtype=torch.float32)
-  utils.assert_close(res, expected)
+  mismatch_msg = re.compile(
+      r".*device assignment mismatch across operations.*", re.DOTALL
+  )
+  with et.assert_raises_message(RuntimeError, tpu=mismatch_msg):
+    _ = mismatched_device_sets_fn(x, y).cpu()
 
   mesh1 = torch.tpu.pallas.get_pallas_mesh(axis_names=("x",))
   mesh2 = jax.sharding.Mesh(mesh1.devices[::-1], axis_names=mesh1.axis_names)

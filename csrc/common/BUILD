@@ -362,6 +362,7 @@ torch_tpu_cc_library(
         ":excess_precision",
         ":fingerprint_utils",
         ":shape",
+        ":tpu_subslice_utils",
         "//csrc/mlir:pipeline",
         "//csrc/ops:op_builder_utils",
         "//csrc/pjrt:pjrt_state",
@@ -383,6 +384,7 @@ torch_tpu_cc_library(
         "@xla//xla/pjrt:maybe_owning_mlir_module",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:pjrt_compiler",
+        "@xla//xla/pjrt:pjrt_device_dimensions",
         "@xla//xla/pjrt:pjrt_executable",
         "@xla//xla/pjrt:pjrt_layout",
         "@xla//xla/service:computation_layout",
@@ -412,6 +414,7 @@ torch_tpu_cc_library(
         ":env_vars",
         ":error_utils",
         ":fingerprint_utils",
+        ":tpu_subslice_utils",
         "//csrc/pjrt:pjrt_state",
         "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/cleanup",
@@ -422,8 +425,28 @@ torch_tpu_cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt:pjrt_device_dimensions",
         "@xla//xla/pjrt:pjrt_executable",
         "@xla//xla/tsl/platform:env",
+    ],
+)
+
+torch_tpu_cc_library(
+    name = "tpu_subslice_utils",
+    srcs = ["tpu_subslice_utils.cc"],
+    hdrs = ["tpu_subslice_utils.h"],
+    deps = [
+        ":error_utils",
+        "@com_google_absl//absl/log:absl_log",
+        "@com_google_absl//absl/status:statusor",
+        "@xla//xla/client:executable_build_options",
+        "@xla//xla/pjrt:maybe_owning_mlir_module",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt:pjrt_compiler",
+        "@xla//xla/pjrt:pjrt_device_dimensions",
+        "@xla//xla/pjrt:pjrt_executable",
+        "@xla//xla/runtime:device_id",
+        "@xla//xla/service:device_assignment",
     ],
 )
 
@@ -445,6 +468,8 @@ torch_tpu_cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/time",
+        "@xla//xla/pjrt:pjrt_device_dimensions",
+        "@xla//xla/pjrt:pjrt_executable",
     ],
 )
 
@@ -674,6 +699,8 @@ torch_tpu_cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@xla//xla/pjrt:pjrt_device_dimensions",
+        "@xla//xla/pjrt:pjrt_executable",
         "@xla//xla/tsl/platform:env",
         "@xla//xla/tsl/platform/cloud:gcs_file_system",  # buildcleaner: keep - for GCS support
     ] + add_internal_filesystem_dependencies(),
@@ -1263,6 +1290,7 @@ torch_tpu_cc_library(
         ":tier2_compilation_cache",
         ":tier3_compilation_cache",
         ":to_string",
+        ":tpu_subslice_utils",
         ":utils",
         "//csrc/common:contain",
         "//csrc/internal/dynamism:dynamism_ops",
@@ -1292,6 +1320,7 @@ torch_tpu_cc_library(
         "@xla//xla/hlo/utils/concurrency:concurrency_utils",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:pjrt_compiler",
+        "@xla//xla/pjrt:pjrt_device_dimensions",
         "@xla//xla/pjrt:pjrt_executable",
     ],
 )

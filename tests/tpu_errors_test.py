@@ -5062,23 +5062,23 @@ class PyBindErrorUtilsErrorsTest(et.TpuOnlyErrorTestBase):
     with mock.patch.object(
         dist, "is_initialized", return_value=True
     ), mock.patch.object(dist, "get_world_size", return_value=8):
-      # Non-spanning mesh (volume 4 != world_size 8)
+      # Non-spanning mesh (volume 4 != process group size 8)
       with et.assert_raises_message(
           ValueError,
           tpu=re.compile(
-              r".*Pallas mesh shape \(4,\) product \(4\) must match world size"
-              r" \(8\)\..*",
+              r".*Pallas mesh shape \(4,\) product \(4\) must match the"
+              r" process group size \(8\)\..*",
               re.DOTALL,
           ),
       ):
         torch.tpu.pallas.get_pallas_mesh(axis_names=("rank",), mesh_shape=(4,))
 
-      # Non-spanning multi-dimensional mesh (2 * 2 != world_size 8)
+      # Non-spanning multi-dimensional mesh (2 * 2 != process group size 8)
       with et.assert_raises_message(
           ValueError,
           tpu=re.compile(
-              r".*Pallas mesh shape \(2, 2\) product \(4\) must match world"
-              r" size \(8\)\..*",
+              r".*Pallas mesh shape \(2, 2\) product \(4\) must match the"
+              r" process group size \(8\)\..*",
               re.DOTALL,
           ),
       ):
@@ -5086,36 +5086,26 @@ class PyBindErrorUtilsErrorsTest(et.TpuOnlyErrorTestBase):
             axis_names=("dp", "tp"), mesh_shape=(2, 2)
         )
 
-      # Kernel mesh whose size differs from world_size. Only `mesh.size` is
-      # read by the validation, so a mock avoids initializing a JAX backend.
-      with et.assert_raises_message(
-          ValueError,
-          tpu=re.compile(
-              r".*Pallas kernel mesh size \(4\) must match world size"
-              r" \(8\)\..*",
-              re.DOTALL,
-          ),
-      ):
-        pallas.custom_jax_kernel(lambda x: x, mesh=mock.MagicMock(size=4))
+      # Kernel mesh smaller than world_size (a subgroup mesh) is accepted.
+      # Only `mesh.size` and `mesh.devices.flat` are read by the validation, so
+      # a mock avoids initializing a JAX backend.
+      subgroup_kernel_mesh = mock.MagicMock(size=4)
+      pallas.pallas._validate_pallas_mesh_size(mesh=subgroup_kernel_mesh)  # pylint: disable=protected-access
+      pallas.custom_jax_kernel(lambda x: x, mesh=subgroup_kernel_mesh)
 
-      # Subgroup process group (size < world_size) raises ValueError
+      # Subgroup process group (size < world_size) is accepted, and the mesh
+      # spans the subgroup's devices.
       subgroup = mock.MagicMock(spec=dist.ProcessGroup)
       with mock.patch.object(
           dist,
           "get_world_size",
           side_effect=lambda pg=None: 4 if pg is subgroup else 8,
       ):
-        with et.assert_raises_message(
-            ValueError,
-            tpu=re.compile(
-                r".*torch_tpu pallas kernels currently require full world-size"
-                r" meshes only\. Got process_group with size 4, expected 8\..*",
-                re.DOTALL,
-            ),
-        ):
-          torch.tpu.pallas.get_pallas_mesh(
-              axis_names=("rank",), process_group=subgroup
-          )
+        subgroup_mesh = torch.tpu.pallas.get_pallas_mesh(
+            axis_names=("rank",), process_group=subgroup
+        )
+        self.assertEqual(subgroup_mesh.axis_names, ("rank",))
+        self.assertEqual(len(subgroup_mesh.devices.flat), 4)
 
       # Custom process group with size == world_size is accepted
       custom_pg = mock.MagicMock(spec=dist.ProcessGroup)

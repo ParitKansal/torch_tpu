@@ -193,8 +193,7 @@ TEST(DeviceAssignmentPipelineTest,
   auto module = mb.build();
 
   EXPECT_TRUE(
-      RewriteAndTileOperationForSubgroup(raw_op, collective_da, resolved_da)
-          .ok());
+      RemapReplicaOrderInOperation(raw_op, collective_da, resolved_da).ok());
 
   EXPECT_THAT(ExtractDenseIntAttrValues(raw_op, "replica_groups"),
               testing::ElementsAre(0, 1, 6, 7, 2, 3, 4, 5));
@@ -256,8 +255,7 @@ TEST(DeviceAssignmentPipelineTest,
       testing::HasSubstr("device assignment mismatch across operations"));
   EXPECT_THAT(
       resolved.status().message(),
-      testing::HasSubstr("All operations in the traversal must share the same "
-                         "world-sized device assignment"));
+      testing::HasSubstr("cannot be compiled into the same executable"));
 
   const std::vector<int64_t> da3 = {0, 1, 2, 3};  // INT_VEC_OK
   const absl::StatusOr<std::vector<int64_t>>      // INT_VEC_OK
@@ -273,8 +271,7 @@ TEST(DeviceAssignmentPipelineTest,
       testing::HasSubstr("device assignment mismatch across operations"));
   EXPECT_THAT(
       resolved_size_mismatch.status().message(),
-      testing::HasSubstr("All operations in the traversal must share the same "
-                         "world-sized device assignment"));
+      testing::HasSubstr("cannot be compiled into the same executable"));
 
   const absl::StatusOr<std::vector<int64_t>>  // INT_VEC_OK
       resolved_pallas_mismatch = ResolveDeviceAssignment(
@@ -292,12 +289,11 @@ TEST(DeviceAssignmentPipelineTest,
       testing::HasSubstr("device assignment mismatch across operations"));
   EXPECT_THAT(
       resolved_pallas_mismatch.status().message(),
-      testing::HasSubstr("All operations in the traversal must share the same "
-                         "world-sized device assignment"));
+      testing::HasSubstr("cannot be compiled into the same executable"));
 }
 
 TEST(DeviceAssignmentPipelineTest,
-     RewriteAndTileOperationForSubgroupRewritesOrthogonalReplicaGroups) {
+     RemapReplicaOrderInOperationRewritesOrthogonalReplicaGroups) {
   mlir::MLIRContext mlir_context;
   mlir_context.loadDialect<mlir::stablehlo::StablehloDialect>();
   mlir_context.loadDialect<mlir::func::FuncDialect>();
@@ -330,19 +326,20 @@ TEST(DeviceAssignmentPipelineTest,
   const std::vector<int64_t> op_da = {0, 1, 2, 3, 4, 5, 6, 7};  // INT_VEC_OK
   const std::vector<int64_t>                                    // INT_VEC_OK
       resolved_da = {2, 3, 0, 1, 6, 7, 4, 5};
-  EXPECT_TRUE(RewriteAndTileOperationForSubgroup(
-                  shard_op.getValue().getDefiningOp(), op_da, resolved_da)
+  EXPECT_TRUE(RemapReplicaOrderInOperation(shard_op.getValue().getDefiningOp(),
+                                           op_da, resolved_da)
                   .ok());
-  EXPECT_TRUE(RewriteAndTileOperationForSubgroup(
+  EXPECT_TRUE(RemapReplicaOrderInOperation(
                   replicate_op.getValue().getDefiningOp(), op_da, resolved_da)
                   .ok());
 
   EXPECT_THAT(ExtractDenseIntAttrValues(shard_op.getValue().getDefiningOp(),
                                         "replica_groups"),
               testing::ElementsAre(2, 3, 0, 1, 6, 7, 4, 5));
+  // The replicate groups {0,4},{1,5},{2,6},{3,7} are remapped in place.
   EXPECT_THAT(ExtractDenseIntAttrValues(replicate_op.getValue().getDefiningOp(),
                                         "replica_groups"),
-              testing::ElementsAre(0, 4, 1, 5, 2, 6, 3, 7));
+              testing::ElementsAre(2, 6, 3, 7, 0, 4, 1, 5));
 }
 
 TEST(DeviceAssignmentPipelineTest,
@@ -351,7 +348,7 @@ TEST(DeviceAssignmentPipelineTest,
   mlir_context.loadDialect<mlir::stablehlo::StablehloDialect>();
   mlir_context.loadDialect<mlir::func::FuncDialect>();
 
-  mlir::ModuleBuilder mb(mlir_context, "test_tile_module");
+  mlir::ModuleBuilder mb(mlir_context, "test_remap_module");
   mlir::func::FunctionBuilder fb(mb, "main");
   auto tensor_type =
       mlir::makeTensorType(mlir_context, {8}, mlir::ElementType::F32);
@@ -379,9 +376,9 @@ TEST(DeviceAssignmentPipelineTest,
   const std::vector<int64_t> op_da = {0, 1, 2, 3, 4, 5, 6, 7};  // INT_VEC_OK
   const std::vector<int64_t>                                    // INT_VEC_OK
       resolved_da = {0, 1, 6, 7, 2, 3, 4, 5};
-  EXPECT_TRUE(RewriteAndTileOperationForSubgroup(func_op.getOperation(), op_da,
-                                                 resolved_da)
-                  .ok());
+  EXPECT_TRUE(
+      RemapReplicaOrderInOperation(func_op.getOperation(), op_da, resolved_da)
+          .ok());
 
   EXPECT_THAT(ExtractDenseIntAttrValues(raw_op, "replica_groups"),
               testing::ElementsAre(0, 1, 4, 5, 6, 7, 2, 3));
@@ -390,7 +387,7 @@ TEST(DeviceAssignmentPipelineTest,
 }
 
 TEST(DeviceAssignmentPipelineTest,
-     RewriteAndTileOperationForSubgroupHandlesPermutedPallasMesh) {
+     RemapReplicaOrderInOperationHandlesPermutedPallasMesh) {
   mlir::MLIRContext mlir_context;
   mlir_context.loadDialect<mlir::stablehlo::StablehloDialect>();
   mlir_context.loadDialect<mlir::func::FuncDialect>();
@@ -415,17 +412,18 @@ TEST(DeviceAssignmentPipelineTest,
   const std::vector<int64_t> op_da = {0, 1, 2, 3, 4, 5, 6, 7};  // INT_VEC_OK
   const std::vector<int64_t>                                    // INT_VEC_OK
       resolved_da = {3, 2, 1, 0, 4, 5, 6, 7};
-  EXPECT_TRUE(RewriteAndTileOperationForSubgroup(
+  EXPECT_TRUE(RemapReplicaOrderInOperation(
                   replicate_op.getValue().getDefiningOp(), op_da, resolved_da)
                   .ok());
 
+  // rank_to_partition = [3, 2, 1, 0, 4, 5, 6, 7], applied in place.
   EXPECT_THAT(ExtractDenseIntAttrValues(replicate_op.getValue().getDefiningOp(),
                                         "replica_groups"),
-              testing::ElementsAre(0, 7, 1, 6, 2, 5, 3, 4));
+              testing::ElementsAre(3, 4, 2, 5, 1, 6, 0, 7));
 }
 
 TEST(DeviceAssignmentPipelineTest,
-     RewriteAndTileOperationForSubgroupHsdpReplicateSymmetricAcrossRanks) {
+     RemapReplicaOrderInOperationHsdpReplicateSymmetricAcrossRanks) {
   mlir::MLIRContext mlir_context;
   mlir_context.loadDialect<mlir::stablehlo::StablehloDialect>();
   mlir_context.loadDialect<mlir::func::FuncDialect>();
@@ -484,11 +482,11 @@ TEST(DeviceAssignmentPipelineTest,
     canonical_world_da.push_back(antipodal_partner(d));
   }
 
-  EXPECT_TRUE(RewriteAndTileOperationForSubgroup(
+  EXPECT_TRUE(RemapReplicaOrderInOperation(
                   replicate_op_rank0.getValue().getDefiningOp(),
                   /*op_da=*/canonical_world_da, canonical_world_da)
                   .ok());
-  EXPECT_TRUE(RewriteAndTileOperationForSubgroup(
+  EXPECT_TRUE(RemapReplicaOrderInOperation(
                   replicate_op_rank8.getValue().getDefiningOp(),
                   /*op_da=*/canonical_world_da, canonical_world_da)
                   .ok());
@@ -634,12 +632,12 @@ TEST(DeviceAssignmentPipelineTest,
   mlir::func::Return(fb, {replicate_op});
   auto module = mb.build();
 
-  EXPECT_TRUE(RewriteAndTileOperationForSubgroup(
-                  shard_op.getValue().getDefiningOp(), da_shard, resolved_da)
+  EXPECT_TRUE(RemapReplicaOrderInOperation(shard_op.getValue().getDefiningOp(),
+                                           da_shard, resolved_da)
                   .ok());
   EXPECT_TRUE(
-      RewriteAndTileOperationForSubgroup(
-          replicate_op.getValue().getDefiningOp(), da_replicate, resolved_da)
+      RemapReplicaOrderInOperation(replicate_op.getValue().getDefiningOp(),
+                                   da_replicate, resolved_da)
           .ok());
 
   EXPECT_THAT(ExtractDenseIntAttrValues(shard_op.getValue().getDefiningOp(),
@@ -680,13 +678,50 @@ TEST(DeviceAssignmentPipelineTest,
   mlir::func::Return(fb, {replicate_op});
   auto module = mb.build();
 
-  EXPECT_TRUE(RewriteAndTileOperationForSubgroup(
+  EXPECT_TRUE(RemapReplicaOrderInOperation(
                   replicate_op.getValue().getDefiningOp(), op_da, resolved_da)
                   .ok());
 
+  // rank_to_partition = [1, 3, 0, 2]: {0, 1}, {2, 3} become {1, 3}, {0, 2},
+  // in the op's group order.
   EXPECT_THAT(ExtractDenseIntAttrValues(replicate_op.getValue().getDefiningOp(),
                                         "replica_groups"),
-              testing::ElementsAre(0, 2, 1, 3));
+              testing::ElementsAre(1, 3, 0, 2));
+}
+
+TEST(DeviceAssignmentPipelineTest,
+     RemapReplicaOrderInOperationRejectsSmallerOpDeviceAssignment) {
+  // An op over a subset of the resolved devices runs on a different device
+  // set, so it cannot be remapped into the resolved assignment.
+  mlir::MLIRContext mlir_context;
+  mlir_context.loadDialect<mlir::stablehlo::StablehloDialect>();
+  mlir_context.loadDialect<mlir::func::FuncDialect>();
+
+  mlir::ModuleBuilder mb(mlir_context, "test_reject_subset_module");
+  mlir::func::FunctionBuilder fb(mb, "main");
+  auto tensor_type =
+      mlir::makeTensorType(mlir_context, {4}, mlir::ElementType::F32);
+  mlir::MlirOp arg = mlir::func::Argument(fb, tensor_type);
+
+  mlir::MlirOp op = mlir::stablehlo::Abs(arg);
+  mlir::Operation* raw_op = op.getValue().getDefiningOp();
+  raw_op->setAttr("replica_groups",
+                  mlir::DenseIntElementsAttr::get(
+                      mlir::RankedTensorType::get(
+                          {1, 2}, mlir::IntegerType::get(&mlir_context, 64)),
+                      llvm::ArrayRef<int64_t>({0, 1})));
+
+  mlir::func::Return(fb, {op});
+  auto module = mb.build();
+
+  const std::vector<int64_t> op_da = {2, 3};              // INT_VEC_OK
+  const std::vector<int64_t> resolved_da = {0, 1, 2, 3};  // INT_VEC_OK
+  const absl::Status status =
+      RemapReplicaOrderInOperation(raw_op, op_da, resolved_da);
+  EXPECT_EQ(status.code(), error::kInvalidArgument);
+  EXPECT_THAT(status.message(), testing::HasSubstr("is not a permutation"));
+  EXPECT_THAT(ExtractDenseIntAttrValues(raw_op, "replica_groups"),
+              testing::ElementsAre(0, 1));
 }
 
 TEST(DeviceAssignmentPipelineTest,
@@ -752,15 +787,15 @@ TEST(DeviceAssignmentPipelineTest,
   auto module = mb.build();
 
   ASSERT_TRUE(
-      RewriteAndTileOperationForSubgroup(raw_op_b, op_da_b, resolved_da).ok());
+      RemapReplicaOrderInOperation(raw_op_b, op_da_b, resolved_da).ok());
   ASSERT_TRUE(
-      RewriteAndTileOperationForSubgroup(raw_op_c, op_da_c, resolved_da).ok());
+      RemapReplicaOrderInOperation(raw_op_c, op_da_c, resolved_da).ok());
 
-  // Op B: rank_to_partition = [0, 4, 2, 6, 1, 5, 3, 7]; groups
-  // {0,4},{2,6},{1,5},{3,7} are reordered by first element only.
+  // Op B: rank_to_partition = [0, 4, 2, 6, 1, 5, 3, 7]; the groups become
+  // {0,4},{2,6},{1,5},{3,7}, in the op's group order.
   const std::vector<int64_t> rg_b =  // INT_VEC_OK
       ExtractDenseIntAttrValues(raw_op_b, "replica_groups");
-  EXPECT_THAT(rg_b, testing::ElementsAre(0, 4, 1, 5, 2, 6, 3, 7));
+  EXPECT_THAT(rg_b, testing::ElementsAre(0, 4, 2, 6, 1, 5, 3, 7));
   EXPECT_THAT(PhysicalGroups(rg_b, /*group_size=*/2, resolved_da),
               testing::UnorderedElementsAreArray(
                   IntendedGroups(op_da_b, /*group_size=*/2)));
@@ -791,7 +826,7 @@ TEST(DeviceAssignmentPipelineTest,
       resolved_da_bad = {100000, 100002, 100001, 100003,
                          200001, 200003, 200000, 200002};
   ASSERT_TRUE(
-      RewriteAndTileOperationForSubgroup(raw_op_c_bad, op_da_c, resolved_da_bad)
+      RemapReplicaOrderInOperation(raw_op_c_bad, op_da_c, resolved_da_bad)
           .ok());
   // rank_to_partition = [2, 0, 3, 1, 4, 6, 5, 7].
   const std::vector<int64_t> rg_c_bad =  // INT_VEC_OK

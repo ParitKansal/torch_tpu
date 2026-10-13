@@ -40,8 +40,10 @@
 #include "csrc/common/env_vars.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/fingerprint_utils.h"
+#include "csrc/common/tpu_subslice_utils.h"
 #include "csrc/pjrt/pjrt_state.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/pjrt_device_dimensions.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/file_system.h"
@@ -107,8 +109,8 @@ FingerprintType GetTorchTpuBinaryFingerprint() {
 }
 
 absl::StatusOr<SharedLoadedExecutableWithMetadata> LoadSerializedExecutable(
-    CacheTier tier, const CompilationCacheKey& key,
-    const std::string_view data) {
+    CacheTier tier, const CompilationCacheKey& key, const std::string_view data,
+    const std::optional<xla::PjRtDeviceDimensions>& subslice_origin) {
   TT_ASSIGN_OR_RETURN(
       xla::PjRtClient* const client, PjrtBackend::GetInstance().GetClient(),
       _ << "PjRtClient must be initialized before accessing the " << tier
@@ -116,14 +118,14 @@ absl::StatusOr<SharedLoadedExecutableWithMetadata> LoadSerializedExecutable(
   TT_ASSIGN_OR_RETURN(
       std::unique_ptr<xla::PjRtLoadedExecutable> pjrt_executable,
       AdaptXlaError(
-          client->LoadSerializedExecutable(data,
-                                           /* options= */ std::nullopt,
-                                           xla::LoadOptions()),
+          LoadSerializedExecutableAtOrigin(*client, data, subslice_origin),
           /* context =*/absl::StrCat(
               "failed to load serialized executable from the ", tier,
               " cache for key ", key, ", where the serialized data has ",
               data.size(), " bytes")));
-  return LoadedExecutableWithMetadata::MakeShared(std::move(pjrt_executable));
+  return LoadedExecutableWithMetadata::MakeShared(
+      std::move(pjrt_executable), /*argument_indices=*/{},
+      /*unbounded_dynamic_execution_metadata=*/std::nullopt, subslice_origin);
 }
 
 absl::Status AtomicWriteToCacheFile(const std::string& cache_entry_path,

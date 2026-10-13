@@ -42,6 +42,7 @@
 #include "xla/layout.h"
 #include "xla/pjrt/maybe_owning_mlir_module.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/pjrt_device_dimensions.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/shape.h"
 
@@ -123,7 +124,8 @@ class LoadedExecutableWithMetadata {
       absl_nonnull std::unique_ptr<xla::PjRtLoadedExecutable> executable,
       Indices argument_indices = {},
       std::optional<UnboundedDynamicExecutionMetadata>
-          unbounded_dynamic_execution_metadata = std::nullopt);
+          unbounded_dynamic_execution_metadata = std::nullopt,
+      std::optional<xla::PjRtDeviceDimensions> subslice_origin = std::nullopt);
 
   static SharedLoadedExecutableWithMetadata WithArgumentIndices(
       const SharedLoadedExecutableWithMetadata& existing,
@@ -132,7 +134,8 @@ class LoadedExecutableWithMetadata {
         new LoadedExecutableWithMetadata(
             existing->executable_, existing->output_shapes_,
             existing->parameter_device_shapes_, std::move(argument_indices),
-            existing->unbounded_dynamic_execution_metadata_));
+            existing->unbounded_dynamic_execution_metadata_,
+            existing->subslice_origin_));
   }
 
   static SharedLoadedExecutableWithMetadata WithDynamicExecutionMetadata(
@@ -142,7 +145,8 @@ class LoadedExecutableWithMetadata {
         new LoadedExecutableWithMetadata(
             existing->executable_, existing->output_shapes_,
             existing->parameter_device_shapes_, existing->argument_indices_,
-            std::move(unbounded_dynamic_execution_metadata)));
+            std::move(unbounded_dynamic_execution_metadata),
+            existing->subslice_origin_));
   }
 
   const xla::PjRtExecutable* GetExecutable() const {
@@ -167,6 +171,13 @@ class LoadedExecutableWithMetadata {
     return unbounded_dynamic_execution_metadata_;
   }
 
+  // The subslice origin the executable was loaded at (see GetSubsliceOrigin);
+  // nullopt if it was loaded for the full topology. Needed to load it again,
+  // e.g. after pickling.
+  const std::optional<xla::PjRtDeviceDimensions>& subslice_origin() const {
+    return subslice_origin_;
+  }
+
  private:
   LoadedExecutableWithMetadata(
       absl_nonnull std::shared_ptr<const xla::PjRtLoadedExecutable> executable,
@@ -174,13 +185,15 @@ class LoadedExecutableWithMetadata {
       std::vector<std::optional<xla::Shape>> parameter_device_shapes,
       Indices argument_indices = {},
       std::optional<UnboundedDynamicExecutionMetadata>
-          unbounded_dynamic_execution_metadata = std::nullopt)
+          unbounded_dynamic_execution_metadata = std::nullopt,
+      std::optional<xla::PjRtDeviceDimensions> subslice_origin = std::nullopt)
       : executable_(std::move(executable)),
         output_shapes_(std::move(output_shapes)),
         parameter_device_shapes_(std::move(parameter_device_shapes)),
         argument_indices_(std::move(argument_indices)),
         unbounded_dynamic_execution_metadata_(
-            std::move(unbounded_dynamic_execution_metadata)) {}
+            std::move(unbounded_dynamic_execution_metadata)),
+        subslice_origin_(std::move(subslice_origin)) {}
 
   absl_nonnull std::shared_ptr<const xla::PjRtLoadedExecutable> executable_;
   // Cached output shapes for the executable.
@@ -190,6 +203,7 @@ class LoadedExecutableWithMetadata {
   Indices argument_indices_;
   std::optional<UnboundedDynamicExecutionMetadata>
       unbounded_dynamic_execution_metadata_;
+  std::optional<xla::PjRtDeviceDimensions> subslice_origin_;
 };
 
 using LoadedExecutablePromise =
@@ -273,6 +287,7 @@ class ContextedModule {
   absl_nonnull std::unique_ptr<mlir::MLIRContext> context_;
   // The module. If the context is dropped, the module will be invalidated.
   mlir::OwningOpRef<mlir::ModuleOp> module_;
+  // See device_assignment().
   std::vector<int64_t> device_assignment_;  // INT_VEC_OK
 };
 

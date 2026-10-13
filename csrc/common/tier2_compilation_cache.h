@@ -17,6 +17,7 @@
 #ifndef TORCH_TPU_CSRC_COMMON_TIER2_COMPILATION_CACHE_H_
 #define TORCH_TPU_CSRC_COMMON_TIER2_COMPILATION_CACHE_H_
 
+#include <optional>
 #include <string>
 
 #include "absl/status/status.h"
@@ -26,6 +27,8 @@
 #include "csrc/common/cache_key.h"
 #include "csrc/common/compilation.h"
 #include "csrc/common/unique_file_descriptor.h"
+#include "xla/pjrt/pjrt_device_dimensions.h"
+#include "xla/pjrt/pjrt_executable.h"
 
 namespace torch_tpu {
 
@@ -69,9 +72,14 @@ struct Tier2CacheEntryStats {
 // is when the request for getting the executable from the tier-2 cache was
 // made. Populates the output parameter `stats` with the cache entry
 // statistics.
+//
+// `subslice_origin` is passed when loading (see GetSubsliceOrigin); nullopt
+// loads with no computation origin.
 absl::StatusOr<SharedLoadedExecutableWithMetadata> GetFromTier2Cache(
     const CompilationCacheKey& key, absl::Time request_start,
-    Tier2CacheEntryStats& stats);
+    Tier2CacheEntryStats& stats,
+    const std::optional<xla::PjRtDeviceDimensions>& subslice_origin =
+        std::nullopt);
 
 // Returns the path to the tier-2 cache file for the given key.
 [[nodiscard]] std::string GetTier2CacheEntryPath(

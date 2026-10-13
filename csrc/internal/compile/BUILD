@@ -46,6 +46,7 @@ torch_tpu_cc_library(
         "//csrc/common:error_utils",
         "//csrc/common:shape",
         "//csrc/common:to_string",
+        "//csrc/common:tpu_subslice_utils",
         "//csrc/common:utils",
         "//csrc/eager:device_buffer",
         "//csrc/eager:device_buffer_utils",
@@ -108,6 +109,7 @@ torch_tpu_cc_library(
         "//csrc/common:pybind_error_utils",
         "//csrc/common:shape",
         "//csrc/common:to_string",
+        "//csrc/common:tpu_subslice_utils",
         "//csrc/common:utils",
         "//csrc/distributed:handshake",
         "//csrc/eager:device_buffer",
@@ -153,6 +155,7 @@ torch_tpu_cc_library(
         "@xla//xla/mlir/utils:error_util",
         "@xla//xla/pjrt:maybe_owning_mlir_module",
         "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt:pjrt_device_dimensions",
         "@xla//xla/pjrt:pjrt_executable",
         "@xla//xla/pjrt:pjrt_layout",
         "@xla//xla/pjrt/plugin/xla_tpu:xla_tpu_pjrt_client",  # buildcleaner: keep

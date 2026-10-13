@@ -16,6 +16,7 @@
 
 #include "csrc/common/tier3_compilation_cache.h"
 
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -31,6 +32,7 @@
 #include "csrc/common/env_vars.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/tier2_compilation_cache.h"
+#include "xla/pjrt/pjrt_device_dimensions.h"
 #include "xla/tsl/platform/env.h"
 
 namespace torch_tpu {
@@ -109,7 +111,8 @@ std::string GetTier3CacheEntryPath(const CompilationCacheKey& key) {
 }
 
 absl::StatusOr<SharedLoadedExecutableWithMetadata> GetFromTier3Cache(
-    const CompilationCacheKey& key) {
+    const CompilationCacheKey& key,
+    const std::optional<xla::PjRtDeviceDimensions>& subslice_origin) {
   // Read the cache file into a char buffer.
   const std::string cache_entry_path = GetTier3CacheEntryPath(key);
   ABSL_VLOG(1) << "Reading tier-3 cache for key " << key << " at path "
@@ -124,7 +127,8 @@ absl::StatusOr<SharedLoadedExecutableWithMetadata> GetFromTier3Cache(
                << key << " at path " << cache_entry_path;
 
   // Load the executable from the char buffer.
-  return LoadSerializedExecutable(CacheTier::kTier3, key, data);
+  return LoadSerializedExecutable(CacheTier::kTier3, key, data,
+                                  subslice_origin);
 }
 
 }  // namespace torch_tpu

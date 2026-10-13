@@ -51,6 +51,7 @@
 #include "csrc/common/error_utils.h"
 #include "csrc/common/shape.h"
 #include "csrc/common/to_string.h"
+#include "csrc/common/tpu_subslice_utils.h"
 #include "csrc/common/utils.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/device_buffer_utils.h"
@@ -576,9 +577,10 @@ absl::StatusOr<SharedLoadedExecutableWithMetadata> CompileMlirExecutable(
       [module = std::move(module)](
           xla::PjRtClient& client,
           UniqueCompileOptions compile_options) mutable {
-        return AdaptXlaError(client.CompileAndLoad(std::move(module),
-                                                   std::move(*compile_options)),
-                             /* context= */ "failed to compile MLIR module");
+        return AdaptXlaError(
+            CompileAndLoadMaybeSubslice(client, std::move(module),
+                                        std::move(*compile_options)),
+            /* context= */ "failed to compile MLIR module");
       };
   return Compile(*client, std::move(executable_builder),
                  std::move(compile_options));

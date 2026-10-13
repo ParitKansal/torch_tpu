@@ -56,6 +56,7 @@ from torch._functorch._aot_autograd.schemas import AOTAutogradCacheInfo
 from torch._functorch._aot_autograd.schemas import SerializableAOTDispatchCompiler
 import torch._functorch.config as functorch_config
 from torch._functorch.partitioners import min_cut_rematerialization_partition
+import torch.compiler.config as compiler_config
 from torch.utils import _python_dispatch
 from torch.utils import _pytree
 from torch_tpu._internal import execution_mode
@@ -64,6 +65,8 @@ from torch_tpu._internal.compile import split_compiler
 from torch_tpu._internal.compile.debug import TpuCompileDebug
 from torch_tpu._internal.compile.dynamic import dynamic_compiler
 from torch_tpu._internal.compile.torch_tpu_compiled_executable import AsyncCompiledArtifact
+from torch_tpu._internal.distributed import device_mesh
+from torch_tpu._internal.distributed import process_group_utils
 from torch_tpu._internal.utils import utils
 from torch_tpu._internal.benchmarks import xprof_adapter
 
@@ -275,8 +278,22 @@ def _mark_device_layouts(
       example_input._tpu_device_layout = layout
 
 
+def _process_group_cache_key_tag(graph_module: torch.fx.GraphModule) -> str:
+  """Returns the devices of the process groups that `graph_module` refers to.
+
+  Cached executables embed the devices of the groups their collectives use, but
+  graphs name groups by creation order, which does not determine their members.
+  """
+  groups = process_group_utils.get_process_groups(graph_module)
+  return ";".join(
+      f"{name}:{','.join(map(str, device_mesh.get_device_assignment(pg)))}"
+      for name, pg in sorted(groups.items())
+  )
+
+
 @contextlib.contextmanager
 def _serialization_context(
+    graph_module: torch.fx.GraphModule,
     example_inputs: Sequence[Any],
     enable: bool = False,
 ) -> Iterator[list[Any] | None]:
@@ -286,9 +303,12 @@ def _serialization_context(
   ``cache_info`` (so the bundled entry is created) and suppresses
   ``generate_guards_expression`` (which requires a TracingContext with a
   ShapeEnv that we cannot safely provide without leaking FakeTensorMode
-  into subsequent compilations).
+  into subsequent compilations). It also tags cache keys with the devices of
+  the process groups the graph uses.
 
   Args:
+    graph_module: The Dynamo graph being compiled; its process groups tag the
+      cache key.
     example_inputs: Example inputs to differentiate cache keys based on input
       properties such as storage offsets.
     enable: If True, activate the serialization patches and yield a one-element
@@ -321,6 +341,14 @@ def _serialization_context(
     stack.enter_context(
         functorch_config.patch("bundled_autograd_cache", True),
     )
+    pg_tag = _process_group_cache_key_tag(graph_module)
+    if pg_tag:
+      tag = compiler_config.cache_key_tag
+      stack.enter_context(
+          compiler_config.patch(  # pyrefly: ignore[missing-attribute]
+              cache_key_tag=f"{tag}:{pg_tag}" if tag else pg_tag
+          )
+      )
 
     # The default tensor metadata extraction methods below are used during cache
     # key generation and unfortunately they zero-out `storage_offset` in the
@@ -389,8 +417,8 @@ def _serialization_context(
             inputs_meta.append(type(t))
 
         graph_hash = hashlib.sha256(
-            f"{version_prefix}:{aot_forward_graph_str or ''}:{inputs_meta}"
-            .encode()
+            f"{version_prefix}:{compiler_config.cache_key_tag}:"
+            f"{aot_forward_graph_str or ''}:{inputs_meta}".encode()
         ).hexdigest()
         object.__setattr__(
             aot_config,
@@ -899,7 +927,9 @@ class TpuBackend:
         if async_compile
         else contextlib.nullcontext()
     )
-    with _serialization_context(example_inputs, serializable) as captured_entry:
+    with _serialization_context(
+        graph_module, example_inputs, serializable
+    ) as captured_entry:
       with save_context:
         with execution_mode.set_eager_mode(
             execution_mode.EagerMode._INTERNAL_COMPILE_FX_GRAPH

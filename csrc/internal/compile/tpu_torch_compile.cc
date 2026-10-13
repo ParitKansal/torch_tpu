@@ -57,6 +57,7 @@
 #include "csrc/common/pybind_error_utils.h"
 #include "csrc/common/shape.h"
 #include "csrc/common/to_string.h"
+#include "csrc/common/tpu_subslice_utils.h"
 #include "csrc/common/utils.h"
 #include "csrc/distributed/handshake.h"
 #include "csrc/eager/device_buffer.h"
@@ -102,6 +103,7 @@
 #include "xla/mlir/utils/error_util.h"
 #include "xla/pjrt/maybe_owning_mlir_module.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/pjrt_device_dimensions.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/service/device_assignment.h"
@@ -1196,22 +1198,31 @@ py::bytes PySerializeExecutable(
 }
 
 absl::StatusOr<SharedLoadedExecutableWithMetadata> LoadSerializedExecutableImpl(
-    std::string_view data) {
+    std::string_view data,
+    const std::optional<std::vector<int32_t>>& subslice_origin) {
   TT_ASSIGN_OR_RETURN(xla::PjRtClient* const client,
                       PjrtBackend::GetInstance().GetClient());
+  // `subslice_origin` comes from the pickle (see
+  // LoadedExecutableWithMetadata::subslice_origin).
+  std::optional<xla::PjRtDeviceDimensions> origin;
+  if (subslice_origin.has_value()) {
+    origin.emplace(absl::MakeConstSpan(*subslice_origin));
+  }
   TT_ASSIGN_OR_RETURN(
       std::unique_ptr<xla::PjRtLoadedExecutable> pjrt_executable,
-      AdaptXlaError(client->LoadSerializedExecutable(
-                        data, /* options= */ std::nullopt, xla::LoadOptions()),
+      AdaptXlaError(LoadSerializedExecutableAtOrigin(*client, data, origin),
                     /* context= */ "failed to load serialized executable"));
-  return LoadedExecutableWithMetadata::MakeShared(std::move(pjrt_executable));
+  return LoadedExecutableWithMetadata::MakeShared(
+      std::move(pjrt_executable), /*argument_indices=*/{},
+      /*unbounded_dynamic_execution_metadata=*/std::nullopt, std::move(origin));
 }
 
 SharedLoadedExecutableWithMetadata PyLoadSerializedExecutable(
-    py::bytes& serialized_bytes) {
+    py::bytes& serialized_bytes,
+    const std::optional<std::vector<int32_t>>& subslice_origin) {
   const auto data = py::cast<std::string_view>(serialized_bytes);
   TT_ASSIGN_OR_THROW(SharedLoadedExecutableWithMetadata executable,
-                     LoadSerializedExecutableImpl(data),
+                     LoadSerializedExecutableImpl(data, subslice_origin),
                      _.SetPrepend() << "failed to load executable: ");
   return executable;
 }
@@ -2119,6 +2130,21 @@ TT_PYBIND11_MODULE(tpu_torch_compile, m) {
       m, "LoadedExecutableWithMetadata")
       .def("get_parameter_layouts", &PyGetParameterLayoutsFromMetadata)
       .def("get_output_layouts", &PyGetOutputLayoutsFromMetadata)
+      .def(
+          "subslice_origin",
+          [](const LoadedExecutableWithMetadata& executable)
+              -> std::optional<std::vector<int32_t>> {
+            const std::optional<xla::PjRtDeviceDimensions>& origin =
+                executable.subslice_origin();
+            if (!origin.has_value()) {
+              return std::nullopt;
+            }
+            return std::vector<int32_t>(origin->begin(), origin->end());
+          },
+          "Chip coordinates (x, y, z) of the TPU subslice the executable was "
+          "loaded at, or None if it was loaded for the full topology. Pass it "
+          "to load_serialized_executable to load the executable again, e.g. "
+          "after pickling.")
       .def("fingerprint_executable",
            [](const LoadedExecutableWithMetadata& executable) -> std::string {
              TT_ASSIGN_OR_THROW(
@@ -2321,8 +2347,12 @@ TT_PYBIND11_MODULE(tpu_torch_compile, m) {
   m.def("serialize_executable", PySerializeExecutable, py::arg("executable"),
         "Serializes a PjRtLoadedExecutable to bytes for caching.");
   m.def("load_serialized_executable", PyLoadSerializedExecutable,
-        py::arg("serialized_bytes"),
-        "Loads a PjRtLoadedExecutable from serialized bytes.");
+        py::arg("serialized_bytes"), py::arg("subslice_origin") = py::none(),
+        "Loads a PjRtLoadedExecutable from serialized bytes. "
+        "`subslice_origin` is the chip coordinates (x, y, z) of the TPU "
+        "subslice the executable was compiled for (see "
+        "LoadedExecutableWithMetadata.subslice_origin), or None to load it "
+        "with no computation origin.");
   m.def("make_constant_tensor", PyMakeConstantTensor, py::arg("cpu_tensor"),
         "Creates a TPU tensor that represents the constant value of the CPU "
         "tensor.");

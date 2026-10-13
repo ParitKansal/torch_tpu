@@ -222,6 +222,7 @@ def _unpickle_compiled_executable(
     updates_default_generator_state: bool,
     dynamic_outputs: Sequence[bool] | None = None,
     unique_output_indices: Sequence[int] | None = None,
+    subslice_origin: Sequence[int] | None = None,
 ) -> "TorchTpuCompiledExecutable":
   """Reconstructs a TorchTpuCompiledExecutable from serialized bytes.
 
@@ -243,12 +244,20 @@ def _unpickle_compiled_executable(
       output tensor is dynamic.
     unique_output_indices: Optional sequence of original output indices
       corresponding to deduplicated outputs.
+    subslice_origin: Chip coordinates (x, y, z) of the TPU subslice the
+      executable was loaded at, or None if it was loaded for the full topology.
+      The executable is loaded at the same origin.
 
   Returns:
     A deserialized TorchTpuCompiledExecutable instance.
   """
   return TorchTpuCompiledExecutable(
-      executable=tpu_torch_compile.load_serialized_executable(serialized_bytes),
+      executable=tpu_torch_compile.load_serialized_executable(
+          serialized_bytes,
+          subslice_origin=(
+              list(subslice_origin) if subslice_origin is not None else None
+          ),
+      ),
       reconstruct_fx_outputs_fn=reconstruct_fx_outputs_fn,
       updates_default_generator_state=updates_default_generator_state,
       dynamic_outputs=dynamic_outputs,
@@ -602,7 +611,8 @@ class TorchTpuCompiledExecutable(CompiledArtifact):
       2. A tuple of arguments to be passed to the callable. These arguments
          include the serialized PjRtLoadedExecutable, the
          reconstruct_fx_outputs_fn, the updates_default_generator_state flag,
-         and the dynamic_outputs.
+         the dynamic_outputs, the unique_output_indices, and the TPU subslice
+         origin the executable was loaded at (None for the full topology).
 
     Serialization of the executable is necessary for caching compiled
     artifacts within Dynamo.
@@ -612,6 +622,7 @@ class TorchTpuCompiledExecutable(CompiledArtifact):
       serialize the object.
     """  # fmt: skip
     serialized = tpu_torch_compile.serialize_executable(self._executable)
+    subslice_origin = self._executable.subslice_origin()
     return (
         _unpickle_compiled_executable,
         (
@@ -620,6 +631,7 @@ class TorchTpuCompiledExecutable(CompiledArtifact):
             self._updates_default_generator_state,
             self._dynamic_outputs,
             self._unique_output_indices,
+            tuple(subslice_origin) if subslice_origin is not None else None,
         ),
     )
 

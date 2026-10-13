@@ -17,11 +17,14 @@
 #ifndef TORCH_TPU_CSRC_COMMON_TIER3_COMPILATION_CACHE_H_
 #define TORCH_TPU_CSRC_COMMON_TIER3_COMPILATION_CACHE_H_
 
+#include <optional>
 #include <string>
 
 #include "absl/status/statusor.h"
 #include "csrc/common/cache_key.h"
 #include "csrc/common/compilation.h"
+#include "xla/pjrt/pjrt_device_dimensions.h"
+#include "xla/pjrt/pjrt_executable.h"
 
 namespace torch_tpu {
 
@@ -39,8 +42,13 @@ namespace torch_tpu {
     const CompilationCacheKey& key);
 
 // Tries to get a loaded executable from the tier-3 compilation cache.
+//
+// `subslice_origin` is passed when loading (see GetSubsliceOrigin); nullopt
+// loads with no computation origin.
 absl::StatusOr<SharedLoadedExecutableWithMetadata> GetFromTier3Cache(
-    const CompilationCacheKey& key);
+    const CompilationCacheKey& key,
+    const std::optional<xla::PjRtDeviceDimensions>& subslice_origin =
+        std::nullopt);
 
 }  // namespace torch_tpu
 

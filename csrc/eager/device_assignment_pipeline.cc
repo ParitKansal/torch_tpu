@@ -16,7 +16,6 @@
 
 #include "csrc/eager/device_assignment_pipeline.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -52,17 +51,23 @@ std::string VectorToString(absl::Span<const int64_t> vec) {
   return absl::StrCat("[", absl::StrJoin(vec, ", "), "]");
 }
 
+// Maps each op rank r to the partition of `resolved_da` that holds device
+// `op_da[r]`. Returns std::nullopt unless `op_da` and `resolved_da` have the
+// same size and every device of `op_da` is in `resolved_da`, i.e. unless the
+// result is a permutation.
 std::optional<std::vector<int64_t>>  // INT_VEC_OK
 BuildRankToPartition(absl::Span<const int64_t> op_da,
                      absl::Span<const int64_t> resolved_da) {
-  const int64_t sub_size = op_da.size();
-  const int64_t full_size = resolved_da.size();
+  if (op_da.size() != resolved_da.size()) {
+    return std::nullopt;
+  }
+  const int64_t size = op_da.size();
   absl::flat_hash_map<int64_t, int64_t> dev_to_partition;
-  for (int64_t p = 0; p < full_size; ++p) {
+  for (int64_t p = 0; p < size; ++p) {
     dev_to_partition[resolved_da[p]] = p;
   }
-  std::vector<int64_t> rank_to_partition(sub_size);  // INT_VEC_OK
-  for (int64_t r = 0; r < sub_size; ++r) {
+  std::vector<int64_t> rank_to_partition(size);  // INT_VEC_OK
+  for (int64_t r = 0; r < size; ++r) {
     auto it = dev_to_partition.find(op_da[r]);
     if (it == dev_to_partition.end()) return std::nullopt;
     rank_to_partition[r] = it->second;
@@ -70,6 +75,10 @@ BuildRankToPartition(absl::Span<const int64_t> op_da,
   return rank_to_partition;
 }
 
+// Remaps each replica id r of a 2D `replica_groups` attribute to
+// `rank_to_partition[r]`, keeping the shape and the order of the groups and of
+// the ids within each group. Returns `attr` unchanged if it is not 2D or holds
+// an id outside `rank_to_partition`.
 mlir::DenseIntElementsAttr RewriteReplicaGroupsAttr(
     mlir::DenseIntElementsAttr attr,
     absl::Span<const int64_t> rank_to_partition) {
@@ -77,8 +86,6 @@ mlir::DenseIntElementsAttr RewriteReplicaGroupsAttr(
   if (!shaped_type || shaped_type.getRank() != 2) {
     return attr;
   }
-  const int64_t num_groups = shaped_type.getDimSize(0);
-  const int64_t group_size = shaped_type.getDimSize(1);
   const int64_t sub_size = rank_to_partition.size();
   std::vector<int64_t> mapped_vals;  // INT_VEC_OK
   mapped_vals.reserve(shaped_type.getNumElements());
@@ -89,25 +96,7 @@ mlir::DenseIntElementsAttr RewriteReplicaGroupsAttr(
     }
     mapped_vals.push_back(rank_to_partition[r]);
   }
-  if (num_groups <= 0 || group_size <= 0) {
-    return mlir::DenseIntElementsAttr::get(shaped_type, mapped_vals);
-  }
-  std::vector<std::vector<int64_t>> rows(             // INT_VEC_OK
-      num_groups, std::vector<int64_t>(group_size));  // INT_VEC_OK
-  for (int64_t g = 0; g < num_groups; ++g) {
-    // Intra-group order is rank order and must be preserved; do not sort.
-    for (int64_t i = 0; i < group_size; ++i) {
-      rows[g][i] = mapped_vals[g * group_size + i];
-    }
-  }
-  std::sort(rows.begin(), rows.end(),
-            [](const auto& a, const auto& b) { return a[0] < b[0]; });
-  std::vector<int64_t> rewritten_vals;  // INT_VEC_OK
-  rewritten_vals.reserve(shaped_type.getNumElements());
-  for (const auto& row : rows) {
-    rewritten_vals.insert(rewritten_vals.end(), row.begin(), row.end());
-  }
-  return mlir::DenseIntElementsAttr::get(shaped_type, rewritten_vals);
+  return mlir::DenseIntElementsAttr::get(shaped_type, mapped_vals);
 }
 
 mlir::DenseIntElementsAttr RewriteSourceTargetPairsAttr(
@@ -155,22 +144,28 @@ std::vector<int64_t> ResolvePallasDeviceAssignment(  // INT_VEC_OK
 
 absl::Status VerifySameDeviceSet(absl::Span<const int64_t> resolved_da,
                                  const OpDeviceAssignment& op, size_t index) {
-  ABSL_LOG(WARNING) << "Op [" << index << "] (" << ToString(op.op_name)
-                    << ") device assignment "
-                    << VectorToString(op.device_assignment)
-                    << " differs from resolved device assignment "
-                    << VectorToString(resolved_da);
-  TT_RET_CHECK(op.device_assignment.size() == resolved_da.size(),
-               error::kInvalidArgument)
-      << "device assignment mismatch across operations. All operations in "
-         "the traversal must share the same world-sized device assignment";
+  // A reordering of the same devices is legitimate and is rewritten later.
+  ABSL_VLOG(1) << "Op [" << index << "] (" << ToString(op.op_name)
+               << ") device assignment " << VectorToString(op.device_assignment)
+               << " differs from resolved device assignment "
+               << VectorToString(resolved_da);
   const absl::flat_hash_set<int64_t> resolved_devs(resolved_da.begin(),
                                                    resolved_da.end());
-  for (int64_t dev_id : op.device_assignment) {
-    TT_RET_CHECK(resolved_devs.contains(dev_id), error::kInvalidArgument)
-        << "device assignment mismatch across operations. All operations in "
-           "the traversal must share the same world-sized device assignment";
-  }
+  const absl::flat_hash_set<int64_t> op_devs(op.device_assignment.begin(),
+                                             op.device_assignment.end());
+  // Ops in the same executable must share the same device set. The size check
+  // rejects duplicate devices that the set comparison alone would miss.
+  TT_RET_CHECK(op.device_assignment.size() == resolved_da.size() &&
+                   op_devs == resolved_devs,
+               error::kInvalidArgument)
+      << "device assignment mismatch across operations: Op [" << index << "] ("
+      << ToString(op.op_name) << ") runs on devices "
+      << VectorToString(op.device_assignment)
+      << " but other ops in the same executable run on devices "
+      << VectorToString(resolved_da)
+      << ". Collectives over process groups with different members cannot be "
+         "compiled into the same executable; dispatch them separately (e.g. "
+         "outside a spmd_safe / torch.compile region)";
   return absl::OkStatus();
 }
 
@@ -252,7 +247,7 @@ ResolveDeviceAssignmentForTraversal(
   return ResolveDeviceAssignment(ops, pallas_ops);
 }
 
-absl::Status RewriteAndTileOperationForSubgroup(
+absl::Status RemapReplicaOrderInOperation(
     mlir::Operation* absl_nonnull root_op, absl::Span<const int64_t> op_da,
     absl::Span<const int64_t> resolved_da) {
   if (op_da == resolved_da || op_da.empty()) {
@@ -262,7 +257,9 @@ absl::Status RewriteAndTileOperationForSubgroup(
   const std::optional<std::vector<int64_t>>  // INT_VEC_OK
       rank_to_partition = BuildRankToPartition(op_da, resolved_da);
   TT_RET_CHECK(rank_to_partition.has_value(), error::kInvalidArgument)
-      << "failed to map op rank order to resolved device assignment";
+      << "op device assignment " << VectorToString(op_da)
+      << " is not a permutation of the resolved device assignment "
+      << VectorToString(resolved_da);
 
   root_op->walk([&](mlir::Operation* op) {
     if (auto rg_attr =
@@ -281,7 +278,7 @@ absl::Status RewriteAndTileOperationForSubgroup(
   return absl::OkStatus();
 }
 
-absl::Status ApplySubgroupTilingOrReplicaRewriting(
+absl::Status ApplyReplicaOrderRemapping(
     mlir::Operation* absl_nullable first_new_op,
     absl::Span<const mlir::func::FuncOp> new_func_ops,
     const DeferredOp& deferred_op, absl::Span<const int64_t> resolved_da) {
@@ -292,12 +289,11 @@ absl::Status ApplySubgroupTilingOrReplicaRewriting(
 
   for (mlir::Operation* curr = first_new_op; curr != nullptr;
        curr = curr->getNextNode()) {
-    TT_RETURN_IF_ERROR(
-        RewriteAndTileOperationForSubgroup(curr, op_da, resolved_da));
+    TT_RETURN_IF_ERROR(RemapReplicaOrderInOperation(curr, op_da, resolved_da));
   }
   for (mlir::func::FuncOp func_op : new_func_ops) {
-    TT_RETURN_IF_ERROR(RewriteAndTileOperationForSubgroup(
-        func_op.getOperation(), op_da, resolved_da));
+    TT_RETURN_IF_ERROR(RemapReplicaOrderInOperation(func_op.getOperation(),
+                                                    op_da, resolved_da));
   }
   return absl::OkStatus();
 }

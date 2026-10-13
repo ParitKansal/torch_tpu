@@ -22,6 +22,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from torch.utils import _pytree as pytree
 from torch_tpu._internal.distributed import collective_ops
 
 class ProcessGroupId:
@@ -266,3 +267,36 @@ def get_num_collectives_per_pg(
       pg_id = _extract_process_group_id_from_node(node)
       counts[pg_id] += 1
   return counts
+
+
+def get_process_groups(
+    graph_module: torch.fx.GraphModule,
+) -> dict[str, dist.ProcessGroup]:
+  """Returns the registered process groups `graph_module` refers to, by name.
+
+  A group counts if it, or its name, is an argument of a node of the graph or of
+  a nested graph such as a scan body. Matching arguments rather than known
+  collective ops keeps groups of unrecognized ops from being left out; an
+  argument that only happens to equal a group's name adds that group.
+  """
+  # pylint: disable=protected-access
+  pg_names: collections.abc.Mapping[dist.ProcessGroup, str] = (
+      dist.distributed_c10d._world.pg_names
+  )
+  # pylint: enable=protected-access
+  groups_by_name = {name: pg for pg, name in pg_names.items()}
+  groups = {}
+  for module in graph_module.modules():
+    if not isinstance(module, torch.fx.GraphModule):
+      continue
+    for node in module.graph.nodes:
+      values = pytree.tree_leaves((node.args, node.kwargs))
+      if node.op == "get_attr":
+        # pylint: disable-next=protected-access
+        values.append(torch.fx.graph_module._get_attr(module, node.target))
+      for value in values:
+        if isinstance(value, dist.ProcessGroup) and value in pg_names:
+          groups[pg_names[value]] = value
+        elif isinstance(value, str) and value in groups_by_name:
+          groups[value] = groups_by_name[value]
+  return groups

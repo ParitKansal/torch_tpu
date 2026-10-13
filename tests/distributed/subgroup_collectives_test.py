@@ -47,8 +47,9 @@ def run_manual_2d_mesh() -> None:
   dev_to_rank = {dev: r for r, dev in enumerate(rank_to_dev)}
   mesh = [[dev_to_rank[d] for d in row] for row in [[0, 2, 4, 6], [1, 3, 5, 7]]]
 
-  # Initialize all subgroups (even the ones we aren't members of!),
-  # and remember the (sub)group we are a member of.
+  # PyTorch's new_group must be called by every rank for every group, even
+  # groups this rank isn't a member of. torch_tpu only uses this rank's own
+  # group, so remember the group we are a member of.
   my_subgroup = None
   for subgrp in mesh:
     new_group = torch.distributed.new_group(ranks=subgrp)
@@ -97,6 +98,8 @@ def run_manual_1d_as_2d_mesh() -> None:
   my_subgroup_axis_1 = None  # Process group for device mesh row
   my_subgroup_axis_2 = None  # Process group for device mesh column
 
+  # PyTorch's new_group must be called by every rank for every group;
+  # torch_tpu only uses this rank's own groups.
   for subgrp in mesh_axis_1:
     new_group = torch.distributed.new_group(ranks=subgrp)
     if rank in subgrp:
@@ -141,7 +144,9 @@ def run_manual_2d_all_gather_reduce_scatter() -> None:
   mesh_row = None
   mesh_col = None
 
-  # Init device mesh (standard PyTorch, before DTensor):
+  # Init device mesh (standard PyTorch, before DTensor). PyTorch's new_group
+  # must be called by every rank for every group; torch_tpu only uses this
+  # rank's own groups.
   for subgroup_ranks in mesh_rows:
     new_group = torch.distributed.new_group(ranks=subgroup_ranks)
     if rank in subgroup_ranks:
@@ -225,7 +230,9 @@ def run_unsorted_subgroups() -> None:
   reversed_group = dist.new_group(ranks=reversed_ranks, sort_ranks=False)
   _check_group_rank_order(reversed_group, reversed_ranks, world_rank_to_dev)
 
-  # Sub-world groups with non-sorted rank order.
+  # Sub-world groups with non-sorted rank order. PyTorch's new_group must be
+  # called by every rank for every group; torch_tpu only uses this rank's own
+  # group.
   my_subgroup = None
   my_subgroup_ranks = None
   for subgroup_ranks in [[3, 1, 2, 0], [7, 5, 6, 4]]:
@@ -237,7 +244,7 @@ def run_unsorted_subgroups() -> None:
 
 
 def run_unaligned_subgroups() -> None:
-  """Test unaligned subgroup partitioning across devices."""
+  """Test subgroups not aligned to halves of the world."""
   dist.init_process_group("tpu")
   rank = dist.get_rank()
   world_size = dist.get_world_size()
@@ -249,18 +256,32 @@ def run_unaligned_subgroups() -> None:
   unaligned_b = dist.new_group(ranks=unaligned_b_ranks)
   unaligned_group = unaligned_a if rank in unaligned_a_ranks else unaligned_b
 
+  # Dispatched separately, each collective runs on its own group's devices.
+  x = torch.ones(4, device="tpu")
+  y = torch.ones(4, device="tpu")
+  dist.all_reduce(x)
+  dist.all_reduce(y, group=unaligned_group)
+  res = (x + y).cpu()
+  expected = torch.full((4,), float(world_size + half), dtype=torch.float32)
+  utils.assert_close(res, expected)
+
+  # The world and subgroup collectives run on different device sets, so they
+  # cannot be fused into one executable.
   @torch.compile(backend="tpu", fullgraph=True)
   @torch.tpu.distributed.spmd_safe
-  def unaligned_fn(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+  def fused_fn(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     dist.all_reduce(a)
     dist.all_reduce(b, group=unaligned_group)
     return a + b
 
   x = torch.ones(4, device="tpu")
   y = torch.ones(4, device="tpu")
-  res = unaligned_fn(x, y).cpu()
-  expected = torch.full((4,), float(world_size + half), dtype=torch.float32)
-  utils.assert_close(res, expected)
+  try:
+    fused_fn(x, y).cpu()
+  except RuntimeError as e:
+    assert "device assignment mismatch across operations" in str(e), e
+  else:
+    raise AssertionError("the world and subgroup collectives were fused")
 
 
 def _run_with_cleanup(test_fn) -> None:

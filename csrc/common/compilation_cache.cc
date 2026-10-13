@@ -67,6 +67,7 @@
 #include "csrc/common/tier2_compilation_cache.h"
 #include "csrc/common/tier3_compilation_cache.h"
 #include "csrc/common/to_string.h"
+#include "csrc/common/tpu_subslice_utils.h"
 #include "csrc/common/utils.h"
 #include "csrc/internal/dynamism/dynamism_ops.h"
 #include "csrc/ops/op_builder_utils.h"
@@ -77,6 +78,7 @@
 #include "xla/hlo/utils/concurrency/concurrency_utils.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_compiler.h"
+#include "xla/pjrt/pjrt_device_dimensions.h"
 #include "xla/pjrt/pjrt_executable.h"
 
 ABSL_FLAG(int32_t, torch_tpu_internal_num_compilation_threads, 0,
@@ -1031,8 +1033,8 @@ void CompilationCache::EnqueueCompilation(
                                 xla::PjRtClient& client,
                                 UniqueCompileOptions options) mutable {
     return AdaptXlaError(
-        client.CompileAndLoad(
-            std::move(contexted_module).ToMaybeOwningMlirModule(),
+        CompileAndLoadMaybeSubslice(
+            client, std::move(contexted_module).ToMaybeOwningMlirModule(),
             std::move(*options)),
         /* context= */ "failed to compile MLIR module");
   };
@@ -1124,6 +1126,15 @@ bool CompilationCache::ShouldUseTier2Cache() const {
   return allow_cache && UsesTier2CompilationCache();
 }
 
+// Returns the subslice origin that executables compiled with `options` are
+// loaded at (see GetSubsliceOrigin).
+static absl::StatusOr<std::optional<xla::PjRtDeviceDimensions>>
+GetSubsliceOriginForCompileOptions(const xla::CompileOptions& options) {
+  TT_ASSIGN_OR_RETURN(xla::PjRtClient* const client,
+                      PjrtBackend::GetInstance().GetClient());
+  return GetSubsliceOrigin(*client, options);
+}
+
 void CompilationCache::GetFromTier2OrCompile(
     const CompilationCacheKey& key, const CacheEntryKind kind,
     LoadedExecutableBuilder executable_builder,
@@ -1140,12 +1151,26 @@ void CompilationCache::GetFromTier2OrCompile(
     return;
   }
 
+  // The subslice origin to load cached executables at. If it cannot be
+  // computed, skip the persistent caches; the compilation reports the error.
+  absl::StatusOr<std::optional<xla::PjRtDeviceDimensions>> subslice_origin =
+      GetSubsliceOriginForCompileOptions(*compile_options);
+  if (!subslice_origin.ok()) {
+    ABSL_LOG(WARNING) << "Not using the tier-2/3 caches for key " << key
+                      << ": cannot compute the TPU subslice origin: "
+                      << subslice_origin.status();
+    Compile(key, kind, std::move(executable_builder),
+            std::move(compile_options));
+    return;
+  }
+
   // Using tier-2 cache.
   const absl::Time request_start = absl::Now();
 
   // Check 1: if the compilation result is already in the tier-2 cache, use it.
   Tier2CacheEntryStats tier2_stats;
-  auto executable_or = GetFromTier2Cache(key, request_start, tier2_stats);
+  auto executable_or =
+      GetFromTier2Cache(key, request_start, tier2_stats, *subslice_origin);
   if (executable_or.ok()) {
     SetExecutable(key, kind, std::move(executable_or),
                   {.tier2 = std::move(tier2_stats)});
@@ -1164,7 +1189,8 @@ void CompilationCache::GetFromTier2OrCompile(
       // in case another thread or process has just finished the compilation and
       // released the lock.
       Tier2CacheEntryStats tier2_stats;
-      auto executable_or = GetFromTier2Cache(key, request_start, tier2_stats);
+      auto executable_or =
+          GetFromTier2Cache(key, request_start, tier2_stats, *subslice_origin);
       if (executable_or.ok()) {
         SetExecutable(key, kind, std::move(executable_or),
                       {.tier2 = std::move(tier2_stats)});
@@ -1173,15 +1199,17 @@ void CompilationCache::GetFromTier2OrCompile(
     }
 
     GetFromTier3OrCompile(key, kind, std::move(executable_builder),
-                          std::move(compile_options), lock, request_start);
+                          std::move(compile_options), *subslice_origin, lock,
+                          request_start);
   }  // End of critical section.
 }
 
 void CompilationCache::GetFromTier3OrCompile(
     const CompilationCacheKey& key, const CacheEntryKind kind,
     LoadedExecutableBuilder executable_builder,
-    UniqueCompileOptions compile_options, Tier2CacheEntryLock& lock,
-    const absl::Time request_start) {
+    UniqueCompileOptions compile_options,
+    const std::optional<xla::PjRtDeviceDimensions>& subslice_origin,
+    Tier2CacheEntryLock& lock, const absl::Time request_start) {
   const bool uses_tier3 = UsesTier3CompilationCache();
   const auto pre_compile_duration = absl::Now() - request_start;
   absl::StatusOr<SharedLoadedExecutableWithMetadata> executable_or;
@@ -1211,7 +1239,7 @@ void CompilationCache::GetFromTier3OrCompile(
 
   // If tier-3 cache is enabled, try to get the executable from it first.
   if (uses_tier3) {
-    executable_or = GetFromTier3Cache(key);
+    executable_or = GetFromTier3Cache(key, subslice_origin);
     if (executable_or.ok()) {
       ABSL_VLOG(1) << "Tier-3 cache HIT for key " << key;
       tier = CacheTier::kTier3;

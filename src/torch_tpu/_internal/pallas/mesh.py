@@ -48,18 +48,20 @@ def get_pallas_mesh(
   Args:
     axis_names: Names of the mesh axes.
     mesh_shape: Shape of the mesh. Required when there is more than one axis;
-      its product must equal the world size. Defaults to a 1D mesh over all
-      ranks.
+      its product must equal the size of `process_group` (the world size if
+      `process_group` is None). Defaults to a 1D mesh over all ranks of the
+      process group.
     process_group: The process group whose rank-to-device assignment to use.
       Defaults to the world process group.
 
   Returns:
-    A `jax.sharding.Mesh` over the job's TPU devices.
+    A `jax.sharding.Mesh` over the process group's TPU devices (in group-rank
+    order).
 
   Raises:
     RuntimeError: If `torch.distributed` is not initialized.
     ValueError: If `axis_names` and `mesh_shape` are inconsistent with each
-      other or with the world size.
+      other or with the process group size.
   """
   return pallas._get_pallas_mesh(  # pylint: disable=protected-access
       axis_names, mesh_shape=mesh_shape, process_group=process_group

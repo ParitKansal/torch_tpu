@@ -43,6 +43,7 @@
 #include "csrc/common/excess_precision.h"
 #include "csrc/common/fingerprint_utils.h"
 #include "csrc/common/shape.h"
+#include "csrc/common/tpu_subslice_utils.h"
 #include "csrc/mlir/pipeline.h"
 #include "csrc/ops/op_builder_utils.h"
 #include "csrc/pjrt/pjrt_state.h"
@@ -56,6 +57,7 @@
 #include "xla/layout.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_compiler.h"
+#include "xla/pjrt/pjrt_device_dimensions.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/service/computation_layout.h"
 #include "xla/service/device_assignment.h"
@@ -142,8 +144,8 @@ absl::StatusOr<SharedLoadedExecutableWithMetadata>
 LoadedExecutableWithMetadata::MakeShared(
     absl_nonnull std::unique_ptr<xla::PjRtLoadedExecutable> executable,
     Indices argument_indices,
-    std::optional<UnboundedDynamicExecutionMetadata>
-        dynamic_execution_metadata) {
+    std::optional<UnboundedDynamicExecutionMetadata> dynamic_execution_metadata,
+    std::optional<xla::PjRtDeviceDimensions> subslice_origin) {
   TT_RET_CHECK(executable, error::kInternal)
       << "cannot create SharedLoadedExecutableWithMetadata from null "
          "executable.";
@@ -170,16 +172,22 @@ LoadedExecutableWithMetadata::MakeShared(
       new LoadedExecutableWithMetadata(
           std::move(executable), std::move(output_shapes),
           std::move(parameter_device_shapes), std::move(argument_indices),
-          std::move(dynamic_execution_metadata)));
+          std::move(dynamic_execution_metadata), std::move(subslice_origin)));
 }
 
 absl::StatusOr<SharedLoadedExecutableWithMetadata> Compile(
     xla::PjRtClient& client, LoadedExecutableBuilder executable_builder,
     UniqueCompileOptions compile_options) {
+  // Compute the subslice origin before `compile_options` is consumed.
+  TT_ASSIGN_OR_RETURN(std::optional<xla::PjRtDeviceDimensions> subslice_origin,
+                      GetSubsliceOrigin(client, *compile_options));
   TT_ASSIGN_OR_RETURN(
       std::unique_ptr<xla::PjRtLoadedExecutable> executable,
       std::move(executable_builder)(client, std::move(compile_options)));
-  return LoadedExecutableWithMetadata::MakeShared(std::move(executable));
+  return LoadedExecutableWithMetadata::MakeShared(
+      std::move(executable), /*argument_indices=*/{},
+      /*unbounded_dynamic_execution_metadata=*/std::nullopt,
+      std::move(subslice_origin));
 }
 
 absl::StatusOr<LoadedExecutableBuilder>
@@ -190,8 +198,8 @@ MlirComputationBuilderToExecutableBuilder(
   return [contexted_module = std::move(contexted_module)](
              xla::PjRtClient& client, UniqueCompileOptions options) mutable {
     return AdaptXlaError(
-        client.CompileAndLoad(
-            std::move(contexted_module).ToMaybeOwningMlirModule(),
+        CompileAndLoadMaybeSubslice(
+            client, std::move(contexted_module).ToMaybeOwningMlirModule(),
             std::move(*options)),
         /* context= */ "failed to compile MLIR module");
   };

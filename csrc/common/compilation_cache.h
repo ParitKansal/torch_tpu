@@ -45,6 +45,7 @@
 #include "csrc/common/utils.h"
 #include "csrc/ops/op_builder_utils.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/pjrt_device_dimensions.h"
 
 namespace torch_tpu {
 
@@ -557,14 +558,16 @@ class CompilationCache {
   //  - `key` is not in the tier-2 cache.
   //  - `cache_mutex_` is not held.
   //  - `lock` is the lock for the tier-2 cache entry for `key` and held.
+  // `subslice_origin` is where a tier-3 cached executable is loaded (see
+  // GetSubsliceOrigin).
   // After the compilation is done successfully, the cache entry for `key` will
   // be updated with the compiled executable.
-  void GetFromTier3OrCompile(const CompilationCacheKey& key,
-                             CacheEntryKind kind,
-                             LoadedExecutableBuilder executable_builder,
-                             UniqueCompileOptions compile_options,
-                             Tier2CacheEntryLock& lock,
-                             absl::Time request_start)
+  void GetFromTier3OrCompile(
+      const CompilationCacheKey& key, CacheEntryKind kind,
+      LoadedExecutableBuilder executable_builder,
+      UniqueCompileOptions compile_options,
+      const std::optional<xla::PjRtDeviceDimensions>& subslice_origin,
+      Tier2CacheEntryLock& lock, absl::Time request_start)
       ABSL_LOCKS_EXCLUDED(cache_mutex_);
 
   // Main mutex for protecting cache statistics and cache-only mode.

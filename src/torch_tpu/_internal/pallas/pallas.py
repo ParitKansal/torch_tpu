@@ -1344,7 +1344,7 @@ class JaxCallable:
 
     device_assignment: list[int] = []
     if self.mesh is not None:
-      _validate_pallas_mesh_world_size(mesh=self.mesh)
+      _validate_pallas_mesh_size(mesh=self.mesh)
       device_assignment = [int(d.id) for d in self.mesh.devices.flat]
 
     results = tpu_torch_pallas.call_custom_kernel(
@@ -1363,36 +1363,39 @@ class JaxCallable:
     return unflattened
 
 
-def _validate_pallas_mesh_world_size(
+def _validate_pallas_mesh_size(
     *,
     mesh: jax.sharding.Mesh | None = None,
     mesh_shape: Sequence[int] | None = None,
     process_group: dist.ProcessGroup | None = None,
 ) -> None:
-  """Validates that Pallas mesh, mesh_shape, and process_group match world size."""
+  """Validates a Pallas mesh / mesh_shape against the process group size."""
   if not dist.is_initialized():
     return
-  world_size = dist.get_world_size()
-  if process_group is not None:
-    pg_size = dist.get_world_size(process_group)
-    if pg_size != world_size:
-      raise ValueError(
-          "torch_tpu pallas kernels currently require full world-size meshes"
-          f" only. Got process_group with size {pg_size}, expected"
-          f" {world_size}."
-      )
+  expected_size = (
+      dist.get_world_size(process_group)
+      if process_group is not None
+      else dist.get_world_size()
+  )
   if mesh_shape is not None:
     mesh_size = math.prod(mesh_shape)
-    if mesh_size != world_size:
+    if mesh_size != expected_size:
       raise ValueError(
           f"Pallas mesh shape {mesh_shape} product ({mesh_size}) must match"
-          f" world size ({world_size})."
+          f" the process group size ({expected_size})."
       )
-  if mesh is not None and mesh.size != world_size:
-    raise ValueError(
-        f"Pallas kernel mesh size ({mesh.size}) must match world size"
-        f" ({world_size})."
-    )
+  if mesh is not None:
+    world_size = dist.get_world_size()
+    if mesh.size > world_size:
+      raise ValueError(
+          f"Pallas kernel mesh size ({mesh.size}) must not exceed world size"
+          f" ({world_size})."
+      )
+    device_ids = [int(d.id) for d in mesh.devices.flat]
+    if len(set(device_ids)) != len(device_ids):
+      raise ValueError(
+          f"Pallas kernel mesh device ids must be unique. Got {device_ids}."
+      )
 
 
 @overload
@@ -1498,7 +1501,7 @@ def custom_jax_kernel(
         pathlib.Path(__file__).parent,
     )
 
-  _validate_pallas_mesh_world_size(mesh=mesh)
+  _validate_pallas_mesh_size(mesh=mesh)
 
   def decorator(jax_fn: Callable[..., Any]) -> JaxCallable:
     nonlocal name
@@ -1721,7 +1724,8 @@ def _get_pallas_mesh(
     process_group: The process group whose rank-to-device assignment to use.
 
   Returns:
-    A `jax.sharding.Mesh` over the job's TPU devices.
+    A `jax.sharding.Mesh` over the process group's TPU devices (in group-rank
+    order).
   """
   if not dist.is_initialized():
     raise RuntimeError(
@@ -1729,9 +1733,7 @@ def _get_pallas_mesh(
     )
 
   world_size = dist.get_world_size()
-  _validate_pallas_mesh_world_size(
-      mesh_shape=mesh_shape, process_group=process_group
-  )
+  _validate_pallas_mesh_size(mesh_shape=mesh_shape, process_group=process_group)
   if (
       mesh_shape is not None
       and not isinstance(axis_names, str)
@@ -1750,13 +1752,18 @@ def _get_pallas_mesh(
 
   pg_devs = device_mesh.get_device_assignment(process_group)
 
+  group_size = (
+      dist.get_world_size(process_group)
+      if process_group is not None
+      else world_size
+  )
   devices = [
       _PallasDevice(
           id=pg_devs[i] if (pg_devs and i < len(pg_devs)) else i,
           process_index=i,
           device_kind=dev_name,
       )
-      for i in range(world_size)
+      for i in range(group_size)
   ]
 
   if mesh_shape is not None:

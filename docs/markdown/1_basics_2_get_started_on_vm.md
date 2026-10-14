@@ -4,21 +4,19 @@ torch_tpu_version: 0.1.1.dev20260922
 
 # Get started with TorchTPU on a TPU VM
 
-The simplest way to use TorchTPU is on a TPU VM. In this example we will run a
-simple tensor parallel example. We do not focus on the example, just the setup
-code to get running on a VM. In the following tutorial, we will see how to
-achieve something similar through GKE, which is necessary to access recent TPU
-hardware.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-pytorch/torch_tpu/blob/main/docs/notebooks/1_basics_2_get_started_on_vm.ipynb)
+
+The simplest way to use TorchTPU is on a TPU VM.
+In this example we will run a simple tensor parallel example.
+We do not focus on the example, just the setup code to get running on a VM.
+In the following tutorial, we will see how to achieve something similar through GKE, which is necessary to access recent TPU hardware.
+
 
 ## 1. Install and set up
 
-Before running this notebook, ensure you are running on a
-[Google Cloud TPU VM](https://docs.cloud.google.com/tpu/docs/intro-to-tpu?hl=en)
-(e.g., v6e).
+Before running this notebook, ensure you are running on a [Google Cloud TPU VM](https://docs.cloud.google.com/tpu/docs/intro-to-tpu?hl=en) (e.g., v6e).
 
-Install TorchTPU and its dependencies on your TPU VM. Components must be
-installed in this order to ensure the PyTorch dispatcher and TPU drivers align
-correctly.
+Install TorchTPU and its dependencies on your TPU VM. Components must be installed in this order to ensure the PyTorch dispatcher and TPU drivers align correctly.
 
 ### Step 1: Initialize Python 3.12
 
@@ -36,8 +34,7 @@ pip install torch_tpu
 
 ## 2. Initialize the hardware
 
-Similar to a CPU or GPU, the TPU backend must be explicitly initialized. This
-registers the "tpu" device string with PyTorch.
+Similar to a CPU or GPU, the TPU backend must be explicitly initialized. This registers the "tpu" device string with PyTorch.
 
 ```python {.marimo}
 import torch
@@ -49,14 +46,11 @@ print(f"TPU Initialization complete. Primary device: {device}")
 
 ## 3. Work with tensors
 
-Once initialized, you can interact with the TPU much like you would with a GPU.
-You can move existing CPU tensors to the TPU or create new tensors directly on
-the hardware.
+Once initialized, you can interact with the TPU much like you would with a GPU. You can move existing CPU tensors to the TPU or create new tensors directly on the hardware.
 
 You have two standard ways to specify the TPU device:
-
-1.  Using the `device` object returned by `torch.device()`.
-2.  Using the `"tpu"` string identifier.
+1. Using the `device` object returned by `torch.device()`.
+2. Using the `"tpu"` string identifier.
 
 ```python {.marimo}
 # 1. Create a tensor on the CPU
@@ -77,10 +71,7 @@ print(f"direct_tpu_tensor is on: {direct_tpu_tensor.device}")
 
 ## 4. Compute and materialize results
 
-Performing math on the TPU is seamless. When you perform operations on TPU
-tensors, the computation happens on the hardware. To retrieve the data back to
-the CPU for printing or interaction with standard Python libraries, use the
-`.cpu()` method.
+Performing math on the TPU is seamless. When you perform operations on TPU tensors, the computation happens on the hardware. To retrieve the data back to the CPU for printing or interaction with standard Python libraries, use the `.cpu()` method.
 
 ```python {.marimo}
 # Perform a simple operation on the TPU
@@ -94,6 +85,4 @@ print(f"Result Checksum (Sum): {result_on_cpu.sum():.4f}")
 ```
 
 ### 🎉 Success!
-
-You have successfully initialized the TPU, mapped tensors to the device,
-performed a calculation, and retrieved the results.
+You have successfully initialized the TPU, mapped tensors to the device, performed a calculation, and retrieved the results.

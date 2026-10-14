@@ -10,23 +10,19 @@ analyze them in TensorBoard.
 
 !!! warning
 
-````
-**Prerequisite:** TensorBoard requires `setuptools<81`. The latest
-version removes `pkg_resources`, which TensorBoard depends on. Install it
-first:
-```shell
-pip install "setuptools<81"
-pip install xprof tensorboard
-```
-````
+    **Prerequisite:** TensorBoard requires `setuptools<81`. The latest
+    version removes `pkg_resources`, which TensorBoard depends on. Install it
+    first:
+    ```shell
+    pip install "setuptools<81"
+    pip install xprof tensorboard
+    ```
 
 !!! note
 
-```
-**PyTorch version:** the native `torch.profiler` TPU integration requires
-PyTorch 2.12 or newer.
-```
-
+    **PyTorch version:** the native `torch.profiler` TPU integration requires
+    PyTorch 2.12 or newer.
+<!---->
 ## 1. The TPU profiler
 
 Standard `torch.profiler` (integrated with `torch_tpu`) provides a **context
@@ -91,25 +87,24 @@ with torch.profiler.profile(
 ) as prof:
     model(inputs)
 ```
-
+<!---->
 ## 3. Capturing a profile
 
 The cell below runs a small training loop inside the profiler context. The key
 points:
 
 1.  Wrap your training loop inside `torch.profiler.profile()`
-2.  Specify activities — `CPU` for host-side ops, `TPU` for hardware execution
+2.  Specify activities — `CPU` for host-side ops, `TPU` for hardware
+    execution
 3.  Set `on_trace_ready` to save traces to a directory using
     `torch.profiler.tensorboard_trace_handler`
-4.  (Optional) Pass `experimental_config` with `TpuProfilerConfig` to control
-    tracer levels
+4.  (Optional) Pass `experimental_config` with `TpuProfilerConfig` to
+    control tracer levels
 
 !!! important
 
-```
-The profiler adds overhead. Profile only a representative subset of steps (e.g.,
-100–1000), not your entire training run.
-```
+    The profiler adds overhead. Profile only a representative subset of steps (e.g.,
+    100–1000), not your entire training run.
 
 ```python
 # Build a small model and optimizer
@@ -180,15 +175,13 @@ xprof --logdir=/tmp/profiler_output --port=6006
 
 !!! note
 
-```
-You must run TensorBoard from the VS Code integrated terminal so that port
-forwarding works automatically.
-```
+    You must run TensorBoard from the VS Code integrated terminal so that port
+    forwarding works automatically.
 
-**On GKE:** write the trace directory to a Cloud Storage bucket mounted with the
-[Cloud Storage FUSE CSI driver](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/cloud-storage-fuse-csi-driver)
-so the traces outlive the pod, then open them with `xprof
---logdir=gs://<bucket>/profiler_output`.
+**On GKE:** write the trace directory to a Cloud Storage bucket mounted with
+the [Cloud Storage FUSE CSI driver](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/cloud-storage-fuse-csi-driver)
+so the traces outlive the pod, then open them with
+`xprof --logdir=gs://<bucket>/profiler_output`.
 
 <!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
 | View               | What it shows                                          |
@@ -219,7 +212,7 @@ A well-optimized TPU workload shows:
     one execution
 -   **Minimal CPU→TPU gaps** — data loading is overlapped with compute
 -   **High MXU utilization (>60%)** — tensor shapes are hardware-aligned
-
+<!---->
 ## 6. Verifying the traces were captured
 
 The cell below checks that the profiler output directory contains trace files.
@@ -249,10 +242,8 @@ otherwise invisible in standard event traces.
 
 !!! note
 
-```
-Fine-grained performance counter sampling is an advanced hardware feature
-available for **Ironwood (TPU v7/TPU7x)** and subsequent TPU generations.
-```
+    Fine-grained performance counter sampling is an advanced hardware feature
+    available for **Ironwood (TPU v7/TPU7x)** and subsequent TPU generations.
 
 ### Enabling performance counters
 
@@ -277,7 +268,7 @@ For the detailed list of configuration parameters (such as sampling intervals,
 scaling, and trigger modes) and instructions on how to determine counter
 indices, refer to the official
 [OpenXLA Kernel Profiling Guide](https://openxla.org/xprof/kernel-profiling).
-
+<!---->
 ## 8. Quick reference
 
 <!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
@@ -287,10 +278,7 @@ Step        | Command / Code
 **Profile** | `with torch.profiler.profile(activities=[...], on_trace_ready=...):`
 **Save**    | `torch.profiler.tensorboard_trace_handler("/tmp/profiler_output")`
 **View**    | `tensorboard --logdir=/tmp/profiler_output`
-<!-- mdformat on -->
 
 !!! note
 
-```
-Profile only 100–1000 steps to keep trace files manageable. The profiler adds ~5–10% overhead per step.
-```
+    Profile only 100–1000 steps to keep trace files manageable. The profiler adds ~5–10% overhead per step.

@@ -32,7 +32,7 @@ If the cache grows with `torch.cat`, its length changes every step. With `dynami
 4. **Two compilations:** One for prefill and one for decode, reused by every later step.
 
 **`DynamicCache`** takes the opposite approach, and it's the default cache in HuggingFace models: it appends each step's keys and values with `torch.cat`, so the cache holds exactly `S + t` positions. This is simpler and uses no padded memory, but the key length changes every step, so it relies on bounded dynamism (`dynamic=None`) to avoid recompiling on every token.
-
+<!---->
 ## 2. Model and KV cache implementation
 
 Below, we implement `StaticCache`, `DynamicCache`, and the `MuseGlimmer30B` decoder architecture (which interleaves three Sliding Window Attention layers with RoPE and one full NoPE causal attention layer every four blocks).

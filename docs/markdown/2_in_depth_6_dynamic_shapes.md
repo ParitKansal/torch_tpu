@@ -4,102 +4,45 @@ torch_tpu_version: 0.1.1.dev20260922
 
 # Dynamic shapes
 
-When you compile a model with `torch.compile(model)`, TorchTPU lowers the
-computation to StableHLO and compiles it with the XLA compiler (see
-[How TorchTPU works](./2_in_depth_1_how_torchtpu_works.md)). The XLA compiler is
-traditionally designed around **statically known tensor shapes** so that High
-Bandwidth Memory (HBM) buffers can be laid out ahead of time, operator pipelines
-can be fused, and matrix multiplications can be tiled for the TPU's systolic
-arrays (MXUs). When input tensor dimensions vary across calls in a
-`torch.compile` workload, compiling for each exact shape would invalidate
-Dynamo's shape guards and trigger a costly full XLA recompilation on every new
-shape.
+When you compile a model with `torch.compile(model)`, TorchTPU lowers the computation to StableHLO and compiles it with the XLA compiler (see [How TorchTPU works](./2_in_depth_1_how_torchtpu_works.md)). The XLA compiler is traditionally designed around **statically known tensor shapes** so that High Bandwidth Memory (HBM) buffers can be laid out ahead of time, operator pipelines can be fused, and matrix multiplications can be tiled for the TPU's systolic arrays (MXUs). When input tensor dimensions vary across calls in a `torch.compile` workload, compiling for each exact shape would invalidate Dynamo's shape guards and trigger a costly full XLA recompilation on every new shape.
 
-To support **dynamic shapes** without constant recompilations, TorchTPU uses
-**Bounded Dynamism**, where the compile-time upper bounds of dynamic dimensions
-are fixed while the actual runtime dimension sizes are tracked dynamically by
-XLA.
+To support **dynamic shapes** without constant recompilations, TorchTPU uses **Bounded Dynamism**, where the compile-time upper bounds of dynamic dimensions are fixed while the actual runtime dimension sizes are tracked dynamically by XLA.
 
 ## How dynamic shapes are handled by TorchTPU
 
-When you compile a model or function with `torch.compile(model, dynamic=None)`
-(as input shapes vary across calls) or explicitly mark dynamic dimensions with
-`torch._dynamo.mark_dynamic`, Dynamo traces the computation and produces an FX
-graph where changing dimensions are represented as symbolic integer variables
-(`torch.SymInt`) instead of fixed constants. TorchTPU handles these symbolic
-dimensions as follows:
+When you compile a model or function with `torch.compile(model, dynamic=None)` (as input shapes vary across calls) or explicitly mark dynamic dimensions with `torch._dynamo.mark_dynamic`, Dynamo traces the computation and produces an FX graph where changing dimensions are represented as symbolic integer variables (`torch.SymInt`) instead of fixed constants. TorchTPU handles these symbolic dimensions as follows:
 
 ### Compilation
 
-*   TorchTPU intercepts the traced FX graph, determines an overall
-    `[lower_bound, upper_bound]` range for each symbolic dimension (from
-    `mark_dynamic(..., min=..., max=...)` or inferred by Dynamo from the initial
-    runtime size `S`), and divides that range into contiguous buckets aligned to
-    multiples of `bucket_size` (default `128`, matching the TPU's 128-lane tile
-    dimension), up to `num_dynamic_buckets` (default `1`, maximum `8`):
-    *   The first bucket covers from `lower_bound` up to the next multiple of
-        `128` at or after `S` (`U_1`), the second bucket covers from `U_1 + 1`
-        up to the next multiple of `128` (`U_2`), and so on (for example,
-        `[lower_bound, 128]`, `[129, 256]`, ...).
-    *   TorchTPU registers a single range guard across the full span of all
-        buckets with Dynamo, so Dynamo only triggers recompilation if the
-        dimension grows beyond the overall `upper_bound`.
-*   For each bucket, TorchTPU replaces the symbolic dimension with the bucket's
-    static upper bound `U`, passes the actual runtime dimension size as an
-    input, and lowers the graph to StableHLO with bounded tensor types that
-    track both the static upper bound `U` and the active runtime size across all
-    operations.
-*   The resulting module is compiled by XLA for each configured bucket upper
-    bound `U`.
+* TorchTPU intercepts the traced FX graph, determines an overall `[lower_bound, upper_bound]` range for each symbolic dimension (from `mark_dynamic(..., min=..., max=...)` or inferred by Dynamo from the initial runtime size `S`), and divides that range into contiguous buckets aligned to multiples of `bucket_size` (default `128`, matching the TPU's 128-lane tile dimension), up to `num_dynamic_buckets` (default `1`, maximum `8`):
+    * The first bucket covers from `lower_bound` up to the next multiple of `128` at or after `S` (`U_1`), the second bucket covers from `U_1 + 1` up to the next multiple of `128` (`U_2`), and so on (for example, `[lower_bound, 128]`, `[129, 256]`, ...).
+    * TorchTPU registers a single range guard across the full span of all buckets with Dynamo, so Dynamo only triggers recompilation if the dimension grows beyond the overall `upper_bound`.
+* For each bucket, TorchTPU replaces the symbolic dimension with the bucket's static upper bound `U`, passes the actual runtime dimension size as an input, and lowers the graph to StableHLO with bounded tensor types that track both the static upper bound `U` and the active runtime size across all operations.
+* The resulting module is compiled by XLA for each configured bucket upper bound `U`.
 
 ### Execution
 
-*   At runtime, based on the actual size of the dynamic dimension, TorchTPU
-    selects the corresponding compiled bucket executable.
-*   When executing the compiled module, XLA pads the dynamic input tensor up to
-    the bucket's static upper bound `U` and resets values in the padded region
-    beyond the active runtime size to algebraic identity values, ensuring that
-    padded elements do not affect the output result.
-*   For dynamic output tensors, padding remains at the end of the buffer,
-    allowing TorchTPU to return the buffer to PyTorch with a lightweight shape
-    metadata update rather than physically slicing the tensor.
-
+* At runtime, based on the actual size of the dynamic dimension, TorchTPU selects the corresponding compiled bucket executable.
+* When executing the compiled module, XLA pads the dynamic input tensor up to the bucket's static upper bound `U` and resets values in the padded region beyond the active runtime size to algebraic identity values, ensuring that padded elements do not affect the output result.
+* For dynamic output tensors, padding remains at the end of the buffer, allowing TorchTPU to return the buffer to PyTorch with a lightweight shape metadata update rather than physically slicing the tensor.
+<!---->
 ## Motivating use case: Autoregressive decoding
 
-A primary workload that motivates bounded dynamism is **autoregressive LLM
-decoding** with a dynamically growing KV cache. In a standard decode loop, each
-step appends the new token's key and value states to the cached history along
-the sequence dimension via `torch.cat`:
+A primary workload that motivates bounded dynamism is **autoregressive LLM decoding** with a dynamically growing KV cache. In a standard decode loop, each step appends the new token's key and value states to the cached history along the sequence dimension via `torch.cat`:
 
-*   **Prefill:** Input prompt has shape `[B, S]` (batch size `B`, prompt
-    sequence length `S`), producing a KV cache of shape `[B, H_kv, S, D]`
-    (`H_kv` key/value heads, head dimension `D`).
-*   **Decode step 1:** Input token has shape `[B, 1]`, concatenating with the
-    cache to produce shape `[B, H_kv, S + 1, D]`.
-*   **Decode step `t`:** The KV cache sequence length grows to `S + t`.
+* **Prefill:** Input prompt has shape `[B, S]` (batch size `B`, prompt sequence length `S`), producing a KV cache of shape `[B, H_kv, S, D]` (`H_kv` key/value heads, head dimension `D`).
+* **Decode step 1:** Input token has shape `[B, 1]`, concatenating with the cache to produce shape `[B, H_kv, S + 1, D]`.
+* **Decode step `t`:** The KV cache sequence length grows to `S + t`.
 
-With static-shape compilation (`dynamic=False`), Dynamo guards on the exact
-sequence length of the KV cache. Every decode step changes the tensor shape,
-invalidates the guard, and triggers a **full XLA recompilation on every
-generated token**—turning millisecond decode steps into multi-second
-compilations unless you rewrite the model to preallocate static buffers and
-perform in-place mutations.
+With static-shape compilation (`dynamic=False`), Dynamo guards on the exact sequence length of the KV cache. Every decode step changes the tensor shape, invalidates the guard, and triggers a **full XLA recompilation on every generated token**—turning millisecond decode steps into multi-second compilations unless you rewrite the model to preallocate static buffers and perform in-place mutations.
 
-**Bounded dynamism** (`dynamic=None`) solves this without requiring model
-rewrites: as the KV cache grows across decode steps (`S + 1`, `S + 2`, ...), all
-shapes within the compiled bucket (`<= 128`, `<= 256`, ...) reuse the same XLA
-executable.
+**Bounded dynamism** (`dynamic=None`) solves this without requiring model rewrites: as the KV cache grows across decode steps (`S + 1`, `S + 2`, ...), all shapes within the compiled bucket (`<= 128`, `<= 256`, ...) reuse the same XLA executable.
 
-For a hands-on walkthrough applying bounded dynamism to a full LLM decode loop
-(and comparing against static KV cache preallocation), see
-[LLM inference end-to-end](./3_practical_examples_1_llm_inference_end_to_end.md).
-
+For a hands-on walkthrough applying bounded dynamism to a full LLM decode loop (and comparing against static KV cache preallocation), see [LLM inference end-to-end](./3_practical_examples_1_llm_inference_end_to_end.md).
+<!---->
 ## Example: Autoregressive loop with a growing tensor
 
-To see how static compilation (`dynamic=False`) and bounded dynamism
-(`dynamic=None`) behave in practice, consider a minimal autoregressive loop
-where each step appends a new token along the sequence dimension (`dim=2`) using
-`torch.cat`:
+To see how static compilation (`dynamic=False`) and bounded dynamism (`dynamic=None`) behave in practice, consider a minimal autoregressive loop where each step appends a new token along the sequence dimension (`dim=2`) using `torch.cat`:
 
 ```python
 import time
@@ -159,10 +102,7 @@ Sample output:
 [dynamic=False] Step 10/10 (seq_len=26): 37.75 ms
 ```
 
-**What happened:** With `dynamic=False`, Dynamo guards on the exact sequence
-length of `kv_cache` (`16`, `17`, `18`, ...). Because `torch.cat` increases
-`dim=2` by `1` on every iteration, the shape guard fails on every call and
-triggers a full XLA recompilation at every step.
+**What happened:** With `dynamic=False`, Dynamo guards on the exact sequence length of `kv_cache` (`16`, `17`, `18`, ...). Because `torch.cat` increases `dim=2` by `1` on every iteration, the shape guard fails on every call and triggers a full XLA recompilation at every step.
 
 ### 2. Running with `dynamic=None` (Bounded Dynamism)
 
@@ -189,23 +129,12 @@ Sample output:
 [dynamic=None] Step 10/10 (seq_len=26): 0.37 ms
 ```
 
-**What happened:** With `dynamic=None`, only the first 3 iterations incur
-compilation overhead, and from step 4 onward execution drops to about 0.4 ms per
-step (~100x faster) with zero recompilations:
+**What happened:** With `dynamic=None`, only the first 3 iterations incur compilation overhead, and from step 4 onward execution drops to about 0.4 ms per step (~100x faster) with zero recompilations:
 
-*   **Step 1 (`seq_len=16 -> 17`):** Dynamo sees the inputs for the first time
-    and compiles a static executable for `seq_len=16`.
-*   **Step 2 (`seq_len=17 -> 18`):** Because `dim=2` changed from `16` to `17`,
-    Dynamo automatically marks `dim=2` as dynamic (`SymInt`) and TorchTPU
-    compiles a bounded-dynamic executable for the `[17, 128]` bucket using the
-    initial input tensor layout.
-*   **Step 3 (`seq_len=18 -> 19`):** The bounded-dynamic output buffer produced
-    by step 2 has XLA's padded output layout, so TorchTPU compiles the `[17,
-    128]` bucket once more for that steady-state XLA layout.
-*   **Steps 4–10 (`seq_len=19 -> 26`):** Both the sequence length (within the
-    `<= 128` bucket) and the XLA buffer layout match the cached executable, so
-    every subsequent step dispatches the pre-compiled XLA executable directly
-    without recompiling.
+* **Step 1 (`seq_len=16 -> 17`):** Dynamo sees the inputs for the first time and compiles a static executable for `seq_len=16`.
+* **Step 2 (`seq_len=17 -> 18`):** Because `dim=2` changed from `16` to `17`, Dynamo automatically marks `dim=2` as dynamic (`SymInt`) and TorchTPU compiles a bounded-dynamic executable for the `[17, 128]` bucket using the initial input tensor layout.
+* **Step 3 (`seq_len=18 -> 19`):** The bounded-dynamic output buffer produced by step 2 has XLA's padded output layout, so TorchTPU compiles the `[17, 128]` bucket once more for that steady-state XLA layout.
+* **Steps 4–10 (`seq_len=19 -> 26`):** Both the sequence length (within the `<= 128` bucket) and the XLA buffer layout match the cached executable, so every subsequent step dispatches the pre-compiled XLA executable directly without recompiling.
 
 > [!TIP] If you already know which dimension will vary ahead of time, you can
 > call `torch._dynamo.mark_dynamic(kv_cache, 2, min=16, max=128)` before the
@@ -215,34 +144,14 @@ step (~100x faster) with zero recompilations:
 
 ## Current limitations
 
-Bounded dynamism in TorchTPU is actively evolving and is currently optimized
-around the **autoregressive KV cache** use case. Keep the following limitations
-in mind when applying it to your models:
+Bounded dynamism in TorchTPU is actively evolving and is currently optimized around the **autoregressive KV cache** use case. Keep the following limitations in mind when applying it to your models:
 
-*   **Bucket limit and unbounded dynamism:** At most **8 buckets**
-    (`num_dynamic_buckets <= 8`) are compiled per trace. Unbounded dynamism is
-    not supported yet—if a dynamic dimension grows past the highest compiled
-    bucket's upper bound, a recompilation is triggered.
-*   **Dynamo shape constraints:** Bucket upper bounds must satisfy active Dynamo
-    shape constraints (such as divisibility requirements from `reshape` or
-    `view`). Otherwise, TorchTPU falls back to a single bucket with upper bound
-    `2 * S` (twice the initial runtime size `S`).
-*   **Compute and HBM overhead up to the bucket upper bound:** Because execution
-    runs on buffers padded to the bucket's static upper bound `U`, HBM footprint
-    and FLOPs scale with `U` rather than the actual runtime size. Setting a very
-    large `bucket_size` or `mark_dynamic(..., max=U)` when the actual size is
-    much smaller than `U` pays the compute and memory cost of `U`.
-*   **XLA layout changes:** Even when a tensor's shape falls within an
-    already-compiled bucket, a change in the underlying XLA physical layout of
-    an input buffer will trigger a bucket recompilation.
-*   **No persistent compilation cache (`AOTAutogradCache`):** Bounded-dynamic
-    executables are not serialized to `AOTAutogradCache` yet, so they are
-    recompiled on each new process start.
-*   **Operator coverage:** Not all PyTorch operators support bounded dynamic
-    shapes yet.
-*   **Views as model inputs:** Support for passing tensor views directly as
-    inputs to the compiled model is limited.
-*   **Data-dependent dynamism:** Operations whose output shapes depend on
-    runtime tensor values (such as `torch.nonzero`) are not supported.
-*   **Custom kernels:** Bounded dynamic shapes are not supported with custom TPU
-    kernels (such as Pallas kernels registered via `torch.tpu.pallas.jax_op`).
+* **Bucket limit and unbounded dynamism:** At most **8 buckets** (`num_dynamic_buckets <= 8`) are compiled per trace. Unbounded dynamism is not supported yet—if a dynamic dimension grows past the highest compiled bucket's upper bound, a recompilation is triggered.
+* **Dynamo shape constraints:** Bucket upper bounds must satisfy active Dynamo shape constraints (such as divisibility requirements from `reshape` or `view`). Otherwise, TorchTPU falls back to a single bucket with upper bound `2 * S` (twice the initial runtime size `S`).
+* **Compute and HBM overhead up to the bucket upper bound:** Because execution runs on buffers padded to the bucket's static upper bound `U`, HBM footprint and FLOPs scale with `U` rather than the actual runtime size. Setting a very large `bucket_size` or `mark_dynamic(..., max=U)` when the actual size is much smaller than `U` pays the compute and memory cost of `U`.
+* **XLA layout changes:** Even when a tensor's shape falls within an already-compiled bucket, a change in the underlying XLA physical layout of an input buffer will trigger a bucket recompilation.
+* **No persistent compilation cache (`AOTAutogradCache`):** Bounded-dynamic executables are not serialized to `AOTAutogradCache` yet, so they are recompiled on each new process start.
+* **Operator coverage:** Not all PyTorch operators support bounded dynamic shapes yet.
+* **Views as model inputs:** Support for passing tensor views directly as inputs to the compiled model is limited.
+* **Data-dependent dynamism:** Operations whose output shapes depend on runtime tensor values (such as `torch.nonzero`) are not supported.
+* **Custom kernels:** Bounded dynamic shapes are not supported with custom TPU kernels (such as Pallas kernels registered via `torch.tpu.pallas.jax_op`).

@@ -66,12 +66,10 @@ You can configure matrix multiplication precision in two ways:
 
 !!! note
 
-```
-Entering or exiting `torch.tpu.precision` introduces a `torch.compile`
-graph break. When using `torch.compile(..., fullgraph=True)`, set precision
-outside the compiled function with `torch.set_float32_matmul_precision(...)`
-or wrap the outer call in `with torch.tpu.precision(...):`.
-```
+    Entering or exiting `torch.tpu.precision` introduces a `torch.compile`
+    graph break. When using `torch.compile(..., fullgraph=True)`, set precision
+    outside the compiled function with `torch.set_float32_matmul_precision(...)`
+    or wrap the outer call in `with torch.tpu.precision(...):`.
 
 Use `torch.tpu.precision` to compare steady-state execution time across the
 three modes:
@@ -194,7 +192,7 @@ Greatest relative difference: 0.165375 at index (3, 9) (up to 0.016 allowed)
     [PyTorch testing documentation](https://docs.pytorch.org/docs/stable/testing.html)
     as a baseline, and relax `atol` or `rtol` only where expected for
     reduced-precision accumulation.
-
+<!---->
 ## Specify output precision
 
 When multiplying `bfloat16` tensors with `torch.mm` or `torch.bmm`, the MXU
@@ -231,13 +229,11 @@ defaults to `False`):
 
 !!! important
 
-```
-Set `torch.tpu.allow_excess_precision` at the very beginning of your script
-before running or compiling any TPU operations. The XLA runtime locks this
-flag when the first compilation starts; attempting to change it to a
-different value afterward raises a `RuntimeError`.
-```
-
+    Set `torch.tpu.allow_excess_precision` at the very beginning of your script
+    before running or compiling any TPU operations. The XLA runtime locks this
+    flag when the first compilation starts; attempting to change it to a
+    different value afterward raises a `RuntimeError`.
+<!---->
 ## Understand TPU MXU precision
 
 Understanding how the TPU MXU handles floating-point numbers explains why excess
@@ -317,7 +313,7 @@ and 6x as many MXU passes, the end-to-end impact depends on your workload:
     workloads, the extra MXU passes for 3-pass and 6-pass execution use
     otherwise idle MXU cycles, resulting in less than a 3x or 6x end-to-end
     slowdown.
-
+<!---->
 ## Validate bitwise precision behavior
 
 You can verify how the MXU handles mantissa bits and excess precision by

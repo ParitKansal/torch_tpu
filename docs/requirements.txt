@@ -1,0 +1,10 @@
+mkdocs<2
+mkdocs-material
+mkdocs-api-autonav
+mkdocs-awesome-nav
+mkdocs-glightbox
+python-markdown-math
+mkdocs-same-dir
+mkdocs-open-in-new-tab
+mkdocs-table-reader-plugin
+mkdocs-redirects

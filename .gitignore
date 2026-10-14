@@ -8,12 +8,14 @@ user.bazelrc
 /compile_commands.json
 /.cache/
 /external
-
+# Build files
+build/
 # Generated Python artifacts.
 *.pyc
 # Built wheels, consumed by the nox smoke-test sessions.
 dist/
 */**/__pycache__
+src/torch_tpu.egg-info/
 # Virtual environments
 .venv/
 # Vim swap files (used for recovery).
@@ -26,3 +28,6 @@ dist/
 # Vim undo files.
 *.un~
 .*.un~
+
+# Documentation
+site/

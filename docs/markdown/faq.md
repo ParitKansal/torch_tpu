@@ -56,8 +56,7 @@ downloaded Hugging Face models, including:
 *   **Text Encoders & Search:** BERT, ALBERT & Electra, RoBERTa, DeBERTa, T5,
     MT5 & Flan-T5
 
-For more details, please refer to our published
-[Case Studies](./index.md#case-studies).
+For more details, please refer to our published [Case Studies](./index.md).
 
 ## What support does TorchTPU provide for kernel development?
 

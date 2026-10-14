@@ -10,7 +10,7 @@ on 4x Ironwood TPUs.
 
 For information on how to run this example on TPUs in your GKE (Google
 Kubernetes Engine) cluster, please refer to example
-[README](../../examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/README.md).
+[README](https://github.com/google-pytorch/torch_tpu/tree/main/examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop).
 Here we instead explain some of the implementation choices.
 
 The focus of this example is simplicity and readability. It runs on just a
@@ -22,7 +22,7 @@ This pure PyTorch (no custom kernels) code achieves training speed of about
 2400 to 2800 TPS per rank (so 19k to 22k TPS total), at sequence length 5120.
 In future updates, we plan to describe more optimizations and performance
 best practices when running on TPUs.
-
+<!---->
 ## Model definition
 [Muse Glimmer 30B](https://huggingface.co/meta-models/Muse-Glimmer-30B) follows
 a fairly standard transformer architecture.
@@ -30,11 +30,11 @@ It consists of 52 layers of causal self-attention and feed-forward (FFN) blocks.
 Every 4-th layer of the model uses full attention, and all the other layers use
 sliding-window attention (SWA).
 
-The model code is fully self-contained in [model_fsdp.py](../../examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/model_fsdp.py)
-(and [rope.py](../../examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/rope.py)
+The model code is fully self-contained in [model_fsdp.py](https://github.com/google-pytorch/torch_tpu/blob/main/examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/model_fsdp.py)
+(and [rope.py](https://github.com/google-pytorch/torch_tpu/blob/main/examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/rope.py)
 for rotary positional encoding).
 
-Configuration is specified in [model_fsdp.py](../../examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/model_fsdp.py):
+Configuration is specified in [model_fsdp.py](https://github.com/google-pytorch/torch_tpu/blob/main/examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/model_fsdp.py):
 
 ```python
 class Config:
@@ -72,7 +72,7 @@ self.norm = nn.RMSNorm((config.dmodel,), eps=config.rmsnorm_eps)
 Notice that model head (aka “LM head”) is not present here – in case of
 training, it is usually better placed with the loss function, see the section
 on chunkwise fused loss below.
-
+<!---->
 ## Per-layer torch.compile
 
 TorchTPU performs best with `torch.compile`, thanks to XLA compiler's ability to
@@ -110,7 +110,7 @@ training), and the `backend` variable here is just to make switching between
 Internally, TorchTPU will cache compiled layers, and because there are just two
 kinds of layers (full and SWA) in this model, this greatly speeds up the
 compilation process.
-
+<!---->
 ## Activation checkpointing
 
 The model weights take up about 60 GiB (in bf16) of HBM, and would easily fit on
@@ -149,22 +149,22 @@ class DecoderBlock(nn.Module):
     return h
 ```
 
-> [!NOTE]
-> Activation checkpointing (AC) is applied inside the model layer
-(`DecoderBlock` module) `forward` method, and `torch.compile` is applied
-outside / on the layer itself – this ordering is important.
-You could keep AC inside the layer, and apply `torch.compile` on the whole model
-– this would work fine.
-But you cannot swap them, e.g. if you were to apply AC the same way,
-but apply `torch.compile` inside on attention and FFN sub-layers separately,
-it would not work as expected.
+!!! note
+    Activation checkpointing (AC) is applied inside the model layer
+    (`DecoderBlock` module) `forward` method, and `torch.compile` is applied
+    outside / on the layer itself – this ordering is important.
+    You could keep AC inside the layer, and apply `torch.compile` on the whole model
+    – this would work fine.
+    But you cannot swap them, e.g. if you were to apply AC the same way,
+    but apply `torch.compile` inside on attention and FFN sub-layers separately,
+    it would not work as expected.
 
 `torch.compile` works particularly well with AC in TorchTPU: during the (global)
 backward pass, each layer performs a small joint forward+backward pass (due to
 rematerialization), and because the TPU backend compiler (XLA) sees the whole
 joint forward+backward computation graph, it can do additional optimizations and
 even reduce memory usage for intermediate tensors.
-
+<!---->
 ## "Naive" FSDP
 
 In this example, we wanted to demonstrate the simplest possible way of doing
@@ -173,7 +173,7 @@ directly.
 
 > [!TIP]
 > For an even simpler description of this approach, take a look at our
-[manual FSDP example](../../examples/fsdp/manual).
+[manual FSDP example](https://github.com/google-pytorch/torch_tpu/tree/main/examples/fsdp/manual).
 
 We do FSDP by manually sharding all attention and FFN projection weights, e.g.:
 
@@ -223,7 +223,7 @@ computation overlap.
 
 > TODO: add detailed xprof trace of how XLA ends up overlapping
 collectives with computations here.
-
+<!---->
 ## Chunkwise fused LM head + cross-entropy loss
 
 The example by default uses local batch size 8 and sequence length 5120. If we
@@ -277,7 +277,7 @@ To take the most benefit from this approach, we even perform the backward pass
 on the chunk. In more recent versions of PyTorch, invoking `loss.backward()` no
 longer causes a graph-break, which permits TorchTPU's compiler (XLA) to perform
 more optimizations and fusions.
-
+<!---->
 ## What’s missing in this example
 
 This example illustrates only the basic training loop, and, for clarity, omits

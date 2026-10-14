@@ -12,25 +12,25 @@ deep learning. TPUs
 [vary in architecture](https://cloud.google.com/tpu/docs/system-architecture-tpu-vm)
 between generations, but broadly defined, a TPU Chip contains:
 
-*   One or more TensorCores, each of which is a single-threaded processor
-    comprising matrix-multiply units (MXUs), a vector unit (VPU), and a scalar
-    unit.
-*   One or more SparseCores, which are specialized for sparse operations and to
-    which the TensorCore can offload operations.
-*   A large High Bandwidth Memory (HBM) – 288 GB at 8.6 TB/s in
-    [TPU 8i](https://cloud.google.com/blog/products/compute/tpu-8t-and-tpu-8i-technical-deep-dive)
-    which can be used to store ML data and share that with the CPU.
-*   Bidirectional Inter-Chip Interconnect (ICI) – 19.2 TBps in
-    [TPU 8t and 8i](https://blog.google/innovation-and-ai/infrastructure-and-cloud/google-cloud/eighth-generation-tpu-agentic-era/),
-    allowing fast communication between TPU chips within user-configured
-    [TPU Slices](https://docs.cloud.google.com/tpu/docs/system-architecture-tpu-vm#slices),
-    which are logical subgroups of a
-    [TPU Pod](https://cloud.google.com/tpu/docs/system-architecture-tpu-vm#tpu-pod),
-    comprising of a preconfigured number of TPU chips connected in a 3D torus
-    (for TPU 7, TPUv 8t) or Boardfly (TPU 8i and TPU v8tx) configuration.
-*   Bidirectional Data-Center-Network (DCN) - 400 GBps in
-    [TPU 8t](https://blog.google/innovation-and-ai/infrastructure-and-cloud/google-cloud/eighth-generation-tpu-agentic-era/),
-    allowing communication between TPU chips across Slices.
+* One or more TensorCores, each of which is a single-threaded processor
+  comprising matrix-multiply units (MXUs), a vector unit (VPU), and a scalar
+  unit.
+* One or more SparseCores, which are specialized for sparse operations and to
+  which the TensorCore can offload operations.
+* A large High Bandwidth Memory (HBM) – 288 GB at 8.6 TB/s in
+  [TPU 8i](https://cloud.google.com/blog/products/compute/tpu-8t-and-tpu-8i-technical-deep-dive)
+  which can be used to store ML data and share that with the CPU.
+* Bidirectional Inter-Chip Interconnect (ICI) – 19.2 TBps in
+  [TPU 8t and 8i](https://blog.google/innovation-and-ai/infrastructure-and-cloud/google-cloud/eighth-generation-tpu-agentic-era/),
+  allowing fast communication between TPU chips within user-configured
+  [TPU Slices](https://docs.cloud.google.com/tpu/docs/system-architecture-tpu-vm#slices),
+  which are logical subgroups of a
+  [TPU Pod](https://cloud.google.com/tpu/docs/system-architecture-tpu-vm#tpu-pod),
+  comprising of a preconfigured number of TPU chips connected in a 3D torus (for
+  TPU 7, TPUv 8t) or Boardfly (TPU 8i and TPU v8tx) configuration.
+* Bidirectional Data-Center-Network (DCN) - 400 GBps in
+  [TPU 8t](https://blog.google/innovation-and-ai/infrastructure-and-cloud/google-cloud/eighth-generation-tpu-agentic-era/),
+  allowing communication between TPU chips across Slices.
 
 TPUs are programmed with the [XLA compiler](https://github.com/openxla/xla)
 stack through two different entry points:
@@ -54,7 +54,7 @@ produces a new value (at least conceptually). This is particularly significant
 for TorchTPU, which provides familiar Pytorch "view" semantics, including
 mutations, through view decomposition and inversion. The XLA compiler assumes
 that tensor shapes are known at compile time. This constraint is relaxed in
-TorchTPU by [bounded dynamism](./3_practical_examples_6_bounded_dynamism.md).
+TorchTPU by [bounded dynamism](./2_in_depth_6_dynamic_shapes.md).
 Recognizing this as a limitation for PyTorch workloads, we have been adding
 support for bounded dynamism, i.e., when the maximum bounds of a shape's
 dimensions are known at compile time, but the actual dimensions are known only
@@ -117,11 +117,10 @@ compiler to perform significant fusion of operations to more effectively utilize
 the hardware. When TorchTPU receives a callback invocation from the PyTorch
 dispatcher the runtime:
 
-*   Creates a Deferred Op instance that contains:
-    *   A StableHLO builder object, which when invoked returns a StableHLO
-        function implementing the semantics of `aten::mul`, as shown below (note
-        that any implicit broadcasting and dtype promotion are handled
-        elsewhere)
+* Creates a Deferred Op instance that contains:
+  * A StableHLO builder object, which when invoked returns a StableHLO function
+    implementing the semantics of `aten::mul`, as shown below (note that any
+    implicit broadcasting and dtype promotion are handled elsewhere)
 
 ```
 func.func @main(%arg0: tensor<4x16xbfloat16>, %arg1: tensor<4x16xbfloat16>) -> tensor<4x16xbfloat16> {
@@ -130,23 +129,23 @@ func.func @main(%arg0: tensor<4x16xbfloat16>, %arg1: tensor<4x16xbfloat16>) -> t
 }
 ```
 
-*   An optional map of static op parameters (e.g., training and momentum for
-    `aten::native_batch_norm`) to be used for the computation of a cache key;
-*   Return a new `at::Tensor` with `c10::StorageImpl` pointing (through
-    indirection) to that Deferred Op instance.
+* An optional map of static op parameters (e.g., training and momentum for
+  `aten::native_batch_norm`) to be used for the computation of a cache key;
+* Return a new `at::Tensor` with `c10::StorageImpl` pointing (through
+  indirection) to that Deferred Op instance.
 
 Upon reaching an appropriate synchronization point, dependent on the execution
 mode, TorchTPU will:
 
-*   Analyze the region of ops;
-*   Determine which ops to materialize into executable code;
-*   Create a compilation cache key for the graph;
-*   If it already exists in the cache, fetch and dispatch the executable on the
-    TPU;
-*   If it does not exist in the cache, asynchronously compile the object, add it
-    to the cache and dispatch for execution;
-*   Potentially wait for the value to be ready and copy it back, if that was
-    appropriate for the synchronization point reached.
+* Analyze the region of ops;
+* Determine which ops to materialize into executable code;
+* Create a compilation cache key for the graph;
+* If it already exists in the cache, fetch and dispatch the executable on the
+  TPU;
+* If it does not exist in the cache, asynchronously compile the object, add it
+  to the cache and dispatch for execution;
+* Potentially wait for the value to be ready and copy it back, if that was
+  appropriate for the synchronization point reached.
 
 We discuss mode details on the various modes of execution in
 [TorchTPU execution model](./2_in_depth_3_torchtpu_execution_modes.md).
@@ -156,17 +155,17 @@ We discuss mode details on the various modes of execution in
 To avoid unnecessary compilations, TorchTPU employs a multi-tiered compilation
 cache:
 
-*   **Tier 1:** Process-local in-memory cache for sharing compilation within the
-    same process. This is the fastest of the three tiers. It is always enabled.
-*   **Tier 2:** Machine-local shared memory that enables cross-process sharing
-    on the same host. This is useful for multi-device training/inference. Tier-2
-    is enabled by default for distributed programs, but for single-device
-    programs it offers no benefit so is disabled.
-*   **Tier 3:** Persistent cache backed by a remote file system (e.g., Google
-    Cloud Storage), allowing reuse across hosts, programs, and job restarts.
-    This is useful when running TPU programs in execution environments like
-    Colab and data centers. This is disabled by default but can be enabled by
-    specifying a storage location.
+* **Tier 1:** Process-local in-memory cache for sharing compilation within the
+  same process. This is the fastest of the three tiers. It is always enabled.
+* **Tier 2:** Machine-local shared memory that enables cross-process sharing on
+  the same host. This is useful for multi-device training/inference. Tier-2 is
+  enabled by default for distributed programs, but for single-device programs it
+  offers no benefit so is disabled.
+* **Tier 3:** Persistent cache backed by a remote file system (e.g., Google
+  Cloud Storage), allowing reuse across hosts, programs, and job restarts. This
+  is useful when running TPU programs in execution environments like Colab and
+  data centers. This is disabled by default but can be enabled by specifying a
+  storage location.
 
 Each entry is a compiled TPU executable representing a StableHLO computation
 graph generated from an ATen op or a sequence of ATen ops. The StableHLO graphs
@@ -179,8 +178,7 @@ the TPU hardware, libtpu, and the PjRt runtime.
 To maintain a user experience consistent with other hardware supporting
 `torch.compile()` we register a new TorchDynamo
 [backend](https://docs.pytorch.org/docs/stable/torch.compiler_custom_backends.html),
-which can be used as follows: `compiled_model = torch.compile(model,
-backend="tpu")`.
+which can be used as follows: `compiled_model = torch.compile(model, backend="tpu")`.
 
 Dynamo invokes the TorchTPU backend by passing `torch.fx.GraphModule` plus a
 list of example input tensors. At that point the runtime traces the provided
@@ -194,9 +192,9 @@ compiler stack that has developed alongside the TPU architecture.
 
 In the following documents we'll go into more detail about the:
 
-*   [Memory model](./2_in_depth_2_torchtpu_and_tpu_memory_model.md) supported by
-    the TPU and what its implications are on PyTorch;
-*   The [Execution Modes](./2_in_depth_3_torchtpu_execution_modes.md) TorchTPU
-    supports;
-*   Support for [custom kernels](./2_in_depth_4_custom_kernels.md);
-*   [Distributed execution](./2_in_depth_5_distributed.md) on clusters of TPUs.
+* [Memory model](./2_in_depth_2_torchtpu_and_tpu_memory_model.md) supported by
+  the TPU and what its implications are on PyTorch;
+* The [Execution Modes](./2_in_depth_3_torchtpu_execution_modes.md) TorchTPU
+  supports;
+* Support for [custom kernels](./2_in_depth_4_custom_kernels.md);
+* [Distributed execution](./2_in_depth_5_distributed.md) on clusters of TPUs.

@@ -22,7 +22,7 @@ In this guide, you will learn:
 3.  **Manual FSDP**: putting collectives directly in the model definition.
 4.  **Best practices** that apply to every approach.
 5.  **Running the examples**: launch commands and what each example checks.
-
+<!---->
 ## 1. Choosing an FSDP approach
 
 On TPU, performance comes from compiling the whole training step into a single
@@ -51,7 +51,7 @@ compiled.
 For a side-by-side comparison of compiled FSDPv2 and compiled SimpleFSDP, see
 the
 [FSDPv2 to SimpleFSDP tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/fsdp/fsdp_to_simple_fsdp/fsdp_to_simple_fsdp.md).
-
+<!---->
 ## 2. Recommended: SimpleFSDP
 
 [`simple_fsdp`](https://github.com/google-pytorch/torch_tpu/blob/main/examples/fsdp/simple_fsdp.py)
@@ -73,7 +73,7 @@ To learn how to use SimpleFSDP, see:
     quick start and available options.
 *   [FSDPv2 to SimpleFSDP tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/fsdp/fsdp_to_simple_fsdp/fsdp_to_simple_fsdp.md):
     how to migrate existing `fully_shard` code.
-
+<!---->
 ## 3. Alternative: Manual FSDP
 
 If you control the model definition, you can write FSDP directly with manual
@@ -88,7 +88,7 @@ definition.
 
 To learn how to implement manual FSDP, see the
 [manual FSDP guide](https://github.com/google-pytorch/torch_tpu/blob/main/examples/fsdp/manual/manual_fsdp.md).
-
+<!---->
 ## 4. Best practices
 
 These recommendations apply to SimpleFSDP and manual FSDP.
@@ -125,7 +125,7 @@ These recommendations apply to SimpleFSDP and manual FSDP.
     retained across the forward-backward boundary. The examples include a parity
     check (`fsdp_to_simple_fsdp_worker.py`) and a memory test
     (`manual_fsdp_memory_test.py`).
-
+<!---->
 ## 5. Running the examples
 
 Each example comes with a launcher script that runs on 8 TPU cores (for example,

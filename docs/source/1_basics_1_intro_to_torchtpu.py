@@ -31,7 +31,9 @@ def _(mo):
   mo.md(r"""
     # Introduction to TorchTPU
 
-    TorchTPU is an open-source, native PyTorch backend for [Google Cloud TPUs](https://cloud.google.com/tpu), developed in collaboration between Google and the PyTorch team at Meta. With TorchTPU, you can run existing PyTorch models on TPU hardware with minimal code changes and scale training and inference workloads from a single chip to multi-slice TPU pods.
+    [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-pytorch/torch_tpu/blob/main/docs/notebooks/1_basics_1_intro_to_torchtpu.ipynb)
+
+    TorchTPU is an open-source, native PyTorch backend for [Google Cloud TPUs](https://cloud.google.com/tpu), developed in collaboration between Google and Meta. With TorchTPU, you can run existing PyTorch models on TPU hardware with minimal code changes and scale training and inference workloads from a single chip to multi-slice TPU pods.
 
     ## Why use TorchTPU
 
@@ -88,7 +90,7 @@ def _(mo):
       * `torch.compile` sets `dynamic=False` by default on TorchTPU. `dynamic=None` or `dynamic=True` are not yet supported for production. [See discussion on dynamic shapes](./2_in_depth_6_dynamic_shapes.md)
       * As example, running decode/generate step on Hugging Face LLMs will involve recompilations at each step unless bounded dynamism is enabled.
     * View ops may be expensive on TPU. See [TorchTPU memory model](./2_in_depth_2_torchtpu_and_tpu_memory_model.md)
-    * MPMD with collectives is supported for functionality, but it will not reach peak performance yet. Collective overlap with compute has [some constraints](./2_in_depth_5_distributed.md):
+    * MPMD with collectives is supported for functionality, but it will not reach peak performance yet. Collective overlap with compute has [some constraints](./2_in_depth_6_distributed.md):
       * Full stream support with offload will come in the near future.
       * Use SimpleFSDP with `torch.compile()` as opposed to FSDPv2 with eager or `torch.compile` mode [FSDP best practices](./3_practical_examples_3_fsdp_best_practices.md)
       * Use the `spmd_safe` decorator on regions **users guarantee** to be exactly the same is the recommended way to get peak performance from XLA optimizations on communicating modules

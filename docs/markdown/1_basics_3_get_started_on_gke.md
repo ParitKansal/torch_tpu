@@ -4,16 +4,14 @@ torch_tpu_version: 0.1.1.dev20260922
 
 # Get started with TorchTPU on GKE
 
-This tutorial walks through running PyTorch workloads on a Google Kubernetes
-Engine (GKE) TPU cluster in three parts:
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-pytorch/torch_tpu/blob/main/docs/notebooks/1_basics_3_get_started_on_gke.ipynb)
 
-1.  **Run a simple single-device example**
-    (`examples/simple_pytorch/simple_pytorch.py`) as a Kubernetes `Job`.
-2.  **Run a multi-device distributed example**
-    (`examples/tensor_parallel/manual/tp_worker.py`) on a single 4-chip host
-    (`Job`) and across a multi-host 64-chip slice (`JobSet`).
-3.  **Run an upstream PyTorch example** from
-    [`pytorch/examples`](https://github.com/pytorch/examples) (such as MNIST).
+This tutorial walks through running PyTorch workloads on a Google
+Kubernetes Engine (GKE) TPU cluster in three parts:
+
+1.  **Run a simple single-device example** (`examples/simple_pytorch/simple_pytorch.py`) as a Kubernetes `Job`.
+2.  **Run a multi-device distributed example** (`examples/tensor_parallel/manual/tp_worker.py`) on a single 4-chip host (`Job`) and across a multi-host 64-chip slice (`JobSet`).
+3.  **Run an upstream PyTorch example** from [`pytorch/examples`](https://github.com/pytorch/examples) (such as MNIST).
 
 We assume you already have a GKE Standard cluster with a TPU node pool; see
 [Deploy TPU workloads in GKE Standard](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/tpus)
@@ -55,21 +53,23 @@ for details.
 
 ## Submit workloads with kubectl
 
-Workloads are submitted as standard Kubernetes `Job` or `JobSet` manifests. The
-Python example scripts are already pre-installed inside the public container
-image at `/workspace/examples/`, while the reference Kubernetes `.yaml`
-manifests (`examples/simple_pytorch/torchtpu_singledevice_slice_job.yaml`,
+Workloads are submitted as standard Kubernetes `Job` or `JobSet` manifests.
+The Python example scripts are already pre-installed inside the public
+container image at `/workspace/examples/`, while the reference Kubernetes
+`.yaml` manifests
+(`examples/simple_pytorch/torchtpu_singledevice_slice_job.yaml`,
 `examples/tensor_parallel/torchtpu_singlehost_slice_job.yaml`, and
 `examples/tensor_parallel/torchtpu_multihost_slice_jobset.yaml`) live in the
-`examples/` directory of the TorchTPU repository. Run the `sed` and `kubectl
-apply` commands below from the root of a local `torch_tpu` repository checkout.
+`examples/` directory of the TorchTPU repository. Run the `sed` and
+`kubectl apply` commands below from the root of a local `torch_tpu`
+repository checkout.
 
 ## Run a single-device workload (one TensorCore of a 4-chip host)
 
 The manifest `examples/simple_pytorch/torchtpu_singledevice_slice_job.yaml`
-reserves one host with 4 TPU v7x chips. Each v7x chip has two TensorCores, and
-TorchTPU exposes each TensorCore as one device, so the host has 8 TPU devices
-and its slice topology is `2x2x1`:
+reserves one host with 4 TPU v7x chips. Each v7x chip has two TensorCores,
+and TorchTPU exposes each TensorCore as one device, so the host has 8 TPU
+devices and its slice topology is `2x2x1`:
 
 ```yaml
     cloud.google.com/gke-tpu-slice-topology: 2x2x1
@@ -77,10 +77,10 @@ and its slice topology is `2x2x1`:
     cloud.google.com/gke-tpu-topology: 2x2x1
 ```
 
-The example runs a single process on a single TPU device (one TensorCore) and
-leaves the other 7 devices on the host idle. This is expressed as a `1x1x1x1`
-TorchTPU topology, where the fourth number is the number of TensorCores per chip
-that the job uses:
+The example runs a single process on a single TPU device (one TensorCore)
+and leaves the other 7 devices on the host idle. This is expressed as a
+`1x1x1x1` TorchTPU topology, where the fourth number is the number of
+TensorCores per chip that the job uses:
 
 ```yaml
     - name: TORCH_TPU_TOPOLOGY
@@ -107,7 +107,7 @@ The container runs `simple_pytorch.py`, which ships in the image under
 
 This is the whole program:
 
-```python
+```python {.marimo}
 import torch
 
 device = torch.device("tpu")  # Change from cuda to tpu
@@ -150,21 +150,21 @@ The job runs to completion and prints the four lines shown above.
 
 ### Single host, multiple chips (4 chips / 8 devices on one host)
 
-The first step up from the single-device example is to use every TPU device on
-one host. Submit a single-host Kubernetes `Job` by first updating the manifest
-with your Docker image and node pool name and then launching the job using
-`kubectl`.
+The first step up from the single-device example is to use every TPU
+device on one host. Submit a single-host Kubernetes `Job` by first updating
+the manifest with your Docker image and node pool name and then launching
+the job using `kubectl`.
 
 The manifest `examples/tensor_parallel/torchtpu_singlehost_slice_job.yaml`
-applies to a single host of 4 v7x TPUs (8 TensorCores), so the slice topology is
-`2x2x1`:
+applies to a single host of 4 v7x TPUs (8 TensorCores), so the slice
+topology is `2x2x1`:
 
 ```yaml
     cloud.google.com/gke-tpu-slice-topology: 2x2x1
 ```
 
-TorchTPU interprets this as a `2x2x1x2` topology because it launches one process
-per TPU TensorCore:
+TorchTPU interprets this as a `2x2x1x2` topology because it launches one
+process per TPU TensorCore:
 
 ```yaml
     - name: TORCH_TPU_TOPOLOGY
@@ -188,9 +188,10 @@ It runs the manual tensor-parallel example from the Docker image:
       echo "=== Single-Host 4-Chip Workload Completed Successfully ==="
 ```
 
-`examples/tensor_parallel/manual/launch_singlehost.sh` detects the TPU topology,
-exports it, and starts one process per TPU device with `torch.distributed.run`
-(`torchrun`) running `examples/tensor_parallel/manual/tp_worker.py`:
+`examples/tensor_parallel/manual/launch_singlehost.sh` detects the TPU
+topology, exports it, and starts one process per TPU device with
+`torch.distributed.run` (`torchrun`) running
+`examples/tensor_parallel/manual/tp_worker.py`:
 
 ```bash
 # Detect and export TPU configuration dynamically.
@@ -220,11 +221,11 @@ kubectl get job,pods -n default
 
 ### Multiple hosts (64 chips / 128 devices across 16 hosts)
 
-To scale past one host, the same example runs as a Kubernetes `JobSet`: one pod
-per host, 16 hosts for a `4x4x4` slice, with
-`examples/tensor_parallel/manual/launch_multihost.sh` deriving each host's rank
-from its position in the slice. Update the manifest with your Docker image and
-64-chip node pool name and apply it with `kubectl`:
+To scale past one host, the same example runs as a Kubernetes `JobSet`:
+one pod per host, 16 hosts for a `4x4x4` slice, with
+`examples/tensor_parallel/manual/launch_multihost.sh` deriving each host's
+rank from its position in the slice. Update the manifest with your Docker
+image and 64-chip node pool name and apply it with `kubectl`:
 
 ```bash
 sed -i "s|<DOCKER_IMAGE>|${DOCKER_IMAGE}|g" examples/tensor_parallel/torchtpu_multihost_slice_jobset.yaml
@@ -241,15 +242,14 @@ kubectl get jobset,pods -n default
 ## Run an upstream PyTorch example
 
 Because TorchTPU is a native PyTorch backend (`device="tpu"`,
-`torch.accelerator`, distributed `backend="tpu_dist"`), you can pull and run
-standard scripts from the upstream
-[`pytorch/examples`](https://github.com/pytorch/examples) repository directly on
-GKE.
+`torch.accelerator`, distributed `backend="tpu_dist"`), you can pull and
+run standard scripts from the upstream
+[`pytorch/examples`](https://github.com/pytorch/examples) repository
+directly on GKE.
 
 ### Example: Running upstream MNIST on GKE
 
-The upstream
-[`pytorch/examples/mnist`](https://github.com/pytorch/examples/tree/main/mnist)
+The upstream [`pytorch/examples/mnist`](https://github.com/pytorch/examples/tree/main/mnist)
 training script (`mnist/main.py`) uses PyTorch's device-agnostic
 `torch.accelerator` API:
 
@@ -271,9 +271,9 @@ To run `mnist/main.py` on a single TPU device on GKE starting from
     `examples/simple_pytorch/torchtpu_singledevice_slice_job.yaml` to install
     `git`, clone
     [`https://github.com/pytorch/examples.git`](https://github.com/pytorch/examples),
-    keep `DataLoader` `num_workers` at its default (`0`) so it does not fork a
-    worker subprocess that attempts to re-acquire the `libtpu` device lockfile,
-    and run `mnist/main.py`:
+    keep `DataLoader` `num_workers` at its default (`0`) so it does not fork
+    a worker subprocess that attempts to re-acquire the `libtpu` device
+    lockfile, and run `mnist/main.py`:
 
     ```yaml
       command:
@@ -290,8 +290,8 @@ To run `mnist/main.py` on a single TPU device on GKE starting from
     ```
 
 2.  **Delete any previous run of the job** (since Kubernetes `Job` specs are
-    immutable once created), patch the placeholders if needed, apply the updated
-    manifest, and stream the MNIST training logs:
+    immutable once created), patch the placeholders if needed, apply the
+    updated manifest, and stream the MNIST training logs:
 
     ```bash
     kubectl delete -f examples/simple_pytorch/torchtpu_singledevice_slice_job.yaml --ignore-not-found
@@ -303,8 +303,8 @@ To run `mnist/main.py` on a single TPU device on GKE starting from
 
 ### Choosing a manifest template for other upstream examples
 
-To run other single-device or distributed upstream examples, pick the reference
-manifest template matching your target topology:
+To run other single-device or distributed upstream examples, pick the
+reference manifest template matching your target topology:
 
 <!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
 | Workload Type | Manifest Path | TPU Topology (`gke-tpu-topology`) | `TORCH_TPU_TOPOLOGY` | Description |
@@ -315,8 +315,9 @@ manifest template matching your target topology:
 <!-- mdformat on -->
 
 To target other TPU slice topologies, update
-`cloud.google.com/gke-tpu-slice-topology`, `cloud.google.com/gke-tpu-topology`,
-and `TORCH_TPU_TOPOLOGY` in the manifest (see
+`cloud.google.com/gke-tpu-slice-topology`,
+`cloud.google.com/gke-tpu-topology`, and `TORCH_TPU_TOPOLOGY` in the
+manifest (see
 [TPU VM system architecture](https://docs.cloud.google.com/tpu/docs/system-architecture-tpu-vm)
 and
 [TPU machine types and topologies](https://docs.cloud.google.com/compute/docs/tpus/tpu-machines)).
@@ -327,14 +328,15 @@ Because TorchTPU is a native PyTorch backend, getting an upstream PyTorch
 example or test running on GKE is a minimal process:
 
 *   **No code changes needed for non-distributed examples**: Non-distributed
-    examples written for standard PyTorch devices (via `torch.accelerator` or
-    `torch.device`) work with TorchTPU without code changes.
+    examples written for standard PyTorch devices (via `torch.accelerator`
+    or `torch.device`) work with TorchTPU without code changes.
 *   **Non-deprecated examples are expected to work**: Actively maintained,
-    non-deprecated upstream PyTorch examples and modern APIs work out of the box
-    (see [Supported feature set](./6_reference_1_supported_feature_set.md) for
+    non-deprecated upstream PyTorch examples and modern APIs work out of
+    the box (see
+    [Supported feature set](6_reference_1_supported_feature_set.md) for
     details).
 *   **Distributed examples may need minor modifications**: Some upstream
     distributed examples are overtuned to other devices (such as GPU- or
     NCCL-specific backends, flags, or sharding assumptions) and may require
-    minor modifications to run on TPU (see the distributed sections above and
-    [FSDP best practices](./3_practical_examples_3_fsdp_best_practices.md)).
+    minor modifications to run on TPU (see the distributed sections above
+    and [FSDP best practices](3_practical_examples_3_fsdp_best_practices.md)).

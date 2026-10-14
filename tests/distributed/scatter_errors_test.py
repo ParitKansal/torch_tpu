@@ -14,107 +14,83 @@
 
 from absl.testing import absltest
 import torch
-from torch import distributed as dist
-import torch.multiprocessing as mp
 from torch_tpu._internal.distributed import multiprocessing
 from tests import error_testing as et
-from tests.distributed import distributed_utils
+from tests.distributed import continuous_test_utils
 
 
-def run_scatter_wrong_number_inputs(num_inputs: int) -> None:
-  """Runs scatter with number of inputs not equal to process group size."""
-  rank = dist.get_rank()
-  world_size = dist.get_world_size()
-  assert num_inputs != world_size
-  src_rank = 0
-  size = 5
-  output = torch.empty(size, device="tpu", dtype=torch.float32)
-  if rank == src_rank:
-    inputs = [
-        torch.zeros(size, device="tpu", dtype=torch.float32)
-        for _ in range(num_inputs)
-    ]
-    expected_msg = (
-        "distributed.scatter(): expected the number of input tensors on the"
-        f" root rank to be equal to the group size, got {num_inputs} tensors"
-        f" and {world_size} processes"
-    )
-    with et.assert_raises_message(RuntimeError, tpu=expected_msg):
-      torch.distributed.scatter(output, inputs, src=src_rank)
-  # Intentionally do NOT call scatter on non-root ranks.
-  # The root-rank validation error prevents scatter() from starting; calling
-  # scatter() on non-root ranks would block waiting for the root rank.
+class ScatterErrorsTest(
+    continuous_test_utils.TpuMultiProcContinuousTest,
+    et.TpuOnlyDistributedErrorTestBase,
+):
 
+  world_size = 8
 
-def run_scatter_wrong_shape_output(
-    input_shape: list[int],
-    output_shape: list[int],
-) -> None:
-  """Runs scatter with differently-shaped input and output tensors."""
-  rank = dist.get_rank()
-  world_size = dist.get_world_size()
-  assert input_shape != output_shape
-  src_rank = 0
-  output = torch.empty(output_shape, device="tpu", dtype=torch.float32)
-  if rank == src_rank:
-    inputs = [
-        torch.zeros(input_shape, device="tpu", dtype=torch.float32)
-        for _ in range(world_size)
-    ]
-    expected_msg = (
-        "distributed.scatter(): expected output tensor shape to match input"
-        f" tensor shape, got {output_shape} and {input_shape}"
-    )
-    with et.assert_raises_message(RuntimeError, tpu=expected_msg):
-      torch.distributed.scatter(output, inputs, src=src_rank)
-  # Intentionally do NOT call scatter on non-root ranks.
+  def test_scatter_wrong_number_inputs(self) -> None:
+    """Runs scatter with number of inputs not equal to process group size."""
+    num_inputs = 9
+    assert num_inputs != self.world_size
+    src_rank = 0
+    size = 5
+    output = torch.empty(size, device="tpu", dtype=torch.float32)
+    if self.rank == src_rank:
+      inputs = [
+          torch.zeros(size, device="tpu", dtype=torch.float32)
+          for _ in range(num_inputs)
+      ]
+      expected_msg = (
+          "distributed.scatter(): expected the number of input tensors on the"
+          f" root rank to be equal to the group size, got {num_inputs} tensors"
+          f" and {self.world_size} processes"
+      )
+      with et.assert_raises_message(RuntimeError, tpu=expected_msg):
+        torch.distributed.scatter(output, inputs, src=src_rank)
+    # Intentionally do NOT call scatter on non-root ranks.
+    # The root-rank validation error prevents scatter() from starting; calling
+    # scatter() on non-root ranks would block waiting for the root rank.
 
+  def test_scatter_wrong_shape_output(self) -> None:
+    """Runs scatter with differently-shaped input and output tensors."""
+    input_shape = [2, 3]
+    output_shape = [3, 3]
+    assert input_shape != output_shape
+    src_rank = 0
+    output = torch.empty(output_shape, device="tpu", dtype=torch.float32)
+    if self.rank == src_rank:
+      inputs = [
+          torch.zeros(input_shape, device="tpu", dtype=torch.float32)
+          for _ in range(self.world_size)
+      ]
+      expected_msg = (
+          "distributed.scatter(): expected output tensor shape to match input"
+          f" tensor shape, got {output_shape} and {input_shape}"
+      )
+      with et.assert_raises_message(RuntimeError, tpu=expected_msg):
+        torch.distributed.scatter(output, inputs, src=src_rank)
+    # Intentionally do NOT call scatter on non-root ranks.
 
-def run_scatter_mismatch_input_shapes(
-    shape: list[int],
-    mismatch_shape: list[int],
-) -> None:
-  """Runs scatter with one input having a different shape than the others."""
-  rank = dist.get_rank()
-  world_size = dist.get_world_size()
-  assert shape != mismatch_shape
-  src_rank = 0
-  output = torch.empty(shape, device="tpu", dtype=torch.float32)
-  if rank == src_rank:
-    inputs = [
-        torch.zeros(shape, device="tpu", dtype=torch.float32)
-        for _ in range(world_size)
-    ]
-    inputs[0] = torch.zeros(mismatch_shape, device="tpu", dtype=torch.float32)
-    expected_msg = (
-        "distributed.scatter(): failed to validate input tensors on root rank:"
-        f" expected all tensors to have the same shape, got {mismatch_shape}"
-        f" at index 0 and {shape} at index 1"
-    )
-    with et.assert_raises_message(RuntimeError, tpu=expected_msg):
-      torch.distributed.scatter(output, inputs, src=src_rank)
-  # Intentionally do NOT call scatter on non-root ranks.
-
-
-def run_scatter_errors() -> None:
-  dist.init_process_group(backend="tpu_dist")
-  world_size = dist.get_world_size()
-  run_scatter_wrong_number_inputs(num_inputs=world_size + 1)
-  run_scatter_wrong_shape_output(input_shape=[2, 3], output_shape=[3, 3])
-  run_scatter_mismatch_input_shapes(shape=[6, 2], mismatch_shape=[8, 6, 2])
-
-
-class ScatterErrorsTest(et.TpuOnlyDistributedErrorTestBase):
-
-  _world_size = distributed_utils.get_tpu_device_count()
-
-  def test_scatter_errors(self):
-    distributed_utils.dist_run(
-        nproc_per_node=self._world_size,
-        fn=run_scatter_errors,
-    )
+  def test_scatter_mismatch_input_shapes(self) -> None:
+    """Runs scatter with one input having a different shape than the others."""
+    shape = [6, 2]
+    mismatch_shape = [8, 6, 2]
+    assert shape != mismatch_shape
+    src_rank = 0
+    output = torch.empty(shape, device="tpu", dtype=torch.float32)
+    if self.rank == src_rank:
+      inputs = [
+          torch.zeros(shape, device="tpu", dtype=torch.float32)
+          for _ in range(self.world_size)
+      ]
+      inputs[0] = torch.zeros(mismatch_shape, device="tpu", dtype=torch.float32)
+      expected_msg = (
+          "distributed.scatter(): failed to validate input tensors on root"
+          " rank: expected all tensors to have the same shape, got"
+          f" {mismatch_shape} at index 0 and {shape} at index 1"
+      )
+      with et.assert_raises_message(RuntimeError, tpu=expected_msg):
+        torch.distributed.scatter(output, inputs, src=src_rank)
+    # Intentionally do NOT call scatter on non-root ranks.
 
 
 if __name__ == "__main__":
-  mp.set_start_method("spawn")
   multiprocessing.handle_test_main(absltest.main)

@@ -26,7 +26,6 @@ import torch
 from torch_tpu._internal import testing as tt_testing
 from torch_tpu._internal.device import _device_module
 from torch_tpu._internal.device import _device_ops_backend
-from tests import oss_utils
 from tests import seed_test_utils
 
 _DEVICE_LOCK: Final[threading.Lock] = threading.Lock()
@@ -109,11 +108,6 @@ class DeviceModuleBase(
     self.assertIn("reserved_bytes.all.current", stats)
     self.assertIn("reserved_bytes.all.peak", stats)
 
-  @oss_utils.skip_if_libtpu_version(
-      lambda v: v < (0, 0, 42),
-      "TODO(b/565506249): Requires libtpu >= 0.0.42 for"
-      " reset_peak_memory_stats.",
-  )
   def test_reset_memory_stats(self):
     """Tests that resetting memory stats works correctly."""
     # 1. Reset stats to establish a clean baseline where peak == current
@@ -146,11 +140,6 @@ class DeviceModuleBase(
     max_allocated_after_reset = torch.accelerator.max_memory_allocated()
     self.assertEqual(max_allocated_after_reset, allocated_after_free)
 
-  @oss_utils.skip_if_libtpu_version(
-      lambda v: v < (0, 0, 42),
-      "TODO(b/565506249): Requires libtpu >= 0.0.42 for"
-      " reset_peak_memory_stats.",
-  )
   def test_memory_allocation(self):
     """Tests that memory allocation works with the device."""
     torch.accelerator.reset_peak_memory_stats()

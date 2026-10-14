@@ -146,8 +146,6 @@ Value NormalizeLaneDim(ImplicitLocOpBuilder& builder, Value input,
                        int64_t target_lane_size);
 
 // Create a log2 operation.
-// For older versions of libtpu that do not support the log2 op we will use a
-// scaled ln operation.
 Value CreateLog2(ImplicitLocOpBuilder& b, Value input);
 
 // Dropout needs a single Mosaic `scalar_prefetch` operand: a 4-word SMEM buffer

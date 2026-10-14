@@ -27,7 +27,6 @@ from torch_tpu._internal.compile import scan as tpu_scan
 from torch_tpu._internal.compile import tpu_torch_compile
 from torch_tpu._internal.compile.debug import TpuCompileDebug
 from torch_tpu._internal.utils import test_utils as utils
-from tests import oss_utils
 from tests import seed_test_utils
 
 try:
@@ -973,12 +972,6 @@ class AssociativeScanOpTest(seed_test_utils.RepeatableTest):
   @parameterized.named_parameters(
       ("forward_dim_neg1", False, -1),
       ("reverse_dim1", True, 1),
-  )
-  # `BuildScanShlo` falls back to `stablehlo.while` when libtpu predates the
-  # native scan emitter (`kMinLibtpuVersionWithNativeScan`).
-  @oss_utils.skip_if_libtpu_version(
-      lambda v: v < (0, 0, 44),
-      "native chlo.scan lowering requires libtpu >= 0.0.44",
   )
   def test_associative_scan_lowers_to_chlo_scan_without_transpose(
       self, reverse, dim

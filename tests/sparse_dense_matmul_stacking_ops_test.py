@@ -19,6 +19,7 @@ from absl.testing import parameterized
 import torch
 import torch.nn.functional as F
 from tests import op_testing
+from tests import oss_utils
 
 
 def reference_interleave_gradients(
@@ -221,6 +222,10 @@ class SparseDenseMatmulStackingOpsTest(op_testing.TorchTpuTestBase):
       (False, [8, 12], 16),
       (True, [8, 12], 16),
   )
+  @oss_utils.skip_if_libtpu_version(
+      lambda v: v < (0, 0, 51),
+      "Requires libtpu >= 0.0.51 for SparseCore layout support.",
+  )
   def test_sparse_dense_matmul_activation_unstack_on_tpu(
       self,
       compile_op: bool,
@@ -270,6 +275,10 @@ class SparseDenseMatmulStackingOpsTest(op_testing.TorchTpuTestBase):
       (False, [8, 12], 16),
       (True, [8, 12], 16),
   )
+  @oss_utils.skip_if_libtpu_version(
+      lambda v: v < (0, 0, 51),
+      "Requires libtpu >= 0.0.51 for SparseCore layout support.",
+  )
   def test_sparse_dense_matmul_gradient_stack_on_tpu(
       self,
       compile_op: bool,
@@ -313,6 +322,10 @@ class SparseDenseMatmulStackingOpsTest(op_testing.TorchTpuTestBase):
   @parameterized.parameters(
       ([8, 16], 16),
       ([8, 12], 16),
+  )
+  @oss_utils.skip_if_libtpu_version(
+      lambda v: v < (0, 0, 51),
+      "Requires libtpu >= 0.0.51 for SparseCore layout support.",
   )
   def test_unstack_stack_autograd_flow_on_tpu(
       self,
@@ -370,6 +383,10 @@ class SparseDenseMatmulStackingOpsTest(op_testing.TorchTpuTestBase):
   @parameterized.parameters(
       ([8, 16], 16),
       ([8, 12], 16),
+  )
+  @oss_utils.skip_if_libtpu_version(
+      lambda v: v < (0, 0, 51),
+      "Requires libtpu >= 0.0.51 for SparseCore layout support.",
   )
   def test_unstack_autograd_partial_output_gradient(
       self,

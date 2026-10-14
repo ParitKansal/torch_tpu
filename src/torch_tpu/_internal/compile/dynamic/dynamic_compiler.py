@@ -36,7 +36,6 @@ from torch_tpu._internal.compile.dynamic.graph_transformations import apply_pre_
 from torch_tpu._internal.compile.dynamic.output_sym_shape import create_output_sym_shapes
 from torch_tpu._internal.compile.dynamic.sym_bounds_manager import SymBoundsManager
 from torch_tpu._internal.compile.dynamic.symbol_bounds import SymbolBounds
-from torch_tpu._internal.utils import utils
 
 
 def _create_bounded_model_inputs(
@@ -99,9 +98,6 @@ def _can_use_pad_real_to_static(
     example_inputs: Sequence[Any],
 ) -> bool:
   """Returns True if dynamic input tensors can be lowered to pad_real_to_static."""
-  libtpu = utils.libtpu_version()
-  if libtpu is not None and libtpu < (0, 0, 49):
-    return False
   for arg in example_inputs:
     # dtype.itemsize is the element size in bytes (8 bytes = 64-bit,
     # 16 bytes = 128-bit).

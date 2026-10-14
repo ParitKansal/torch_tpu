@@ -34,7 +34,6 @@ from torch_tpu._internal.compile.dynamic import graph_transformations
 from torch_tpu._internal.compile.dynamic import sym_bounds_manager
 from torch_tpu._internal.compile.dynamic import view_ops_passes
 from torch_tpu._internal.utils import test_utils as utils
-from tests import oss_utils
 from tests import seed_test_utils
 
 def _compile_bd(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -425,10 +424,6 @@ class ReplaceDynamicOutputBroadcastOpsPreGradPassTest(
     )
 
 
-@oss_utils.skip_if_libtpu_version(
-    lambda v: v < (0, 0, 47),
-    "Bounded dynamism requires libtpu >= 0.0.47",
-)
 class BoundedDynamicSliceTest(seed_test_utils.RepeatableTest):
   """End-to-end TPU tests for slice-like ops on bounded dynamic dimensions."""
 

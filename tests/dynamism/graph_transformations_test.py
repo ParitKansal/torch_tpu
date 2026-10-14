@@ -17,16 +17,13 @@
 from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
-from unittest import mock
 from absl.testing import absltest
 import torch
 from torch._dynamo.backends.common import aot_autograd
-from torch_tpu._internal.compile.dynamic import dynamic_compiler
 from torch_tpu._internal.compile.dynamic import graph_transform_context
 from torch_tpu._internal.compile.dynamic import graph_transformations
 from torch_tpu._internal.compile.dynamic import sym_bounds_manager
 from torch_tpu._internal.compile.dynamic import view_ops_passes
-from torch_tpu._internal.utils import utils
 from tests import seed_test_utils
 
 
@@ -351,15 +348,6 @@ class GraphTransformationsTest(seed_test_utils.RepeatableTest):
         )
     )
     self.assertLen(dynamic_reshape_nodes, 1)
-
-  def test_can_use_pad_real_to_static_libtpu_version(self):
-    t = torch.ones(4, dtype=torch.float32)
-    with mock.patch.object(utils, "libtpu_version", return_value=(0, 0, 48)):
-      self.assertFalse(dynamic_compiler._can_use_pad_real_to_static([t]))  # pylint: disable=protected-access
-    with mock.patch.object(utils, "libtpu_version", return_value=(0, 0, 49)):
-      self.assertTrue(dynamic_compiler._can_use_pad_real_to_static([t]))  # pylint: disable=protected-access
-    with mock.patch.object(utils, "libtpu_version", return_value=None):
-      self.assertTrue(dynamic_compiler._can_use_pad_real_to_static([t]))  # pylint: disable=protected-access
 
   def _capture_dynamic_stride_view_graph(
       self, make_view: Callable[[int], torch.Tensor]

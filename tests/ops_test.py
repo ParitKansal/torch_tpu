@@ -2652,23 +2652,9 @@ class TestOps(op_testing.OpInfoTestBase):
             "gpu": INTEGRAL_DTYPES + (torch.half, torch.bfloat16),
         },
         # TODO(b/495521055): linalg.inv fails with complex64 with compile.
-        # Note: F64 LuDecomposition requires libtpu >= 0.0.42. We must filter
-        # float64 via skip_if (evaluated after golden lookup) rather than
-        # adding torch.float64 to exclude_dtypes["gpu"], because
-        # exclude_dtypes["gpu"] alters the candidate dtypes passed to
-        # find_cast_pairs(), shifting illegal_pair from (complex64, float64) to
-        # (complex64, float32) which is not present in the recorded GPU golden
-        # files.
         skip_if=lambda device, variant, op_input: (
-            (
-                op_testing.is_compiled_mode()
-                and op_input.input_value.dtype in COMPLEX_DTYPES
-            )
-            or (
-                op_input.input_value.dtype == torch.float64
-                and (libtpu := test_utils.libtpu_version()) is not None
-                and libtpu < (0, 0, 42)
-            )
+            op_testing.is_compiled_mode()
+            and op_input.input_value.dtype in COMPLEX_DTYPES
         ),
     )
 

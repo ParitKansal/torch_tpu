@@ -110,9 +110,9 @@ class HandleDynamicInputTensorPass:
 class HandleDynamicInputTensorSetDimensionSizePass:
   """Dynamic input tensor transformation pass using set_dimension_logical_size.
 
-  Used when PadRealToStatic cannot be used (e.g., libtpu < 0.0.49 or when any
-  dynamic input tensor is 64-bit/128-bit, as XLA does not support rewriting
-  64-bit/128-bit element types for PadRealToStatic).
+  Used when PadRealToStatic cannot be used (e.g., when any dynamic input tensor
+  is 64-bit/128-bit, as XLA does not support rewriting 64-bit/128-bit element
+  types for PadRealToStatic).
   """
 
   def __init__(

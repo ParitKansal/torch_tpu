@@ -37,7 +37,6 @@ torch_tpu_py_test(
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/compile:tpu_backend",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:oss_utils",
         "//tests:seed_test_utils",
     ],
 )
@@ -45,7 +44,6 @@ torch_tpu_py_test(
 torch_tpu_py_test(
     name = "multi_bucket_compile_test",
     srcs = ["multi_bucket_compile_test.py"],
-    notest_oss = True,  # NOTEST_OSS_OK=OSS needs to be updated with the latest libtpu release for bounded dynamism.
     tags = [
         "requires-tpu-v5lite",
     ],
@@ -70,7 +68,6 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:oss_utils",
         "//tests:seed_test_utils",
     ],
 )
@@ -86,7 +83,6 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:oss_utils",
         "//tests:seed_test_utils",
     ],
 )
@@ -107,7 +103,6 @@ torch_tpu_py_test(
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/compile/dynamic:view_decomposition",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:oss_utils",
         "//tests:seed_test_utils",
     ],
 )
@@ -170,12 +165,10 @@ torch_tpu_py_test(
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
-        "//src/torch_tpu/_internal/compile/dynamic:dynamic_compiler",
         "//src/torch_tpu/_internal/compile/dynamic:graph_transform_context",
         "//src/torch_tpu/_internal/compile/dynamic:graph_transformations",
         "//src/torch_tpu/_internal/compile/dynamic:sym_bounds_manager",
         "//src/torch_tpu/_internal/compile/dynamic:view_ops_passes",
-        "//src/torch_tpu/_internal/utils",
         "//tests:seed_test_utils",
     ],
 )
@@ -192,7 +185,6 @@ torch_tpu_py_test(
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/compile:tpu_backend",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:oss_utils",
         "//tests:seed_test_utils",
     ],
 )
@@ -228,7 +220,6 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/compile/dynamic:sym_bounds_manager",
         "//src/torch_tpu/_internal/compile/dynamic:view_ops_passes",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:oss_utils",
         "//tests:seed_test_utils",
     ],
 )

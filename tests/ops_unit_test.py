@@ -104,10 +104,6 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
           ("addcmul", lambda s, t1, t2: torch.addcmul(s, t1, t2, value=3.14)),
       ],
   )
-  @oss_utils.skip_if_libtpu_version(
-      lambda v: v < (0, 0, 47),
-      "TODO(b/565506249): Requires libtpu >= 0.0.47.",
-  )
   def test_dynamic_float64_elementwise_and_fused_ops(self, dtype, op_fn):
     """Tests dynamic shapes for float64 (and f32 baseline) ops.
 
@@ -12961,10 +12957,6 @@ module {
     expected = x.cpu()[1:3, 2:5]
     self.assert_close(golden_result=expected, torch_tpu_result=out.cpu())
 
-  @oss_utils.skip_if_libtpu_version(
-      lambda v: v < (0, 0, 49),
-      "PadRealToStatic with dynamic dimensions requires libtpu >= 0.0.49.",
-  )
   def test_pad_real_to_static_with_mlir_on_tpu(self):
     """Tests the PadRealToStatic custom call on TPU using direct MLIR."""
 
@@ -13034,10 +13026,6 @@ module {
     )
 
   @parameterized.parameters(64, 128)
-  @oss_utils.skip_if_libtpu_version(
-      lambda v: v < (0, 0, 49),
-      "PadRealToStatic with dynamic dimensions requires libtpu >= 0.0.49.",
-  )
   def test_pad_real_to_static_kv_cache_multi_layout_execution_on_tpu(
       self, head_dim
   ):
@@ -13146,10 +13134,6 @@ module {{
           torch_tpu_result=current_key.cpu(),
       )
 
-  @oss_utils.skip_if_libtpu_version(
-      lambda v: v < (0, 0, 49),
-      "PadRealToStatic with dynamic dimensions requires libtpu >= 0.0.49.",
-  )
   def test_pad_real_to_static_dynamic_dimension(self):
     """Tests torch.ops.tpu._pad_real_to_static with a dynamic dimension."""
     device = torch.device("tpu")
@@ -17023,8 +17007,8 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
       ("overrideable", torch.nn.attention.SDPBackend.OVERRIDEABLE),
   )
   @oss_utils.skip_if_libtpu_version(
-      lambda v: v < (0, 0, 50),
-      "Requires libtpu >= 0.0.50 for correct numerics.",
+      lambda v: v < (0, 0, 51),
+      "Requires libtpu >= 0.0.51 for correct numerics.",
   )
   def test_sdpa_masked_out_row(self, backend: torch.nn.attention.SDPBackend):
     """Check that a fully masked query row produces zeros and does not contain NaNs."""

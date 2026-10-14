@@ -16,10 +16,6 @@
 
 #include "csrc/common/environment.h"
 
-#include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -32,18 +28,13 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
-#include "absl/strings/strip.h"
 #include "csrc/common/device_utils.h"
 #include "csrc/common/env_vars.h"
 #include "csrc/common/error_utils.h"
-#include "csrc/common/libtpu_version.h"
-#include "csrc/common/version.h"
 #include "csrc/distributed/slicebuilder/discovery.h"
 
 namespace torch_tpu {
 namespace {
-
-constexpr Version kMinLibtpuVersionWithSlicebuilderInsecureGrpc(0, 0, 48);
 
 // libtpu's default MegaScale port. Local rank 0 keeps it, so a MegaScale
 // coordinator address of `<MASTER_ADDR>:8080` still reaches global rank 0.
@@ -62,32 +53,6 @@ void AssignMegascalePorts(const int local_rank) {
                  << kMegascaleDebugPortEnvVar << "=" << megascale_debug_port;
   SetEnv<kMegascalePortEnvVar>(absl::StrCat(megascale_port));
   SetEnv<kMegascaleDebugPortEnvVar>(absl::StrCat(megascale_debug_port));
-}
-
-// Returns the local hostname with any domain or port suffix (starting at '.'
-// or ':') stripped, matching SliceBuilder's `GetAndSanitizeHostName()`. Falls
-// back to "localhost" if querying or resolving the sanitized hostname fails.
-[[nodiscard]] std::string GetSanitizedHostName() {
-  char hostname[1024];
-  if (gethostname(hostname, sizeof(hostname)) != 0) {
-    return "localhost";
-  }
-  hostname[sizeof(hostname) - 1] = '\0';
-  std::string_view host_view(hostname);
-  const size_t strip_from = host_view.find_first_of(".:");
-  if (strip_from != std::string_view::npos) {
-    host_view = host_view.substr(0, strip_from);
-  }
-  if (host_view.empty()) {
-    return "localhost";
-  }
-  const std::string sanitized(host_view);
-  struct addrinfo* res = nullptr;
-  if (getaddrinfo(sanitized.c_str(), nullptr, nullptr, &res) != 0) {
-    return "localhost";
-  }
-  freeaddrinfo(res);
-  return sanitized;
 }
 
 // Ensures `flags` sets the boolean flag matching `flag_prefix` to
@@ -144,11 +109,9 @@ void EnsureUndefokFlag(std::string_view flag_name,
 }
 
 // Normalizes `LIBTPU_INIT_ARGS` (`raw_args`) for distributed execution by
-// disabling the enhanced launch barrier and, when
-// `use_slicebuilder_insecure_grpc` is true, enabling insecure SliceBuilder gRPC
+// disabling the enhanced launch barrier and enabling insecure SliceBuilder gRPC
 // credentials along with `--undefok=slicebuilder_use_insecure_grpc`.
-[[nodiscard]] std::string ConfigureLibtpuInitArgs(
-    std::string_view raw_args, const bool use_slicebuilder_insecure_grpc) {
+[[nodiscard]] std::string ConfigureLibtpuInitArgs(std::string_view raw_args) {
   std::vector<std::string> flags =
       absl::StrSplit(raw_args, absl::ByAsciiWhitespace(), absl::SkipEmpty());
 
@@ -163,23 +126,21 @@ void EnsureUndefokFlag(std::string_view flag_name,
       "variable to false.",
       flags);
 
-  if (use_slicebuilder_insecure_grpc) {
-    // Preventing SliceBuilder ALTS gRPC handshake hangs on GKE/GCE, see
-    // b/565342785 and b/526788926.
-    EnsureLibtpuBoolFlag(
-        "--slicebuilder_use_insecure_grpc",
-        "--slicebuilder_use_insecure_grpc=false",
-        "--slicebuilder_use_insecure_grpc=true",
-        "libtpu_init_args contains "
-        "--slicebuilder_use_insecure_grpc=false, "
-        "this can cause SliceBuilder gRPC handshake hangs on GKE/GCE. "
-        "Rewriting environment variable to true.",
-        flags);
-    // `slicebuilder_use_insecure_grpc` was introduced in libtpu 0.0.48; mark
-    // it in `--undefok` so environments where SetLibtpuVersion was not called
-    // (e.g. standalone C++ tests) never fail command line flag parsing.
-    EnsureUndefokFlag("slicebuilder_use_insecure_grpc", flags);
-  }
+  // Preventing SliceBuilder ALTS gRPC handshake hangs on GKE/GCE, see
+  // b/565342785 and b/526788926.
+  EnsureLibtpuBoolFlag(
+      "--slicebuilder_use_insecure_grpc",
+      "--slicebuilder_use_insecure_grpc=false",
+      "--slicebuilder_use_insecure_grpc=true",
+      "libtpu_init_args contains "
+      "--slicebuilder_use_insecure_grpc=false, "
+      "this can cause SliceBuilder gRPC handshake hangs on GKE/GCE. "
+      "Rewriting environment variable to true.",
+      flags);
+  // Mark `slicebuilder_use_insecure_grpc` in `--undefok` so environments where
+  // the flag is not registered (e.g. standalone C++ tests) never fail command
+  // line flag parsing.
+  EnsureUndefokFlag("slicebuilder_use_insecure_grpc", flags);
   return absl::StrJoin(flags, " ");
 }
 
@@ -231,23 +192,6 @@ absl::Status InitializeDistributedEnvironment(
     AssignMegascalePorts(config.local_rank);
   }
 
-  const bool use_slicebuilder_insecure_grpc =
-      GetLibtpuVersion() >= kMinLibtpuVersionWithSlicebuilderInsecureGrpc;
-  if (use_slicebuilder_insecure_grpc) {
-    // Under LIBTPU_ON_GCE (libtpu >= 0.0.48), SliceBuilder WorkerService binds
-    // to `<GetAndSanitizeHostName()>:<port>` rather than `[::]:<port>`, which
-    // resolves to the host/pod network interface IP rather than loopback
-    // (127.0.0.1). Rewrite `localhost:<port>` addresses to `<hostname>:<port>`
-    // so MasterFactory connects to the exact address WorkerService listens on.
-    const std::string sanitized_hostname = GetSanitizedHostName();
-    for (std::string& addr : addresses) {
-      std::string_view addr_view(addr);
-      if (absl::ConsumePrefix(&addr_view, "localhost:")) {
-        addr = absl::StrCat(sanitized_hostname, ":", addr_view);
-      }
-    }
-  }
-
   // The addresses of all other workers in the slice.
   SetEnv<kTpuProcessAddressesEnvVar>(absl::StrJoin(addresses, ","));
 
@@ -255,8 +199,7 @@ absl::Status InitializeDistributedEnvironment(
   SetEnv<kAllowMultipleLibtpuLoadEnvVar>("1");
 
   const std::string libtpu_init_args_str =
-      ConfigureLibtpuInitArgs(GetEnvOnce<kLibtpuInitArgsEnvVar>().value_or(""),
-                              use_slicebuilder_insecure_grpc);
+      ConfigureLibtpuInitArgs(GetEnvOnce<kLibtpuInitArgsEnvVar>().value_or(""));
   SetEnv<kLibtpuInitArgsEnvVar>(libtpu_init_args_str);
   return absl::OkStatus();
 }

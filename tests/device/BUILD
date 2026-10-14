@@ -29,7 +29,6 @@ torch_tpu_py_library(
         "//shims/torch:pytorch",
         "//src/torch_tpu/_internal/device:_device_module",
         "//src/torch_tpu/_internal/device:_device_ops_backend",
-        "//tests:oss_utils",
         "//tests:seed_test_utils",
     ],
 )

@@ -20,10 +20,8 @@ from typing import Mapping
 
 
 def _seconds_to_ms(value: float) -> float:
-  """Converts a non-negative duration in seconds to milliseconds."""
-  if value >= 0:
-    return float(value) * 1000.0
-  return value
+  """Converts a duration in seconds to milliseconds."""
+  return float(value) * 1000.0
 
 
 @dataclasses.dataclass
@@ -106,6 +104,11 @@ class PerformanceMetrics(MetricsInterface):
     warmup_session_xprof_url: The URL of the xprof session for the warmup run.
     post_warmup_run_session_xprof_url: The URL of the xprof session for the post
       warmup run.
+    average_post_warmup_device_time_seconds: The average device time of a
+      profiled post-warmup step, or -1.0 if it is unavailable (e.g. without
+      xprof). An unavailable device time is not exported.
+    peak_host_compilation_memory_mb: The peak host memory used by compilation in
+      the process, or None if it was not measured. Only exported if measured.
   """
 
   num_warmup_steps: int = 0
@@ -116,7 +119,7 @@ class PerformanceMetrics(MetricsInterface):
   warmup_session_xprof_url: str | None = None
   post_warmup_run_session_xprof_url: str | None = None
   average_post_warmup_device_time_seconds: float = -1.0
-  peak_host_compilation_memory_mb: float = 0.0
+  peak_host_compilation_memory_mb: float | None = None
 
   def metric_map(self) -> Mapping[str, float]:
     """Returns a map of metrics to be exported to MLCompass."""
@@ -130,16 +133,20 @@ class PerformanceMetrics(MetricsInterface):
         "post_warmup_step_time_ms": _seconds_to_ms(
             self.post_warmup_step_time_seconds
         ),
-        "average_post_warmup_device_time_seconds": (
-            self.average_post_warmup_device_time_seconds
-        ),
-        "average_post_warmup_device_time_ms": _seconds_to_ms(
-            self.average_post_warmup_device_time_seconds
-        ),
-        "peak_host_compilation_memory_mb": self.peak_host_compilation_memory_mb,
     }
+    if self.average_post_warmup_device_time_seconds >= 0:
+      res["average_post_warmup_device_time_seconds"] = (
+          self.average_post_warmup_device_time_seconds
+      )
+      res["average_post_warmup_device_time_ms"] = _seconds_to_ms(
+          self.average_post_warmup_device_time_seconds
+      )
     if self.peak_device_memory_mb is not None:
       res["peak_device_memory_mb"] = self.peak_device_memory_mb
+    if self.peak_host_compilation_memory_mb is not None:
+      res["peak_host_compilation_memory_mb"] = (
+          self.peak_host_compilation_memory_mb
+      )
     return res
 
 

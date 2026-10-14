@@ -107,6 +107,188 @@ class TorchtitanQwen35Test(seed_test_utils.RepeatableTest):
       self.assertIsNotNone(param.grad, name)
       self.assertTrue(torch.isfinite(param.grad).all(), name)
 
+  def test_b1_inner_gated_delta_net_matches_upstream(self):
+    seq_len = 32
+    config = torchtitan_qwen3_5.text_config(
+        "debugmodel", num_layers=1, seq_len=seq_len
+    )
+    torch.manual_seed(42)
+    swapped_model = torchtitan_qwen3_5.build_model(
+        config, "cpu", torch.float32, seq_len=seq_len
+    )
+    swapped_gdn = swapped_model.layers["0"].attn.inner_gated_delta_net
+
+    with torch.device("meta"):
+      upstream_model = config.build()
+    upstream_model.to_empty(device="cpu")
+    with torch.no_grad():
+      upstream_model.init_states(buffer_device=torch.device("cpu"))
+    upstream_model.load_state_dict(swapped_model.state_dict())
+    upstream_gdn = upstream_model.layers["0"].attn.inner_gated_delta_net
+    # Swap only the kernel on the upstream reference so InnerGatedDeltaNet.forward
+    # stays the unmodified upstream method.
+    upstream_gdn.kernel.forward = torchtitan_qwen3_5.types.MethodType(
+        torchtitan_qwen3_5._pure_torch_gated_delta_kernel_forward,  # pylint: disable=protected-access
+        upstream_gdn.kernel,
+    )
+
+    tokens = torch.randint(0, config.vocab_size, (seq_len,))
+    with torch.no_grad():
+      expected = upstream_model(tokens)
+      actual_b1 = swapped_model(tokens)
+      # B=1 path delegates directly to upstream InnerGatedDeltaNet.forward.
+      self.assertTrue(torch.equal(actual_b1, expected))
+      # Also verify the batched (B > 1) conv + kernel code path on duplicated
+      # [tokens, tokens] matches the B=1 upstream output for both slices.
+      actual_b2 = swapped_model(torch.cat([tokens, tokens], dim=0))
+      test_utils.assert_close(
+          actual_b2[:seq_len], expected, atol=1e-6, rtol=1e-6
+      )
+      test_utils.assert_close(
+          actual_b2[seq_len:], expected, atol=1e-6, rtol=1e-6
+      )
+      self.assertEqual(swapped_gdn._seq_len, seq_len)  # pylint: disable=protected-access
+
+  def test_batch_size_2_forward_and_backward_equivalence(self):
+    seq_len = 64
+    config = torchtitan_qwen3_5.text_config(
+        "debugmodel", num_layers=4, seq_len=seq_len
+    )
+    torch.manual_seed(123)
+    model = torchtitan_qwen3_5.build_model(
+        config, "cpu", torch.float32, seq_len=seq_len
+    )
+
+    gen0 = torch.Generator().manual_seed(10)
+    seq0 = torch.randint(0, config.vocab_size, (seq_len,), generator=gen0)
+    labels0 = torch.randint(0, config.vocab_size, (seq_len,), generator=gen0)
+    gen1 = torch.Generator().manual_seed(20)
+    seq1 = torch.randint(0, config.vocab_size, (seq_len,), generator=gen1)
+    labels1 = torch.randint(0, config.vocab_size, (seq_len,), generator=gen1)
+
+    model.zero_grad()
+    logits0 = model(seq0)
+    loss0 = torch.nn.functional.cross_entropy(logits0.float(), labels0)
+    loss0.backward()
+    grads0 = {
+        name: param.grad.detach().clone()
+        for name, param in model.named_parameters()
+    }
+
+    model.zero_grad()
+    logits1 = model(seq1)
+    loss1 = torch.nn.functional.cross_entropy(logits1.float(), labels1)
+    loss1.backward()
+    grads1 = {
+        name: param.grad.detach().clone()
+        for name, param in model.named_parameters()
+    }
+
+    model.zero_grad()
+    tokens_b2 = torch.cat([seq0, seq1], dim=0)
+    labels_b2 = torch.cat([labels0, labels1], dim=0)
+    positions_b2 = torch.arange(seq_len, dtype=torch.long).repeat(2)
+    logits_b2 = model(tokens_b2, positions=positions_b2)
+    self.assertEqual(tuple(logits_b2.shape), (2 * seq_len, config.vocab_size))
+
+    # Forward equivalence: each sequence slice in B=2 matches its B=1 forward.
+    # Calibrated to 1e-5 for fp32 matmul/SDPA batch-tiling reduction order.
+    logits_b2_unpacked = logits_b2.reshape(2, seq_len, config.vocab_size)
+    test_utils.assert_close(
+        logits_b2_unpacked[0], logits0, atol=1e-5, rtol=1e-5
+    )
+    test_utils.assert_close(
+        logits_b2_unpacked[1], logits1, atol=1e-5, rtol=1e-5
+    )
+
+    loss_b2 = torch.nn.functional.cross_entropy(logits_b2.float(), labels_b2)
+    test_utils.assert_close(
+        loss_b2, 0.5 * (loss0 + loss1), atol=1e-5, rtol=1e-5
+    )
+    loss_b2.backward()
+
+    # Gradient equivalence: B=2 mean-reduced CE gradient equals the average of
+    # the two B=1 gradients. Calibrated to 1e-5 for fp32 backward accumulation
+    # across 2*S tokens vs two S-token reductions.
+    for name, param in model.named_parameters():
+      self.assertIsNotNone(param.grad, name)
+      expected_grad = 0.5 * (grads0[name] + grads1[name])
+      test_utils.assert_close(param.grad, expected_grad, atol=1e-5, rtol=1e-5)
+
+  def test_invalid_seq_len_and_non_divisible_tokens_raise(self):
+    seq_len = 32
+    config = torchtitan_qwen3_5.text_config(
+        "debugmodel", num_layers=4, seq_len=seq_len
+    )
+    torch.manual_seed(7)
+    model = torchtitan_qwen3_5.build_model(
+        config, "cpu", torch.float32, seq_len=seq_len
+    )
+    # T < S delegates to the single-sequence path without raising.
+    short_tokens = torch.randint(0, config.vocab_size, (seq_len // 2,))
+    with torch.no_grad():
+      short_logits = model(short_tokens)
+    self.assertEqual(
+        tuple(short_logits.shape), (seq_len // 2, config.vocab_size)
+    )
+    # Calling the swap helpers again preserves _orig_forward rather than
+    # wrapping the wrapper.
+    torchtitan_qwen3_5.use_pure_torch_gated_delta(model, seq_len=seq_len)
+    torchtitan_qwen3_5.use_batched_sdpa(model, seq_len=seq_len)
+    with torch.no_grad():
+      self.assertTrue(torch.equal(model(short_tokens), short_logits))
+
+    with self.assertRaisesRegex(ValueError, "must be divisible by seq_len"):
+      model(torch.randint(0, config.vocab_size, (seq_len + 1,)))
+    with self.assertRaisesRegex(ValueError, "seq_len must be >= 1"):
+      torchtitan_qwen3_5.use_pure_torch_gated_delta(model, seq_len=0)
+    with self.assertRaisesRegex(ValueError, "seq_len must be >= 1"):
+      torchtitan_qwen3_5.use_batched_sdpa(model, seq_len=0)
+
+  def test_custom_subclass_forward_preserved_by_swaps(self):
+    seq_len = 16
+    config = torchtitan_qwen3_5.text_config(
+        "debugmodel", num_layers=4, seq_len=seq_len
+    )
+    model = torchtitan_qwen3_5.build_model(
+        config, "cpu", torch.float32, seq_len=seq_len
+    )
+    gdn_calls = 0
+    gdn = model.layers["0"].attn.inner_gated_delta_net
+    base_gdn_forward = gdn._orig_forward  # pylint: disable=protected-access
+
+    def custom_gdn_forward(*args, **kwargs):
+      nonlocal gdn_calls
+      gdn_calls += 1
+      return base_gdn_forward(*args, **kwargs)
+
+    delattr(gdn, "_orig_forward")
+    gdn.forward = custom_gdn_forward
+    torchtitan_qwen3_5.use_pure_torch_gated_delta(model, seq_len=seq_len)
+
+    sdpa_calls = 0
+    sdpa = model.layers["3"].attn.inner_attention
+    base_sdpa_forward = sdpa._orig_forward  # pylint: disable=protected-access
+
+    def custom_sdpa_forward(*args, **kwargs):
+      nonlocal sdpa_calls
+      sdpa_calls += 1
+      return base_sdpa_forward(*args, **kwargs)
+
+    delattr(sdpa, "_orig_forward")
+    sdpa.forward = custom_sdpa_forward
+    torchtitan_qwen3_5.use_batched_sdpa(model, seq_len=seq_len)
+
+    with torch.no_grad():
+      model(torch.randint(0, config.vocab_size, (seq_len,)))
+      self.assertEqual(gdn_calls, 1)
+      self.assertEqual(sdpa_calls, 1)
+      model(
+          torch.randint(0, config.vocab_size, (2 * seq_len,)),
+          positions=torch.arange(seq_len, dtype=torch.long).repeat(2),
+      )
+      self.assertEqual(sdpa_calls, 2)
+
 
 if __name__ == "__main__":
   absltest.main()

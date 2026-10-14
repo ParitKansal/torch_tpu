@@ -33,6 +33,7 @@ import types
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 
 def _install_attn_gym_stub() -> None:
@@ -66,10 +67,13 @@ def _install_attn_gym_stub() -> None:
 _install_attn_gym_stub()
 
 # pylint: disable=g-import-not-at-top,g-bad-import-order
+from perflab.model_utils import torchtitan_batching
 from torchtitan.models import qwen3_5
 from torchtitan.models.qwen3_5 import gdn as qwen3_5_gdn
 
 # pylint: enable=g-import-not-at-top,g-bad-import-order
+
+use_batched_sdpa = torchtitan_batching.use_batched_sdpa
 
 
 def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -185,8 +189,7 @@ def _pure_torch_gated_delta_kernel_forward(
     *,
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
-  """Drop-in `GatedDeltaKernel.forward` (single packed sequence only)."""
-  del self  # Unused.
+  """Drop-in `GatedDeltaKernel.forward` supporting packed `(B * S, ...)` inputs."""
   if cu_seqlens is not None:
     raise NotImplementedError(
         "The pure-torch GatedDeltaNet kernel does not support varlen"
@@ -198,27 +201,148 @@ def _pure_torch_gated_delta_kernel_forward(
   if repeats > 1:
     xq_THK = xq_THK.repeat_interleave(repeats, dim=1)
     xk_THK = xk_THK.repeat_interleave(repeats, dim=1)
-  return chunked_gated_delta(
-      xq_THK.unsqueeze(0),
-      xk_THK.unsqueeze(0),
-      xv_THV.unsqueeze(0),
-      g_TH.unsqueeze(0),
-      beta_TH.unsqueeze(0),
-  ).squeeze(0)
+  num_tokens = xq_THK.shape[0]
+  seq_len = getattr(self, "_seq_len", None)
+  if seq_len is None or num_tokens <= seq_len:
+    return chunked_gated_delta(
+        xq_THK.unsqueeze(0),
+        xk_THK.unsqueeze(0),
+        xv_THV.unsqueeze(0),
+        g_TH.unsqueeze(0),
+        beta_TH.unsqueeze(0),
+    ).squeeze(0)
+  if num_tokens % seq_len != 0:
+    raise ValueError(
+        f"num_tokens ({num_tokens}) must be divisible by seq_len ({seq_len})"
+    )
+  batch_size = num_tokens // seq_len
+  out_BSHV = chunked_gated_delta(  # pylint: disable=invalid-name
+      xq_THK.reshape(batch_size, seq_len, *xq_THK.shape[1:]),
+      xk_THK.reshape(batch_size, seq_len, *xk_THK.shape[1:]),
+      xv_THV.reshape(batch_size, seq_len, *xv_THV.shape[1:]),
+      g_TH.reshape(batch_size, seq_len, *g_TH.shape[1:]),
+      beta_TH.reshape(batch_size, seq_len, *beta_TH.shape[1:]),
+  )
+  return out_BSHV.reshape(num_tokens, *out_BSHV.shape[2:])
 
 
-def use_pure_torch_gated_delta(model: torch.nn.Module) -> int:
-  """Swaps every `GatedDeltaKernel` in `model` to `chunked_gated_delta`.
+def _pure_torch_inner_gated_delta_net_forward(
+    self: qwen3_5_gdn.InnerGatedDeltaNet,
+    query_TC: torch.Tensor,  # pylint: disable=invalid-name
+    key_TC: torch.Tensor,  # pylint: disable=invalid-name
+    value_TC: torch.Tensor,  # pylint: disable=invalid-name
+    a_TH: torch.Tensor,  # pylint: disable=invalid-name
+    b_TH: torch.Tensor,  # pylint: disable=invalid-name
+    conv_q_weight_C1W: torch.Tensor,  # pylint: disable=invalid-name
+    conv_k_weight_C1W: torch.Tensor,  # pylint: disable=invalid-name
+    conv_v_weight_C1W: torch.Tensor,  # pylint: disable=invalid-name
+    A_log_H: torch.Tensor,  # pylint: disable=invalid-name
+    dt_bias_H: torch.Tensor,  # pylint: disable=invalid-name
+    cu_seqlens: torch.Tensor,
+    *,
+    key_head_dim: int,
+    value_head_dim: int,
+) -> torch.Tensor:
+  """Drop-in `InnerGatedDeltaNet.forward` supporting packed `(B * S, C)` inputs."""
+  num_tokens = query_TC.shape[0]
+  seq_len = getattr(self, "_seq_len", None)
+  if seq_len is None or num_tokens <= seq_len:
+    orig_forward = getattr(self, "_orig_forward", None)
+    if orig_forward is None:
+      orig_forward = types.MethodType(
+          qwen3_5_gdn.InnerGatedDeltaNet.forward, self
+      )
+    return orig_forward(
+        query_TC,
+        key_TC,
+        value_TC,
+        a_TH,
+        b_TH,
+        conv_q_weight_C1W,
+        conv_k_weight_C1W,
+        conv_v_weight_C1W,
+        A_log_H,
+        dt_bias_H,
+        cu_seqlens,
+        key_head_dim=key_head_dim,
+        value_head_dim=value_head_dim,
+    )
+  if num_tokens % seq_len != 0:
+    raise ValueError(
+        f"num_tokens ({num_tokens}) must be divisible by seq_len ({seq_len})"
+    )
+  use_varlen_kernels = (
+      cu_seqlens.numel() > 2 or qwen3_5_gdn.is_in_batch_invariant_mode()
+  )
+  if use_varlen_kernels:
+    raise NotImplementedError(
+        "the pure-torch GatedDeltaNet path does not support varlen"
+        " (multi-document) inputs"
+    )
+  batch_size = num_tokens // seq_len
+
+  def causal_conv(
+      x_TC: torch.Tensor,  # pylint: disable=invalid-name
+      weight_C1W: torch.Tensor,  # pylint: disable=invalid-name
+  ) -> torch.Tensor:
+    channels = weight_C1W.shape[0]
+    x_BCS = F.pad(  # pylint: disable=invalid-name
+        x_TC.reshape(batch_size, seq_len, channels).transpose(1, 2),
+        [weight_C1W.shape[-1] - 1, 0],
+    )
+    out_BCS = F.silu(  # pylint: disable=invalid-name
+        F.conv1d(x_BCS, weight_C1W, None, groups=channels)
+    )
+    return out_BCS.transpose(1, 2).reshape(num_tokens, channels)
+
+  xq_THK = causal_conv(query_TC, conv_q_weight_C1W).reshape(  # pylint: disable=invalid-name
+      num_tokens, -1, key_head_dim
+  )
+  xk_THK = causal_conv(key_TC, conv_k_weight_C1W).reshape(  # pylint: disable=invalid-name
+      num_tokens, -1, key_head_dim
+  )
+  xv_THV = causal_conv(value_TC, conv_v_weight_C1W).reshape(  # pylint: disable=invalid-name
+      num_tokens, -1, value_head_dim
+  )
+  g_TH = (  # pylint: disable=invalid-name
+      -torch.exp(A_log_H.float()) * F.softplus(a_TH.float() + dt_bias_H)
+  )
+  beta_TH = torch.sigmoid(b_TH)  # pylint: disable=invalid-name
+  return self.kernel(
+      xq_THK,
+      xk_THK,
+      xv_THV,
+      g_TH,
+      beta_TH,
+      cu_seqlens=None,
+  )
+
+
+def use_pure_torch_gated_delta(
+    model: torch.nn.Module, *, seq_len: int | None = None
+) -> int:
+  """Swaps every `InnerGatedDeltaNet` and `GatedDeltaKernel` in `model`.
 
   Args:
     model: A built torchtitan Qwen3.5 model.
+    seq_len: Per-sequence token length `S` when inputs are packed `(B * S,)`.
 
   Returns:
     The number of kernels swapped.
   """
+  if seq_len is not None and seq_len < 1:
+    raise ValueError(f"seq_len must be >= 1, got {seq_len}")
   count = 0
   for module in model.modules():
-    if isinstance(module, qwen3_5_gdn.GatedDeltaKernel):
+    if isinstance(module, qwen3_5_gdn.InnerGatedDeltaNet):
+      if not hasattr(module, "_orig_forward"):
+        module._orig_forward = module.forward  # pylint: disable=protected-access
+      module._seq_len = seq_len  # pylint: disable=protected-access
+      module.forward = types.MethodType(
+          _pure_torch_inner_gated_delta_net_forward, module
+      )
+    elif isinstance(module, qwen3_5_gdn.GatedDeltaKernel):
+      module._seq_len = seq_len  # pylint: disable=protected-access
       module.forward = types.MethodType(
           _pure_torch_gated_delta_kernel_forward, module
       )
@@ -253,22 +377,29 @@ def build_model(
     config: qwen3_5.Qwen35Model.Config,
     device: str,
     dtype: torch.dtype,
+    *,
+    seq_len: int | None = None,
 ) -> torch.nn.Module:
   """Builds and initializes a torchtitan Qwen3.5 model directly on `device`.
 
   The model is built on meta and materialized on the device (no full host copy),
-  its parameters are cast to `dtype` and its GatedDeltaNet kernels are swapped
-  to the pure-torch chunked rule. Seed torch beforehand for reproducible
-  weights.
+  its parameters are cast to `dtype` and its GatedDeltaNet and SDPA submodules
+  are swapped to support pure-torch execution and packed `(B * S,)` batches.
+  Seed torch beforehand for reproducible weights.
 
   Args:
     config: Model config, e.g. from `text_config`.
     device: Device string (e.g. "tpu", "cuda" or "cpu").
     dtype: Parameter dtype.
+    seq_len: Per-sequence token length `S` when inputs are packed `(B * S,)`.
+      Defaults to the RoPE `max_context_length` on the first attention layer if
+      present.
 
   Returns:
     The initialized model, in train mode.
   """
+  if seq_len is None:
+    seq_len = torchtitan_batching.infer_seq_len(config)
   prev_dtype = torch.get_default_dtype()
   torch.set_default_dtype(dtype)
   try:
@@ -280,5 +411,6 @@ def build_model(
   finally:
     torch.set_default_dtype(prev_dtype)
   model = model.to(dtype=dtype)
-  use_pure_torch_gated_delta(model)
+  use_pure_torch_gated_delta(model, seq_len=seq_len)
+  torchtitan_batching.use_batched_sdpa(model, seq_len=seq_len)
   return model

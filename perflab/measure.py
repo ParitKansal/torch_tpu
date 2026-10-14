@@ -129,6 +129,7 @@ class XprofContext:
       trace could be retrieved. This holds only this process's own trace, which
       is why device time is derived from it rather than by re-fetching by
       session id.
+    overhead_seconds: The wall time spent starting and ending the session.
   """
 
   def __init__(
@@ -140,6 +141,7 @@ class XprofContext:
     self.session = None
     self.session_id = None
     self.xspace = None
+    self.overhead_seconds = 0.0
 
   def _start_session(
       self,
@@ -179,6 +181,7 @@ class XprofContext:
 
   def __enter__(self):
     if self.enable_xprof:
+      start_time = time.perf_counter()
       kwargs = {}
       host_trace_level = 3
       enable_python_tracer = True
@@ -210,6 +213,7 @@ class XprofContext:
               e,
           )
           time.sleep(_XPROF_START_RETRY_DELAY_SECONDS)
+      self.overhead_seconds += time.perf_counter() - start_time
     return self
 
   def __exit__(self, exc_type, exc_val, exc_tb):
@@ -218,6 +222,7 @@ class XprofContext:
     if not self.session:
       return
 
+    start_time = time.perf_counter()
     # Retrieving the XSpace together with the URL ends the session exactly
     # once and keeps the trace local to this process. Fall back to just the
     # session id if the combined call is unavailable, accepting that device
@@ -235,6 +240,7 @@ class XprofContext:
           exc_info=True,
       )
       self.session_id = self.session.end_session_and_get_session_id()
+    self.overhead_seconds += time.perf_counter() - start_time
 
     logging.info(
         "%s xprof URL: http://xprof/?session_id=%s",
@@ -275,6 +281,17 @@ def _calculate_avg_device_time(
 
 class PostWarmupRecompileError(AssertionError):
   """Raised when a recompilation happens during the post warmup loop."""
+
+
+class _ProfilingTime:
+  """Accumulates the wall time spent only on profiling.
+
+  measure() leaves it out of the e2e wall time, so that runs with and without
+  xprof report comparable wall times.
+  """
+
+  def __init__(self) -> None:
+    self.seconds = 0.0
 
 
 @contextlib.contextmanager
@@ -334,6 +351,7 @@ def _warmup_run(
     *,
     name: str,
     enable_xprof: bool = False,
+    profiling_time: _ProfilingTime | None = None,
 ) -> metrics.WarmupRunResult:
   """Runs the model to warmup the caches.
 
@@ -350,6 +368,8 @@ def _warmup_run(
     device_ops: The device operations to use.
     name: The name of the benchmark.
     enable_xprof: Whether to enable xprof profiling.
+    profiling_time: If set, accumulates the wall time spent starting and ending
+      the xprof session.
 
   Returns:
     A WarmupRunResult instance containing the number of warmup steps, the time
@@ -366,9 +386,14 @@ def _warmup_run(
   with gc_disabled(), XprofContext(
       name="warmup_run", enable_xprof=enable_xprof, trace_only_host=True
   ) as warmup_run_context:
+    # The first step is timed from before get_step_fn(): the compilation
+    # belongs to it whether a stepper compiles on the first call or ahead of
+    # it in get_step_fn() (e.g. the single-trace training stepper).
+    start_time = time.perf_counter()
     step_fn = stepper.get_step_fn()
     for step in range(MAX_WARMUP_STEPS.value):
-      start_time = time.perf_counter()
+      if step > 0:
+        start_time = time.perf_counter()
       out = step_fn()
       device_ops.await_result(out)
       timings[step] = time.perf_counter() - start_time
@@ -383,6 +408,9 @@ def _warmup_run(
       ):
         num_warmup_steps = step + 1
         break
+
+  if profiling_time is not None:
+    profiling_time.seconds += warmup_run_context.overhead_seconds
 
   if num_warmup_steps is None:
     if _is_warmup_only():
@@ -417,6 +445,7 @@ def _post_warmup_run(
     *,
     name: str,
     enable_xprof: bool = False,
+    profiling_time: _ProfilingTime | None = None,
 ) -> metrics.PostWarmupRunResult:
   """Runs the model once after the warmup is complete.
 
@@ -425,6 +454,8 @@ def _post_warmup_run(
     device_ops: The device operations to use.
     name: The name of the benchmark.
     enable_xprof: Whether to enable xprof profiling.
+    profiling_time: If set, accumulates the wall time of the profiled steps,
+      including starting and ending their xprof session.
 
   Returns:
     A PostWarmupRunResult instance containing the average step time and peak
@@ -464,6 +495,7 @@ def _post_warmup_run(
   post_warmup_run_session_xprof_url = None
   xspace = None
   if enable_xprof and XPROF_STEPS.value > 0:
+    profiling_start_time = time.perf_counter()
     with gc_disabled(), XprofContext(
         name="post_warmup_run",
         enable_xprof=enable_xprof,
@@ -471,6 +503,8 @@ def _post_warmup_run(
     ) as xprof_context:
       for xprof_step in range(XPROF_STEPS.value):
         xprof_timings[xprof_step] = _run_single_step(compile_count_before)
+    if profiling_time is not None:
+      profiling_time.seconds += time.perf_counter() - profiling_start_time
 
     xspace = xprof_context.xspace
     if xprof_context.session_id:
@@ -501,7 +535,20 @@ def measure(
     name: str,
     enable_xprof: bool = False,
 ) -> metrics.PerformanceMetrics:
+  """Warms up and measures a stepper.
+
+  Args:
+    stepper: The stepper to measure.
+    device_ops: The device operations to use.
+    name: The name of the benchmark, used in logs.
+    enable_xprof: Whether to profile the warmup and extra post-warmup steps.
+
+  Returns:
+    The measured metrics. The e2e wall time leaves out the wall time spent only
+    on profiling, so that runs with and without xprof report comparable values.
+  """
   result_kwargs = {}
+  profiling_time = _ProfilingTime()
   start_time = time.perf_counter()
 
   stepper.pre_warmup_init()
@@ -512,6 +559,7 @@ def measure(
           device_ops,
           name=name,
           enable_xprof=enable_xprof,
+          profiling_time=profiling_time,
       )
   )
 
@@ -523,10 +571,13 @@ def measure(
             device_ops,
             name=name,
             enable_xprof=enable_xprof,
+            profiling_time=profiling_time,
         )
     )
 
   return metrics.PerformanceMetrics(
-      e2e_wall_time_seconds=time.perf_counter() - start_time,
+      e2e_wall_time_seconds=(
+          time.perf_counter() - start_time - profiling_time.seconds
+      ),
       **result_kwargs,
   )

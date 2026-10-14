@@ -38,12 +38,26 @@ torch_tpu_py_library(
     ],
 )
 
+# torchtitan is not available in OSS, so this library is not built in OSS.
+internal_target(
+    torch_tpu_py_library,
+    name = "torchtitan_batching",
+    srcs = ["torchtitan_batching.py"],
+    deps = [
+        "//perflab:target",
+        "//shims/torch:pytorch",
+        "//shims/torchtitan/experiments/tpu:utils",  # buildcleaner: keep
+        "//shims/torchtitan/models",
+    ],
+)
+
 # torchtitan is not available in OSS, so this and its test are not built in OSS.
 internal_target(
     torch_tpu_py_library,
     name = "torchtitan_qwen3_5",
     srcs = ["torchtitan_qwen3_5.py"],
     deps = [
+        ":torchtitan_batching",
         "//shims/torch:pytorch",
         # google3's copybara rewrite of torchtitan's
         # `distributed/activation_checkpoint.py` (imported by
@@ -95,6 +109,7 @@ internal_target(
     name = "torchtitan_muse_glimmer",
     srcs = ["torchtitan_muse_glimmer.py"],
     deps = [
+        ":torchtitan_batching",
         "//shims/torch:pytorch",
         "//shims/torchtitan/experiments/tpu:utils",  # buildcleaner: keep
         "//shims/torchtitan/models",

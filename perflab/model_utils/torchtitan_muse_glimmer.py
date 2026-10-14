@@ -30,7 +30,11 @@ from typing import Any
 
 import torch
 from torch import nn
+from perflab.model_utils import torchtitan_batching
 from torchtitan.models import muse_glimmer
+
+use_batched_sdpa = torchtitan_batching.use_batched_sdpa
+make_inputs = torchtitan_batching.make_inputs
 
 
 def text_config(
@@ -80,21 +84,29 @@ def build_model(
     config: muse_glimmer.MuseGlimmerModel.Config,
     device: str,
     dtype: torch.dtype,
+    *,
+    seq_len: int | None = None,
 ) -> nn.Module:
   """Builds and initializes a torchtitan Muse Glimmer model directly on `device`.
 
   The model is built on meta and materialized on the device in fp32. Only
   floating-point parameters/buffers are cast to `dtype` to avoid losing the
-  complex RoPE cache.
+  complex RoPE cache, and SDPA submodules are swapped to support packed
+  `(B * S,)` batches.
 
   Args:
     config: Model config.
     device: Device string (e.g. "tpu", "cuda" or "cpu").
     dtype: Parameter dtype.
+    seq_len: Per-sequence token length `S` when inputs are packed `(B * S,)`.
+      Defaults to the RoPE `max_context_length` on the first RoPE layer if
+      present.
 
   Returns:
     The initialized model, in train mode.
   """
+  if seq_len is None:
+    seq_len = torchtitan_batching.infer_seq_len(config)
   with torch.device("meta"):
     model = config.build()
   model.to_empty(device=device)
@@ -108,6 +120,7 @@ def build_model(
     if b.is_floating_point():
       b.data = b.data.to(dtype)
 
+  torchtitan_batching.use_batched_sdpa(model, seq_len=seq_len)
   return model
 
 
@@ -121,24 +134,3 @@ def cross_entropy_loss(
   labels = input_kwargs.pop("labels")
   logits = model(*input_args, **input_kwargs)
   return nn.functional.cross_entropy(logits.float(), labels)
-
-
-def make_inputs(
-    vocab_size: int, seq_len: int, rank: int, device: str
-) -> tuple[torch.Tensor, torch.Tensor]:
-  """Returns one packed `(seq_len,)` token / label sequence for `rank`.
-
-  Args:
-    vocab_size: Token ids are drawn from `[0, vocab_size)`.
-    seq_len: Tokens per rank.
-    rank: Seeds the per-rank data.
-    device: Device to place the tensors on.
-  """
-  generator = torch.Generator().manual_seed(1234 + rank)
-  tokens, labels = [
-      torch.randint(
-          0, vocab_size, (seq_len,), dtype=torch.long, generator=generator
-      ).to(device)
-      for _ in range(2)
-  ]
-  return tokens, labels

@@ -18,11 +18,27 @@ Supports both single-node multi-device (CUDA/TPU) and multi-node multi-host
 Borg executions.
 """
 
+# GPU and CPU runs must never load TorchTPU: once loaded, it registers as
+# PyTorch's PrivateUse1 device, and the first backward pass then makes autograd
+# try to initialize the TPU runtime, which takes minutes on hosts without TPUs.
+# So on every platform but TPUs, turn off the automatic loading of PyTorch
+# device backends, which TorchTPU follows too, before anything imports torch or
+# torch_tpu. TPU platform names start with "v" (see `target.Platform`). The
+# worker processes inherit the setting.
+import os  # pylint: disable=g-bad-import-order
+
+if (
+    not os.environ.get("BENCHMARK_PLATFORM", "cpu")  # PY_ENVIRON_OK=pre-torch.
+    .lower()
+    .startswith("v")
+):
+  os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"  # PY_ENVIRON_OK=pre-torch.
+
+# pylint: disable=g-import-not-at-top
 import enum
 import fnmatch
 import gc
 import glob
-import os
 import re
 import shutil
 import sys
@@ -55,6 +71,8 @@ from perflab import steps
 from perflab import target as target_lib
 from perflab import torch_device_ops
 from tests.distributed import distributed_utils
+
+# pylint: enable=g-import-not-at-top
 
 discovery_lib.import_submodules(distributed_models)
 discovery_lib.import_submodules(steps)
@@ -732,5 +750,10 @@ def main(argv: Sequence[str]) -> None:
 
 
 if __name__ == "__main__":
+  # Fails at startup, rather than after a stall in the first backward pass, if
+  # an import loaded TorchTPU on a GPU or CPU platform.
+  torch_device_ops.check_torch_tpu_not_loaded(
+      target_lib.make_target(target_lib.platform_from_env())
+  )
   mp.set_start_method("spawn")  # pyrefly: ignore[missing-attribute]
   multiprocessing.handle_main(main)

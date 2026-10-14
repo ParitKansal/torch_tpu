@@ -35,6 +35,7 @@ from perflab import registry as registry_lib
 from perflab import step_lib
 from perflab import target as target_lib
 from perflab import torch_device_ops
+from perflab.model_utils import torchtitan_batching
 from perflab.model_utils import torchtitan_muse_glimmer
 from torchtitan.experiments.graph_trainer import simple_fsdp
 
@@ -47,6 +48,12 @@ _SUPPORTED_PLATFORMS: frozenset[target_lib.Platform] = frozenset({
     target_lib.Platform.B200_8,
 })
 
+# Per-sequence token length in RunScope.FULL on every supported platform.
+# Local batch size (sequences per process) is chosen so both platforms train on
+# 2 sequences per chip under chip parity (1 sequence/process on TPU where 1 chip
+# = 2 TensorCore processes; 2 sequences/process on GPU where 1 chip = 1 process;
+# e.g. v7_2x2x1 has 8 processes x 1 x 2048 = 16,384 tokens/step and b200_4 has
+# 4 processes x 2 x 2048 = 16,384 tokens/step).
 _FULL_SEQ_LEN = 2048
 
 
@@ -55,10 +62,25 @@ def build_model(
     device: str,
     world_size: int,
     dtype: torch.dtype,
+    *,
+    seq_len: int | None = None,
 ) -> nn.Module:
-  """Builds the torchtitan model, checkpoints and SimpleFSDP-shards it."""
+  """Builds the torchtitan model, checkpoints and SimpleFSDP-shards it.
+
+  Args:
+    config: torchtitan Muse Glimmer model config.
+    device: Device string (e.g. "tpu", "cuda" or "cpu").
+    world_size: Number of ranks to fully shard the parameters across.
+    dtype: Parameter / compute / gradient-reduction dtype.
+    seq_len: Per-sequence token length `S` when inputs are packed `(B * S,)`.
+
+  Returns:
+    The SimpleFSDP-wrapped model in train mode.
+  """
   torch.manual_seed(12345)
-  model = torchtitan_muse_glimmer.build_model(config, device, dtype)
+  model = torchtitan_muse_glimmer.build_model(
+      config, device, dtype, seq_len=seq_len
+  )
   model.train()
 
   # Per-layer activation checkpointing, as SimpleFSDP expects.
@@ -102,7 +124,6 @@ def build_model(
 )
 def muse_glimmer_30b_4_layers_simple_fsdp_training(
     ctx: context_lib.Context,
-    batch_size: int = 1,
 ) -> tuple[
     nn.Module,
     tuple[torch.Tensor, ...],
@@ -110,9 +131,6 @@ def muse_glimmer_30b_4_layers_simple_fsdp_training(
     torch.optim.Optimizer,
 ]:
   """Benchmark factory for Muse Glimmer (30B, 4 layers) SimpleFSDP training."""
-  if batch_size != 1:
-    raise NotImplementedError("Batch size > 1 is not implemented yet.")
-
   if ctx.target.platform not in _SUPPORTED_PLATFORMS:
     raise target_lib.UnsupportedBenchmark(
         "Muse Glimmer SimpleFSDP training is not supported on platform"
@@ -136,26 +154,37 @@ def muse_glimmer_30b_4_layers_simple_fsdp_training(
     flavor = "30B"
 
   device_str = ctx.device_kind.value
+  batch_size = torchtitan_batching.batch_size_for_target(ctx.target)
+  tokens_per_step = world_size * batch_size * seq_len
   config = torchtitan_muse_glimmer.text_config(flavor, num_layers, seq_len)
   logging.info(
       "Rank %d/%d: building torchtitan Muse Glimmer (%s arch) num_layers=%d"
-      " seq_len=%d with SimpleFSDP fully_shard",
+      " batch_size=%d seq_len=%d tokens_per_step=%d with SimpleFSDP"
+      " fully_shard",
       rank,
       world_size,
       flavor,
       num_layers,
+      batch_size,
       seq_len,
+      tokens_per_step,
   )
   model = build_model(
       config,
       device_str,
       world_size,
       dtype=torch_device_ops.get_torch_dtype(ctx.dtype),
+      seq_len=seq_len,
   )
   tokens, labels = torchtitan_muse_glimmer.make_inputs(
-      config.vocab_size, seq_len, rank, device_str
+      config.vocab_size, seq_len, rank, device_str, batch_size=batch_size
   )
+  input_kwargs: dict[str, Any] = {"labels": labels}
+  if batch_size > 1:
+    input_kwargs["positions"] = torch.arange(
+        seq_len, dtype=torch.long, device=device_str
+    ).repeat(batch_size)
   opt = torch.optim.AdamW(
       model.parameters(), lr=1e-4, fused=True, capturable=True
   )
-  return model, (tokens,), {"labels": labels}, opt
+  return model, (tokens,), input_kwargs, opt

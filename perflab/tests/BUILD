@@ -45,11 +45,28 @@ torch_tpu_py_test(
         "//perflab:export",
         "//perflab:flags",
         "//perflab:known_failures",
+        "//perflab:metrics",
         "//perflab:mode",
         "//perflab:target",
         "//shims/absl_py/testing:absltest",
         "//shims/absl_py/testing:flagsaver",
+        "//shims/absl_py/testing:parameterized",
         "//src/torch_tpu",
+        "//tests:seed_test_utils",
+    ],
+)
+
+torch_tpu_py_test(
+    name = "benchmark_registry_test",
+    srcs = ["benchmark_registry_test.py"],
+    data = ["//perflab:benchmark_registry.pbtxt"],
+    deps = [
+        "//perflab:measure",
+        "//perflab:target",
+        "//shims/absl_py/testing:absltest",
+        "//shims/absl_py/testing:flagsaver",
+        "//src/torch_tpu",
+        "//tests:repo_paths",
         "//tests:seed_test_utils",
     ],
 )
@@ -259,6 +276,7 @@ torch_tpu_py_test(
         "//perflab:target",
         "//perflab:torch_device_ops",
         "//shims/absl_py/testing:absltest",
+        "//shims/absl_py/testing:parameterized",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//tests:seed_test_utils",
@@ -403,6 +421,7 @@ internal_target(
         "//perflab:context",
         "//perflab:target",
         "//perflab/distributed_models:qwen3_8",
+        "//perflab/model_utils:torchtitan_batching",
         "//perflab/model_utils:torchtitan_qwen3_5",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
@@ -425,6 +444,7 @@ internal_target(
         "//perflab:context",
         "//perflab:target",
         "//perflab/distributed_models:muse_glimmer",
+        "//perflab/model_utils:torchtitan_batching",
         "//perflab/model_utils:torchtitan_muse_glimmer",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
@@ -458,6 +478,59 @@ internal_target(
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/utils:test_utils",
         "//tests:seed_test_utils",
+        "//tests/distributed:distributed_utils",
+    ],
+)
+
+# Checks that GPU and CPU benchmark runs never load TorchTPU, and that
+# TORCH_DEVICE_BACKEND_AUTOLOAD=0 keeps it from loading unless it is asked for.
+# Each case runs in a fresh process, spawned with Google3's g3_multiprocessing,
+# so the test only runs internally.
+internal_target(
+    torch_tpu_py_test,
+    name = "torch_tpu_isolation_test",
+    timeout = "long",
+    srcs = ["torch_tpu_isolation_test.py"],
+    data = [
+        "//perflab:torch_benchmark_test.py",
+        "//perflab/huggingface_transformers:model_configs_data",
+        "//shims/model_configs:google_model_configs_data",
+    ],
+    shard_count = 4,
+    tags = [
+        "nosan",  # Only checks which modules each process imports; *san adds nothing.
+    ],
+    deps = [
+        "//pyglib/contrib/g3_multiprocessing",
+        "//shims/absl_py/testing:absltest",
+        "//shims/absl_py/testing:parameterized",
+        # What the isolated processes and the perflab scripts that they run
+        # import.
+        "//shims/absl_py/logging",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+        "//src/torch_tpu/_internal/benchmarks:export_adapter",
+        "//src/torch_tpu/_internal/benchmarks:xprof_adapter",
+        "//src/torch_tpu/_internal/distributed:multiprocessing",
+        "//perflab:base_test",
+        "//perflab:cases",
+        "//perflab:common",
+        "//perflab:compile",
+        "//perflab:context",
+        "//perflab:discovery",
+        "//perflab:distributed_runner_lib",
+        "//perflab:export",
+        "//perflab:flags",
+        "//perflab:measure",
+        "//perflab:metrics",
+        "//perflab:mode",
+        "//perflab:registry",
+        "//perflab:step_lib",
+        "//perflab:target",
+        "//perflab:torch_device_ops",
+        "//perflab/models",
+        "//perflab/steps",
+        "//tests:module_registry",
         "//tests/distributed:distributed_utils",
     ],
 )

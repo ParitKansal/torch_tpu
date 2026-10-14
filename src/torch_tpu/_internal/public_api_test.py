@@ -273,8 +273,13 @@ class PublicApiTest(absltest.TestCase):  # ABSLTEST_OK=pure Python; no RNG
 
   def test_install_is_idempotent(self) -> None:
     table = self._sample_table()
+    stub = types.ModuleType("fake_root.tpu")
+    sys.modules["fake_root.tpu"] = stub
+    setattr(self.root_mod, "tpu", stub)
     public_api.install(table)
     tpu_before = sys.modules["fake_root.tpu"]
+    self.assertIsNot(tpu_before, stub)
+    self.assertIs(self.root_mod.tpu, tpu_before)
     prof_before = tpu_before.profiler
     public_api.install(table)
     self.assertIs(sys.modules["fake_root.tpu"], tpu_before)

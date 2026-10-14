@@ -22,7 +22,6 @@ from absl import logging
 import portpicker
 import torch
 import torch.multiprocessing as mp
-from torch_tpu._internal import env
 from torch_tpu._internal import env_utils
 from torch_tpu._internal.distributed import multiprocessing
 from tests import seed_test_utils
@@ -69,10 +68,7 @@ def set_launch_env(nproc_per_node: int) -> bool:
   multiprocessing.init_spawn()
 
   repick_slicebuilder_ports = False
-  if (
-      _has_tpu_devices()
-      or env.get_str_env_once("JOB_COMPLETION_INDEX") is not None
-  ):
+  if _has_tpu_devices() or _job_completion_index() is not None:
     # Imported lazily so GPU runs (TORCH_DEVICE_BACKEND_AUTOLOAD=0) never depend
     # on `torch.tpu`, which only exists once the TorchTPU backend is loaded.
     from torch.tpu import distributed  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
@@ -271,11 +267,24 @@ def _has_tpu_devices() -> bool:
   )
 
 
+def _job_completion_index() -> str | None:
+  """Returns `JOB_COMPLETION_INDEX`, which multi-host jobs set, or None."""
+  # Read through `os.environ`, not the C++ `torch_tpu._internal.env` extension,
+  # which GPU runs must never load.
+  return os.environ.get(  # PY_ENVIRON_OK=must not load TorchTPU.
+      "JOB_COMPLETION_INDEX"
+  )
+
+
 def _is_single_host() -> bool:
   """Returns whether this is a single-host (non multi-host) TPU job."""
-  hostnames = env.get_str_env_once("TPU_WORKER_HOSTNAMES", default_value="")
+  # Read through `os.environ`, not the C++ `torch_tpu._internal.env` extension,
+  # which GPU runs must never load.
+  hostnames = os.environ.get(  # PY_ENVIRON_OK=must not load TorchTPU.
+      "TPU_WORKER_HOSTNAMES", ""
+  )
   return (
-      env.get_str_env_once("JOB_COMPLETION_INDEX") is None
+      _job_completion_index() is None
       and len([h for h in hostnames.split(",") if h]) <= 1
   )
 

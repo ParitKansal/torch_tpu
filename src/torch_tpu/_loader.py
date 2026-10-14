@@ -12,7 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Module to handle autoloading torch_tpu as torch.tpu."""
+"""Loads TorchTPU as PyTorch's `tpu` device.
+
+Importing this module loads TorchTPU's C++ extensions, and `load()` registers
+the `tpu` device if the host has TPUs. PyTorch does both when it loads device
+backends automatically, and so does `import torch_tpu`. With
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 neither does, and code that needs TorchTPU loads
+it explicitly via `torch.tpu.load()`:
+
+  import torch
+  import torch_tpu
+
+  torch.tpu.load()
+"""
 
 import functools
 import importlib.metadata
@@ -46,6 +58,7 @@ from torch_tpu._internal import public_api
 from torch_tpu._internal.compile import _backend
 from torch_tpu._internal.device import _device_module
 from torch_tpu._internal.distributed import tpu_distributed
+from torch_tpu._internal.utils import annotations
 from torch_tpu._internal.utils import hardware
 
 # pylint: enable=g-import-not-at-top
@@ -384,11 +397,14 @@ def _init_device(device: str) -> torch.device:
     return device_d
 
 
+@annotations.stable()
 def load() -> None:
-  """Loads the torch_tpu backend.
+  """Loads TorchTPU's C++ extensions and registers PyTorch's `tpu` device.
 
-  If the backend has been loaded, the `_LOADED` global variable will be set to
-  `True`.
+  `import torch` and `import torch_tpu` call this automatically unless
+  `TORCH_DEVICE_BACKEND_AUTOLOAD=0`. With `TORCH_DEVICE_BACKEND_AUTOLOAD=0`,
+  call `torch.tpu.load()` after `import torch_tpu` to load TorchTPU explicitly.
+  Calling `load()` more than once is a no-op.
   """
   # On autoload restore the original autoload value
   env_utils.set_str_env(_AUTOLOAD_ENV_VAR, _OLD_AUTOLOAD_ENV)

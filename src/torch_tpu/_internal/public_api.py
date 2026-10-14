@@ -160,6 +160,7 @@ _PUBLIC_MODULES: Mapping[str, ModuleSpec] = {
             "initial_seed": _tpu_attr("initial_seed"),
             "is_available": _tpu_attr("is_available"),
             "is_initialized": _tpu_attr("is_initialized"),
+            "load": "torch_tpu._loader:load",
             "manual_seed": _tpu_attr("manual_seed"),
             "manual_seed_all": _tpu_attr("manual_seed_all"),
             "precision": _tpu_attr("precision"),
@@ -588,7 +589,9 @@ def install(table: Mapping[str, ModuleSpec] = _PUBLIC_MODULES) -> None:
   for module_name in sorted(table, key=lambda n: (n.count("."), n)):
     parent_name, sep, leaf = module_name.rpartition(".")
     is_root = not sep or parent_name not in table
-    if is_root and module_name not in sys.modules:
+    if is_root and not isinstance(
+        sys.modules.get(module_name), _PublicApiModule
+    ):
       spec = _FINDER.find_spec(module_name)
       assert spec is not None and spec.loader is not None
       mod = importlib.util.module_from_spec(spec)

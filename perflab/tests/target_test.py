@@ -60,6 +60,17 @@ class PlatformFromEnvTest(parameterized.TestCase):  # ABSLTEST_OK=benchmark
         target_lib.Platform.B200_8,
     )
 
+  @parameterized.parameters(*target_lib.Platform)
+  def test_only_tpu_platform_names_start_with_v(self, platform):
+    # torch_benchmark_test.py and distributed_runner.py rely on this: they tell
+    # TPU platforms apart by name before they import torch, so that TorchTPU
+    # never loads anywhere else.
+    self.assertEqual(
+        platform.value.startswith("v"),
+        target_lib.make_target(platform).device_kind
+        == target_lib.DeviceKind.TPU,
+    )
+
 
 class MakeTargetTest(parameterized.TestCase):  # ABSLTEST_OK=benchmark
 

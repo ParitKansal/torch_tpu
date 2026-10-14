@@ -14,9 +14,13 @@
 
 """Tests for torch_device_ops."""
 
+import sys
+import types
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import torch
 from perflab import target as target_lib
 from perflab import torch_device_ops
@@ -120,6 +124,75 @@ class TorchDeviceOpsTest(seed_test_utils.RepeatableTest):
       count = ops.compile_count()
 
     self.assertEqual(count, 7)
+
+
+def _module(name: str, file: str) -> types.ModuleType:
+  module = types.ModuleType(name)
+  module.__file__ = file
+  return module
+
+
+def _without_torch_tpu(*modules: types.ModuleType) -> dict[str, Any]:
+  """This process' `sys.modules` without TorchTPU, plus `modules`."""
+  result = {
+      name: module
+      for name, module in sys.modules.items()
+      if name.split(".")[0] != "torch_tpu"
+  }
+  result.update({module.__name__: module for module in modules})
+  return result
+
+
+class CheckTorchTpuNotLoadedTest(seed_test_utils.RepeatableTest):
+
+  @parameterized.parameters(
+      target_lib.Platform.CPU,
+      target_lib.Platform.B200_1,
+      target_lib.Platform.B200_8,
+  )
+  def test_raises_on_gpu_and_cpu_when_loader_is_imported(self, platform):
+    loader = _module("torch_tpu._loader", "/torch_tpu/_loader.py")
+    with mock.patch.dict(sys.modules, _without_torch_tpu(loader), clear=True):
+      with self.assertRaisesRegex(  # ASSERT_RAISES_OK=benchmark
+          RuntimeError,
+          rf"torch_tpu is loaded on non-tpu platform '{platform.value}'"
+          r" \(torch_tpu\._loader\)",
+      ):
+        torch_device_ops.check_torch_tpu_not_loaded(
+            target_lib.make_target(platform)
+        )
+
+  def test_raises_when_an_extension_module_is_imported(self):
+    extension = _module(
+        "torch_tpu._internal.env", "/torch_tpu/_internal/env.so"
+    )
+    with mock.patch.dict(
+        sys.modules, _without_torch_tpu(extension), clear=True
+    ):
+      with self.assertRaisesRegex(  # ASSERT_RAISES_OK=benchmark
+          RuntimeError, r"\(torch_tpu\._internal\.env\)"
+      ):
+        torch_device_ops.check_torch_tpu_not_loaded(
+            target_lib.make_target(target_lib.Platform.B200_1)
+        )
+
+  def test_passes_with_only_pure_python_torch_tpu_modules(self):
+    python_module = _module(
+        "torch_tpu.perflab.cases", "/torch_tpu/perflab/cases.py"
+    )
+    with mock.patch.dict(
+        sys.modules, _without_torch_tpu(python_module), clear=True
+    ):
+      torch_device_ops.check_torch_tpu_not_loaded(
+          target_lib.make_target(target_lib.Platform.B200_1)
+      )
+
+  def test_passes_on_tpu_when_loaded(self):
+    loader = _module("torch_tpu._loader", "/torch_tpu/_loader.py")
+    with mock.patch.dict(sys.modules, _without_torch_tpu(loader), clear=True):
+      torch_device_ops.check_torch_tpu_not_loaded(
+          target_lib.make_target(target_lib.Platform.V7_1X1X1)
+      )
 
 
 if __name__ == "__main__":

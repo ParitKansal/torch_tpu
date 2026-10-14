@@ -451,16 +451,7 @@ class DistributedRunnerTest(seed_test_utils.RepeatableTest):
         "TORCH_TPU_SLICEBUILDER_ADDRESSES": "host0:8070,host1:8070",
     }
 
-    with (
-        mock.patch.dict(os.environ, pinned_env, clear=True),
-        mock.patch.object(
-            distributed_runner.distributed_utils.env,
-            "get_str_env_once",
-            side_effect=lambda name, default_value=None: os.environ.get(
-                name, default_value
-            ),
-        ),
-    ):
+    with mock.patch.dict(os.environ, pinned_env, clear=True):
       distributed_runner.main(["distributed_runner"])
 
     mock_mp_spawn.assert_called_once()

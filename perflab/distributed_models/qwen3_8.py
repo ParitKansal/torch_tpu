@@ -46,6 +46,7 @@ from perflab import registry as registry_lib
 from perflab import step_lib
 from perflab import target as target_lib
 from perflab import torch_device_ops
+from perflab.model_utils import torchtitan_batching
 from perflab.model_utils import torchtitan_qwen3_5
 from torchtitan.experiments.graph_trainer import simple_fsdp
 
@@ -62,10 +63,15 @@ _SUPPORTED_PLATFORMS: frozenset[target_lib.Platform] = frozenset({
     target_lib.Platform.B200_8,
 })
 
-# Per-rank sequence length in RunScope.FULL (local batch 1, bf16) on every
-# supported platform. GPUs use the TPU value for a like-for-like comparison, not
-# the largest that fits in B200 HBM.
+# Per-sequence token length in RunScope.FULL on every supported platform.
+# Local batch size (sequences per process) is chosen so both platforms train on
+# 2 sequences per chip under chip parity (1 sequence/process on TPU where 1 chip
+# = 2 TensorCore processes; 2 sequences/process on GPU where 1 chip = 1 process;
+# e.g. v7_2x2x1 has 8 processes x 1 x 2048 = 16,384 tokens/step and b200_4 has
+# 4 processes x 2 x 2048 = 16,384 tokens/step).
 _FULL_SEQ_LEN = 2048
+
+make_inputs = torchtitan_batching.make_inputs
 
 
 def build_model(
@@ -73,6 +79,8 @@ def build_model(
     device: str,
     world_size: int,
     dtype: torch.dtype,
+    *,
+    seq_len: int | None = None,
 ) -> nn.Module:
   """Builds the torchtitan model in `dtype`, checkpoints and SimpleFSDP-shards it.
 
@@ -84,6 +92,7 @@ def build_model(
     device: Device string (e.g. "tpu", "cuda" or "cpu").
     world_size: Number of ranks to fully shard the parameters across.
     dtype: Parameter / compute / gradient-reduction dtype.
+    seq_len: Per-sequence token length `S` when inputs are packed `(B * S,)`.
 
   Returns:
     The SimpleFSDP-wrapped model in train mode.
@@ -91,7 +100,7 @@ def build_model(
   # Built on meta and materialized directly on the device: every rank holding a
   # full CPU copy would exhaust host RAM at ws8.
   torch.manual_seed(12345)
-  model = torchtitan_qwen3_5.build_model(config, device, dtype)
+  model = torchtitan_qwen3_5.build_model(config, device, dtype, seq_len=seq_len)
   model.train()
 
   # Per-layer activation checkpointing, as SimpleFSDP expects: each layer's
@@ -138,30 +147,6 @@ def cross_entropy_loss(
   labels = input_kwargs.pop("labels")
   logits = model(*input_args, **input_kwargs)
   return nn.functional.cross_entropy(logits.float(), labels)
-
-
-def make_inputs(
-    vocab_size: int, seq_len: int, rank: int, device: str
-) -> tuple[torch.Tensor, torch.Tensor]:
-  """Returns one packed `(seq_len,)` token / label sequence for `rank`.
-
-  torchtitan takes packed `(T,)` tokens. The data differs per rank, as in real
-  data-parallel training.
-
-  Args:
-    vocab_size: Token ids are drawn from `[0, vocab_size)`.
-    seq_len: Tokens per rank.
-    rank: Seeds the per-rank data.
-    device: Device to place the tensors on.
-  """
-  generator = torch.Generator().manual_seed(1234 + rank)
-  tokens, labels = [
-      torch.randint(
-          0, vocab_size, (seq_len,), dtype=torch.long, generator=generator
-      ).to(device)
-      for _ in range(2)
-  ]
-  return tokens, labels
 
 
 @registry_lib.register_benchmark(
@@ -213,25 +198,38 @@ def qwen3_8_27b_4_layers_simple_fsdp_training(
     num_layers = 4
 
   device_str = ctx.device_kind.value
+  batch_size = torchtitan_batching.batch_size_for_target(ctx.target)
+  tokens_per_step = world_size * batch_size * seq_len
   config = torchtitan_qwen3_5.text_config("27B", num_layers, seq_len)
   logging.info(
       "Rank %d/%d: building torchtitan Qwen3.8 (27B arch) num_layers=%d"
-      " seq_len=%d with SimpleFSDP fully_shard",
+      " batch_size=%d seq_len=%d tokens_per_step=%d with SimpleFSDP"
+      " fully_shard",
       rank,
       world_size,
       num_layers,
+      batch_size,
       seq_len,
+      tokens_per_step,
   )
   model = build_model(
       config,
       device_str,
       world_size,
       dtype=torch_device_ops.get_torch_dtype(ctx.dtype),
+      seq_len=seq_len,
   )
-  tokens, labels = make_inputs(config.vocab_size, seq_len, rank, device_str)
+  tokens, labels = make_inputs(
+      config.vocab_size, seq_len, rank, device_str, batch_size=batch_size
+  )
+  input_kwargs: dict[str, Any] = {"labels": labels}
+  if batch_size > 1:
+    input_kwargs["positions"] = torch.arange(
+        seq_len, dtype=torch.long, device=device_str
+    ).repeat(batch_size)
   # capturable=True keeps the step counter on device, so the compiled step has
   # no host sync.
   opt = torch.optim.AdamW(
       model.parameters(), lr=1e-4, fused=True, capturable=True
   )
-  return model, (tokens,), {"labels": labels}, opt
+  return model, (tokens,), input_kwargs, opt

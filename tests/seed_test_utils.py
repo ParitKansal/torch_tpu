@@ -21,7 +21,6 @@ from typing import Final
 from absl.testing import absltest
 from absl.testing import parameterized
 import torch
-from torch_tpu._internal.device import _device_ops_backend
 
 DEFAULT_RANDOM_SEED: Final[int] = 1234
 
@@ -145,6 +144,11 @@ class VaryingSeedInPostsubmitTest(SeededTest):
 
   @classmethod
   def choose_seed(cls) -> int:
+    # Imported here, not at the top: it loads TorchTPU's C++ extensions, and GPU
+    # benchmark runs import this module (through distributed_utils) but must
+    # never load TorchTPU.
+    from torch_tpu._internal.device import _device_ops_backend  # pylint: disable=g-import-not-at-top
+
     if (
         cls.varies_seed_in_postsubmit()
         and not absltest.FLAGS["test_random_seed"].present  #

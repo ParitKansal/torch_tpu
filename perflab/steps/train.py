@@ -13,13 +13,18 @@
 # limitations under the License.
 
 import functools
+from typing import TYPE_CHECKING
 from absl import logging
 import torch
 from perflab import loss as loss_lib
-from perflab import single_trace_trainer_adapter
 from perflab import step_lib
 from perflab import target as target_lib
 from perflab.steps import common
+
+if TYPE_CHECKING:
+  # Imported at run time only on TPU targets: it loads TorchTPU's C++ extension,
+  # which GPU and CPU runs must never load.
+  from perflab import single_trace_trainer_adapter  # pylint: disable=g-bad-import-order
 
 
 class _StandardTrainingStepper(common.BaseStepper):
@@ -74,8 +79,10 @@ class _StandardTrainingStepper(common.BaseStepper):
 
 def _to_single_trace_optimizer(
     optimizer, use_bfloat16_moments: bool = False
-) -> single_trace_trainer_adapter.Optimizer:
+) -> "single_trace_trainer_adapter.Optimizer":
   """Converts a torch.optim.Optimizer into a SingleTraceTrainer Optimizer."""
+  from perflab import single_trace_trainer_adapter  # pylint: disable=g-import-not-at-top,redefined-outer-name
+
   if isinstance(optimizer, single_trace_trainer_adapter.Optimizer):
     return optimizer
   defaults = getattr(optimizer, "defaults", {})
@@ -130,6 +137,10 @@ class SingleTraceTrainingStepper(common.BaseStepper):
     use_bfloat16_moments = (
         first_param is not None and first_param.dtype == torch.bfloat16
     )
+    # Imported here: it loads TorchTPU's C++ extension, which GPU and CPU runs
+    # must never load, and this stepper only runs on TPU targets.
+    from perflab import single_trace_trainer_adapter  # pylint: disable=g-import-not-at-top,redefined-outer-name
+
     self._trainer = single_trace_trainer_adapter.SingleTraceTrainerAdapter(
         model=self._model,
         optimizer=_to_single_trace_optimizer(

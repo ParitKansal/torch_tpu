@@ -46,9 +46,11 @@ def modes_for(
 
   |          | torch                                            | torchax  |
   |----------|--------------------------------------------------|----------|
-  | tpu      | eager_default, eager_optimized,                  | compiled |
-  |          | eager_defer_never_and_launch_blocking, compiled  |          |
-  | cuda/cpu | eager_default, compiled                          |    N/A   |
+  | tpu      | eager_default, eager_optimized, compiled         | compiled |
+  | cuda     | eager_default, compiled                          |    N/A   |
+  | cpu      | eager_default                                    |    N/A   |
+
+  The debug mode eager_defer_never_and_launch_blocking never runs by default.
 
   Args:
     framework: The execution framework (Framework enum or string representation

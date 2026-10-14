@@ -40,6 +40,12 @@ package(
     default_visibility = ["//:__subpackages__"],
 )
 
+exports_files([
+    "benchmark_registry.pbtxt",
+    # Run by tests/torch_tpu_isolation_test the way the benchmark binaries run it.
+    "torch_benchmark_test.py",
+])
+
 torch_tpu_py_library(
     name = "common",
     srcs = ["common.py"],

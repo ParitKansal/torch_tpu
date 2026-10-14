@@ -29,6 +29,23 @@ Environment & Flags:
                        weights cache dir                       (default: false)
 """
 
+# GPU and CPU runs must never load TorchTPU: once loaded, it registers as
+# PyTorch's PrivateUse1 device, and the first backward pass then makes autograd
+# try to initialize the TPU runtime, which takes minutes on hosts without TPUs.
+# So on every platform but TPUs, turn off the automatic loading of PyTorch
+# device backends, which TorchTPU follows too, before anything imports torch or
+# torch_tpu. TPU platform names start with "v" (see `target.Platform`). The
+# processes that run the cases inherit the setting.
+import os  # pylint: disable=g-bad-import-order
+
+if (
+    not os.environ.get("BENCHMARK_PLATFORM", "cpu")  # PY_ENVIRON_OK=pre-torch.
+    .lower()
+    .startswith("v")
+):
+  os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"  # PY_ENVIRON_OK=pre-torch.
+
+# pylint: disable=g-import-not-at-top
 import contextlib
 from typing import Any
 import unittest
@@ -53,6 +70,8 @@ from perflab import step_lib
 from perflab import steps
 from perflab import target as target_lib
 from perflab import torch_device_ops
+
+# pylint: enable=g-import-not-at-top
 
 # This binary IS the torch run. Not a flag -- see module docstring.
 _FRAMEWORK = mode_lib.Framework.TORCH
@@ -212,4 +231,7 @@ def _test_main(*args: Any, **kwargs: Any) -> None:
 
 
 if __name__ == "__main__":
+  # Fails at startup, rather than after a stall in the first backward pass, if
+  # an import loaded TorchTPU on a GPU or CPU platform.
+  torch_device_ops.check_torch_tpu_not_loaded(target_lib.make_target(_PLATFORM))
   multiprocessing.handle_test_main(_test_main)

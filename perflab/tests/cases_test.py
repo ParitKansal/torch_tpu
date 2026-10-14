@@ -16,6 +16,7 @@
 
 import itertools
 import os
+import random
 from typing import Any
 from unittest import mock
 
@@ -378,6 +379,50 @@ class GetSkipReasonTest(seed_test_utils.RepeatableTest):
       }
       self.assertEqual(len(set(shard_0) & skipped_cases), 2)
       self.assertEqual(len(set(shard_1) & skipped_cases), 2)
+
+  def test_each_case_runs_in_exactly_one_shard_whatever_the_name_order(self):
+    # Each shard is a separate process with its own loader, which can see the
+    # test names in a different order (e.g. absltest shuffles them by
+    # --test_randomize_ordering_seed). The shards must still partition the
+    # cases.
+    case_triples = [
+        (f"model_{i}_{mode.value}", _make_spec(f"model_{i}"), mode)
+        for i in range(7)
+        for mode in (common.RunMode.EAGER_DEFAULT, common.RunMode.COMPILED)
+    ]
+    params = cases.case_params(case_triples)
+    test_cls = type(
+        "FakeBenchmarkTest",
+        (seed_test_utils.RepeatableTest,),
+        {
+            "framework": mode_lib.Framework.TORCH,
+            "platform": target_lib.Platform.V7_1X1X1,
+            "case_params": params,
+            **{name: lambda self: None for name in params},
+        },
+    )
+    total_shards = 3
+
+    assigned = []
+    with mock.patch.dict(
+        os.environ,  # PY_ENVIRON_OK=test
+        {
+            "TEST_RANDOMIZE_ORDERING_SEED": "0",
+            "TORCH_TPU_BENCHMARK_ORDER_SEED": "0123abcd",
+        },
+        clear=False,
+    ):
+      for shard_index in range(total_shards):
+        loader = cases.BenchmarkTestLoader()
+        names = loader.getTestCaseNames(test_cls)
+        random.Random(shard_index).shuffle(names)
+        assigned.extend(
+            loader.shardTestCaseNames(
+                itertools.cycle(range(total_shards)), names, shard_index
+            )
+        )
+
+    self.assertCountEqual(assigned, params)
 
 
 if __name__ == "__main__":

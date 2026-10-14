@@ -78,6 +78,7 @@ torch_tpu_py_library(
         "//src/torch_tpu/_internal/profiler",
         "//src/torch_tpu/_internal/sync",
         "//src/torch_tpu/_internal/tracing",
+        "//src/torch_tpu/_internal/utils:annotations",
         "//src/torch_tpu/_internal/utils:hardware",
         "//src/torch_tpu/_internal/utils:tt_warnings",
     ],
@@ -119,6 +120,7 @@ py_library_providing_imports_info(
         ":_loader",
         ":_tcmalloc_check",
         ":_versioned_so_loader",
+        "//shims/torch:pytorch",
         "//src/torch_tpu/_internal:testing",  # buildcleaner: keep
     ],
 )

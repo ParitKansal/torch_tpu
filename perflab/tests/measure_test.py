@@ -125,6 +125,58 @@ class RecordingSleep:
     self.durations.append(seconds)
 
 
+class FakeClock:
+  """Fake time.perf_counter that only advances when told to."""
+
+  def __init__(self):
+    self.now = 0.0
+
+  def __call__(self):
+    return self.now
+
+  def advance(self, seconds):
+    self.now += seconds
+
+
+class TimedStep(CountingStep):
+  """Step that takes `step_seconds` on `clock`.
+
+  If `compile_seconds` is set, the first `get_step_fn()` call takes that long,
+  as the single-trace training stepper traces and compiles in `get_step_fn()`.
+  """
+
+  def __init__(self, clock, step_seconds=1.0, compile_seconds=0.0):
+    super().__init__()
+    self._clock = clock
+    self._step_seconds = step_seconds
+    self._compile_seconds = compile_seconds
+
+  def __call__(self):
+    self._clock.advance(self._step_seconds)
+    return super().__call__()
+
+  def get_step_fn(self):
+    self._clock.advance(self._compile_seconds)
+    self._compile_seconds = 0.0
+    return self
+
+
+class _SlowXprofSession:
+  """Fake XprofSession whose start and end each take `seconds` on `clock`."""
+
+  def __init__(self, clock, seconds):
+    self._clock = clock
+    self._seconds = seconds
+
+  def start_session(self, **kwargs):
+    del kwargs
+    self._clock.advance(self._seconds)
+
+  def end_session_and_get_xspace_and_url(self):
+    self._clock.advance(self._seconds)
+    return None, "http://xprof/?session_id=slow"
+
+
 def _run_measure(
     step,
     ops,
@@ -353,6 +405,45 @@ class MeasureMetricsTest(seed_test_utils.RepeatableTest):
     # overhead = (10.0 + 2.0 + 2.0) - (2.0 * 3) = 8.0
     self.assertEqual(m.warmup_overhead_seconds, 8.0)
 
+  def test_first_step_time_includes_compilation_in_get_step_fn(self):
+    clock = FakeClock()
+    step = TimedStep(clock, step_seconds=1.0, compile_seconds=100.0)
+    with mock.patch.object(measure_lib.time, "perf_counter", new=clock):
+      m = _run_measure(step, RecordingOps(), steps=3, min_warmup=2)
+
+    self.assertEqual(m.first_step_time_seconds, 101.0)
+    # Warmup timings: 101.0, 1.0 -> overhead = 102.0 - 1.0 * 2 = 100.0
+    self.assertEqual(m.warmup_overhead_seconds, 100.0)
+    self.assertEqual(m.post_warmup_step_time_seconds, 1.0)
+
+  def test_e2e_wall_time_excludes_profiling(self):
+    def run(enable_xprof):
+      clock = FakeClock()
+      with (
+          mock.patch.object(measure_lib.time, "perf_counter", new=clock),
+          mock.patch.object(
+              measure_lib.xprof_adapter,
+              "XprofSession",
+              new=lambda: _SlowXprofSession(clock, seconds=5.0),
+          ),
+      ):
+        return _run_measure(
+            TimedStep(clock),
+            RecordingOps(),
+            steps=3,
+            min_warmup=2,
+            xprof_steps=2,
+            enable_xprof=enable_xprof,
+        )
+
+    profiled = run(enable_xprof=True)
+    unprofiled = run(enable_xprof=False)
+
+    # 2 warmup steps + 3 post-warmup steps of 1 s each.
+    self.assertEqual(unprofiled.e2e_wall_time_seconds, 5.0)
+    self.assertEqual(profiled.e2e_wall_time_seconds, 5.0)
+    self.assertEqual(profiled.first_step_time_seconds, 1.0)
+
   def test_timing_metrics_emit_milliseconds(self):
     perf_metrics = metrics_lib.PerformanceMetrics(
         e2e_wall_time_seconds=12.123456789,
@@ -375,12 +466,61 @@ class MeasureMetricsTest(seed_test_utils.RepeatableTest):
         metric_map["average_post_warmup_device_time_ms"], 0.987654, places=6
     )
 
-    default_perf_metrics = metrics_lib.PerformanceMetrics(
+  def test_negative_durations_are_converted_to_milliseconds(self):
+    # The warmup overhead is negative when the last warmup step is slower than
+    # the average warmup step.
+    metric_map = metrics_lib.PerformanceMetrics(
+        warmup_overhead_seconds=-0.25
+    ).metric_map()
+
+    self.assertEqual(metric_map["warmup_overhead_seconds"], -0.25)
+    self.assertEqual(metric_map["warmup_overhead_ms"], -250.0)
+
+  def test_unavailable_device_time_is_not_exported(self):
+    # Without a profile, e.g. on GPU, device time stays at its -1.0 default.
+    metric_map = metrics_lib.PerformanceMetrics(
         post_warmup_step_time_seconds=0.001234567
+    ).metric_map()
+
+    self.assertNotIn("average_post_warmup_device_time_seconds", metric_map)
+    self.assertNotIn("average_post_warmup_device_time_ms", metric_map)
+
+  def test_unmeasured_host_compilation_memory_is_not_exported(self):
+    # measure() does not measure it, so perflab benchmarks never set it.
+    metric_map = metrics_lib.PerformanceMetrics(
+        post_warmup_step_time_seconds=0.001234567
+    ).metric_map()
+
+    self.assertNotIn("peak_host_compilation_memory_mb", metric_map)
+
+  def test_metric_map_keys(self):
+    """The exported metric names are what the benchmark dashboards query."""
+    perf_metrics = metrics_lib.PerformanceMetrics(
+        e2e_wall_time_seconds=10.0,
+        num_warmup_steps=3,
+        first_step_time_seconds=2.0,
+        warmup_overhead_seconds=1.0,
+        post_warmup_step_time_seconds=0.5,
+        peak_device_memory_mb=1024.0,
+        average_post_warmup_device_time_seconds=0.25,
+        peak_host_compilation_memory_mb=512.0,
     )
-    self.assertEqual(
-        default_perf_metrics.metric_map()["average_post_warmup_device_time_ms"],
-        -1.0,
+
+    self.assertCountEqual(
+        perf_metrics.metric_map(),
+        [
+            "num_warmup_steps",
+            "first_step_time_seconds",
+            "first_step_time_ms",
+            "warmup_overhead_seconds",
+            "warmup_overhead_ms",
+            "post_warmup_step_time_seconds",
+            "post_warmup_step_time_ms",
+            "average_post_warmup_device_time_seconds",
+            "average_post_warmup_device_time_ms",
+            "peak_device_memory_mb",
+            "peak_host_compilation_memory_mb",
+        ],
     )
 
 

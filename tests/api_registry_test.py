@@ -58,6 +58,13 @@ class ApiRegistryTest(seed_test_utils.RepeatableTest):
 
     tpu_dir = dir(torch.tpu)
     self.assertEmpty([name for name in tpu_dir if name.startswith("_")])
+    self.assertIn("load", tpu_dir)
+    self.assertIs(torch.tpu.load, _loader.load)
+    self.assertEqual(
+        getattr(torch.tpu.load, annotations.TT_API_STAGE, None),
+        annotations.Stage.STABLE.value,
+    )
+    self.assertFalse(hasattr(torch_tpu, "load"))
 
     for bad_attr in ("non_existent_attribute", "__mro__"):
       with self.assertRaises(  # ASSERT_RAISES_OK=Verifies torch.tpu raises AttributeError for unknown/dunder attributes

@@ -331,7 +331,7 @@ def _(mo):
     | `NODE_RANK` | Rank of the current host node in a multi-host job. |
     | `MASTER_ADDR` | Address of the rank-0 coordinator node for `torch.distributed`. |
     | `MASTER_PORT` | Port on `MASTER_ADDR` used for `torch.distributed` rendezvous. |
-    | `TORCH_DEVICE_BACKEND_AUTOLOAD` | Set to `"0"` to disable automatic registration of the `torch_tpu` backend. |
+    | `TORCH_DEVICE_BACKEND_AUTOLOAD` | Set to `"0"` to disable automatic loading of the `torch_tpu` backend on `import torch` and `import torch_tpu`; call `torch.tpu.load()` after `import torch_tpu` to load it explicitly. |
     | `TORCH_TPU_ALLOW_LEGACY_DEVICE_APIS` | When enabled, allows calling internal `torch.tpu` device APIs (those with a `torch.accelerator` equivalent) from outside PyTorch core with a one-time warning instead of raising a `RuntimeError`. Use this only as a temporary fix; migrating to `torch.accelerator.*` is preferred, and this variable will likely be removed in a future release. |
     | `LIBTPU_INIT_ARGS` | Space-separated initialization flags passed to `libtpu` and the PJRT runtime. |
     | `TPU_PREMAPPED_BUFFER_SIZE` | Premapped host-to-device memory buffer size in bytes for the PJRT client. |

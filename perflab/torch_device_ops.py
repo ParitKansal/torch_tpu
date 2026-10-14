@@ -14,6 +14,7 @@
 
 """TorchDeviceOps: the torch implementation of the DeviceOps protocol."""
 
+import sys
 from typing import Any
 
 import torch
@@ -29,6 +30,42 @@ class DeviceCountMismatch(RuntimeError):
 
   Raised at construction so a misconfigured run fails at startup.
   """
+
+
+def check_torch_tpu_not_loaded(target: target_lib.Target) -> None:
+  """Raises if TorchTPU is loaded although `target` is not a TPU.
+
+  Once loaded, TorchTPU registers as PyTorch's PrivateUse1 device, and the first
+  backward pass then makes autograd try to initialize the TPU runtime: on a host
+  without TPUs that stalls the process for minutes and inflates its metrics.
+  The benchmark binaries call this at startup on every platform, so that loading
+  TorchTPU on a GPU or CPU platform fails right away. It loads when
+  `torch_tpu._loader` or one of TorchTPU's C++ extension modules is imported.
+
+  Args:
+    target: The benchmark target.
+
+  Raises:
+    RuntimeError: If `target` is not a TPU and TorchTPU is loaded.
+  """
+  if target.device_kind == target_lib.DeviceKind.TPU:
+    return
+  loaded = sorted(
+      name
+      for name, module in list(sys.modules.items())
+      if name == "torch_tpu._loader"
+      or (
+          name.startswith("torch_tpu.")
+          and str(getattr(module, "__file__", "")).endswith(".so")
+      )
+  )
+  if loaded:
+    raise RuntimeError(
+        f"torch_tpu is loaded on non-tpu platform {target.platform.value!r}"
+        f" ({', '.join(loaded)}); autograd would try to initialize the tpu"
+        " runtime, so gpu and cpu benchmarks must not import torch_tpu"
+        " modules that load it"
+    )
 
 
 _TORCH_DTYPE_MAP = {

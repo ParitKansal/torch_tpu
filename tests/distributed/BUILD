@@ -1030,7 +1030,6 @@ torch_tpu_py_test(
         {"MASTER_ADDR": "127.0.0.1"},
         {},
     ),
-    shard_count = 8,
     tags = if_oss(
         ["exclusive"],
         [],
@@ -1041,13 +1040,12 @@ torch_tpu_py_test(
         "notsan",  # TODO(b/497035517)
     ],
     deps = [
-        ":distributed_utils",
+        ":continuous_test_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/absl_py/testing:parameterized",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/compile",
-        "//src/torch_tpu/_internal/distributed:handshake",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/utils:test_utils",
         "@pypi//portpicker",

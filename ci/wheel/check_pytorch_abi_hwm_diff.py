@@ -319,6 +319,15 @@ def run_hwm_diff_check(opts: HwmDiffOptions) -> int:
               cwd=opts.repo_root,
               check=True,
           )
+          # Overlay `requirements/` from `orig_sha` so that if the PR updates
+          # PyTorch wheel hashes (because upstream replaced the RC wheel in the
+          # package index), building the diffbase glues does not fail with a
+          # pip hash mismatch against the old hashes at `diff_base`.
+          subprocess.run(
+              ["git", "checkout", orig_sha, "--", "requirements"],
+              cwd=opts.repo_root,
+              check=False,
+          )
           _build_diffbase_glues(
               opts.repo_root,
               pytorch_version=opts.pytorch_version,
@@ -327,7 +336,7 @@ def run_hwm_diff_check(opts: HwmDiffOptions) -> int:
           )
         finally:
           subprocess.run(
-              ["git", "checkout", "--detach", orig_sha],
+              ["git", "checkout", "--force", "--detach", orig_sha],
               cwd=opts.repo_root,
               check=False,
           )

@@ -66,6 +66,7 @@ jobs:
       default_python_version: "3.14"
       latest_python_version: "3.14"
       should_build: ${{ steps.check_diff.outputs.should_build }}
+      is_release_branch: ${{ startsWith(github.base_ref, 'release/') || startsWith(github.ref_name, 'release/') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -135,8 +136,9 @@ jobs:
           # The oldest Python version builds the release wheel flavor (no
           # PyTorch-nightly glue), so both flavors are exercised in
           # presubmit; the nightly smoke tests only run against the default
-          # Python's wheel, which keeps the nightly glue.
-          extra_bazel_args: ${{ matrix.python_version == '3.11' && '--config=wheel_release' || '' }}
+          # Python's wheel, which keeps the nightly glue. Release branches
+          # build every wheel in release config.
+          extra_bazel_args: ${{ (needs.setup.outputs.is_release_branch == 'true' || matrix.python_version == '3.11') && '--config=wheel_release' || '' }}
 
   test_wheels_cpu:
     name: "Test wheel on ${{ matrix.custom_name || 'CPU' }} (Python ${{ matrix.python_version }})"
@@ -162,8 +164,10 @@ jobs:
             runner: linux-x86-n4-16
             nox_smoke_test: "cpu-cuda"
           - python_version: ${{ needs.setup.outputs.default_python_version }}
-            wheel_version: "nightly"
-            custom_name: "CPU (PyTorch Nightly)"
+            # On release branches, collapse into the existing standard entry so
+            # no separate PyTorch Nightly job is scheduled.
+            wheel_version: ${{ needs.setup.outputs.is_release_branch == 'true' && 'standard' || 'nightly' }}
+            custom_name: ${{ needs.setup.outputs.is_release_branch == 'true' && '' || 'CPU (PyTorch Nightly)' }}
             runner: linux-x86-n4-16
             # Presubmit installs the exact nightly snapshot the wheel's
             # nightly glue was built against (requirements/
@@ -171,7 +175,7 @@ jobs:
             # and gates hard. Postsubmit installs the *latest* nightly, which
             # can drift ABI-incompatibly from that snapshot -- a failure
             # there is the signal to refresh the lock.
-            nox_smoke_test: ${{ github.event_name == 'pull_request' && 'cpu-nightly-pinned' || 'cpu-nightly' }}
+            nox_smoke_test: ${{ needs.setup.outputs.is_release_branch == 'true' && '' || (github.event_name == 'pull_request' && 'cpu-nightly-pinned' || 'cpu-nightly') }}
     runs-on: ${{ matrix.runner }}
     container:
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
@@ -424,7 +428,7 @@ jobs:
   test_wheel_tpu_nightly:
     name: "Test wheel on TPU v7 (PyTorch Nightly) (Python ${{ needs.setup.outputs.default_python_version }})"
     needs: [build_wheels, setup]
-    if: needs.setup.outputs.should_build == 'true'
+    if: needs.setup.outputs.should_build == 'true' && needs.setup.outputs.is_release_branch != 'true'
     runs-on: linux-x86-tpu7x-56-1tpu
     container:
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)
@@ -482,6 +486,7 @@ jobs:
         env:
           SETUP_RESULT: ${{ needs.setup.result }}
           SHOULD_BUILD: ${{ needs.setup.outputs.should_build }}
+          IS_RELEASE_BRANCH: ${{ needs.setup.outputs.is_release_branch }}
           BUILD_WHEELS_RESULT: ${{ needs.build_wheels.result }}
           TEST_WHEELS_CPU_RESULT: ${{ needs.test_wheels_cpu.result }}
           TEST_INTERMEDIATE_PATCHES_RESULT: ${{ needs.test_wheel_intermediate_patches.result }}
@@ -512,6 +517,9 @@ jobs:
             job_name="${entry%%:*}"
             result="${entry#*:}"
             echo "${job_name}: ${result}"
+            if [[ "${job_name}" == "test_wheel_tpu_nightly" && "${IS_RELEASE_BRANCH}" == "true" && "${result}" == "skipped" ]]; then
+              continue
+            fi
             if [[ "${result}" != "success" ]]; then
               echo "::error::${job_name} did not succeed (result: ${result})"
               FAILED=1

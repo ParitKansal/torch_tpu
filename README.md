@@ -67,7 +67,7 @@ Install the latest public release
 `uv` to all `pip` commands):
 
 ```bash
-pip install torch-tpu==0.2.0 --extra-index-url https://download.pytorch.org/whl/cpu
+pip install torch_tpu==0.2.0 --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
 ### Build from source

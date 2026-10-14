@@ -947,7 +947,6 @@ torch_tpu_py_test(
 torch_tpu_py_test(
     name = "dcp_test",
     srcs = ["dcp_test.py"],
-    shard_count = 2,
     tags = if_oss(
         ["exclusive"],
         [],
@@ -958,6 +957,7 @@ torch_tpu_py_test(
         "notsan",  # TODO(b/497035517): fix the test in tsan mode.
     ],
     deps = [
+        ":continuous_test_utils",
         ":distributed_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",

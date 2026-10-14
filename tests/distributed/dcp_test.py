@@ -29,10 +29,10 @@ import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import staging
 from torch.distributed.checkpoint import state_dict
 import torch.distributed.tensor as dt
-import torch.multiprocessing as mp
 from torch_tpu._internal.utils import test_utils as utils
 from torch_tpu._internal.distributed import multiprocessing
 from tests import seed_test_utils
+from tests.distributed import continuous_test_utils
 from tests.distributed import distributed_utils
 
 _IN_FEATURES = 64
@@ -58,10 +58,8 @@ def _create_sharded_model(device_mesh, seed):
   return model.to("tpu")
 
 
-def _init_test_env(seed: int, enable_cpu_backend: bool = False):
-  rank = int(os.environ["RANK"])
-  backend = "cpu:gloo,tpu:tpu_dist" if enable_cpu_backend else "tpu_dist"
-  dist.init_process_group(backend=backend)
+def _init_test_env(seed: int):
+  rank = dist.get_rank()
   world_size = dist.get_world_size()
   device_mesh = dt.init_device_mesh("tpu", (world_size,))
   model = _create_sharded_model(device_mesh, seed)
@@ -108,12 +106,11 @@ def run_dtensor_dcp_save_load(checkpoint_dir: str) -> None:
   for param, param_new in zip(model.parameters(), model_new.parameters()):
     utils.assert_close(param.to_local(), param_new.to_local())
 
-  _cleanup_test_env()
-
 
 def run_dtensor_dcp_async_save_load(checkpoint_dir: str) -> None:
   """Tests DCP with DTensor using the async_save and load API."""
-  model, device, device_mesh = _init_test_env(seed=42, enable_cpu_backend=True)
+  dist.init_process_group(backend="cpu:gloo,tpu:tpu_dist")
+  model, device, device_mesh = _init_test_env(seed=42)
   _warmup_model(model, device, device_mesh)
 
   # Capture the original parameter values
@@ -245,20 +242,31 @@ def run_dtensor_dcp_state_dict_optimizer(checkpoint_dir: str) -> None:
   for param, param_new in zip(model.parameters(), model_new.parameters()):
     utils.assert_close(param.to_local(), param_new.to_local())
 
-  _cleanup_test_env()
 
+class DCPTest(continuous_test_utils.TpuMultiProcContinuousTest):
 
-class DCPTest(seed_test_utils.MultiProcessRepeatableTest):
+  world_size = 8
+  _checkpoint_counter = 0
 
-  _world_size = distributed_utils.get_tpu_device_count()
+  def _create_checkpoint_dir(self) -> str:
+    type(self)._checkpoint_counter += 1
+    path = os.path.join(
+        absltest.get_default_test_tmpdir(),
+        f"{self._testMethodName}_{type(self)._checkpoint_counter}",
+    )
+    os.makedirs(path, exist_ok=True)
+    return path
 
   def test_dtensor_dcp_save_load(self):
-    checkpoint_dir = self.create_tempdir().full_path
-    distributed_utils.dist_run(
-        self._world_size,
-        run_dtensor_dcp_save_load,
-        checkpoint_dir=checkpoint_dir,
-    )
+    run_dtensor_dcp_save_load(self._create_checkpoint_dir())
+
+  def test_dtensor_dcp_state_dict_optimizer(self):
+    run_dtensor_dcp_state_dict_optimizer(self._create_checkpoint_dir())
+
+
+class DCPAsyncTest(seed_test_utils.MultiProcessRepeatableTest):
+
+  _world_size = distributed_utils.get_tpu_device_count()
 
   def test_dtensor_dcp_async_save_load(self):
     checkpoint_dir = self.create_tempdir().full_path
@@ -268,15 +276,6 @@ class DCPTest(seed_test_utils.MultiProcessRepeatableTest):
         checkpoint_dir=checkpoint_dir,
     )
 
-  def test_dtensor_dcp_state_dict_optimizer(self):
-    checkpoint_dir = self.create_tempdir().full_path
-    distributed_utils.dist_run(
-        self._world_size,
-        run_dtensor_dcp_state_dict_optimizer,
-        checkpoint_dir=checkpoint_dir,
-    )
-
 
 if __name__ == "__main__":
-  mp.set_start_method("spawn")
   multiprocessing.handle_test_main(absltest.main)

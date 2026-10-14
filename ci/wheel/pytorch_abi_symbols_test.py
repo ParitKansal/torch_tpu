@@ -25,6 +25,7 @@ import pathlib
 import subprocess
 import tempfile
 import threading
+from unittest import mock
 import zipfile
 
 from absl.testing import absltest
@@ -703,11 +704,60 @@ class PytorchAbiSymbolsTest(absltest.TestCase):
         ["_ZN3c105ErrorC1Ev", "_ZN5torch7Library4_defEv"],
         version="2.15.0",
     )
-    run_git("add", "ci/wheel/pytorch_symbols_2_15_0.txt")
-    run_git("commit", "-m", "Update HWM")
+    (test_repo / "requirements").mkdir(parents=True, exist_ok=True)
+    req_file = test_repo / "requirements" / "requirements_torch_2_15_0.txt"
+    req_file.write_text("torch==2.15.0+cpu --hash=sha256:new\n", encoding="utf-8")
+    run_git("add", "ci/wheel/pytorch_symbols_2_15_0.txt", "requirements")
+    run_git("commit", "-m", "Update HWM and requirements")
     head_sha = run_git("rev-parse", "HEAD")
     rc, _, err = run_hwm_diff()
     self.assertEqual(rc, 0, msg=err)
+
+    # 7. When `base_wheel_dir` is omitted, checking out `base_sha` overlays
+    # `requirements/` from `head_sha` before building diffbase glues and
+    # restores `head_sha` afterwards.
+    observed_req_during_base_build: list[str] = []
+
+    def fake_build_diffbase_glues(
+        repo_root: pathlib.Path,
+        pytorch_version: str,
+        python_version: str,
+        dest_dir: pathlib.Path,
+    ) -> None:
+      del pytorch_version, python_version
+      observed_req_during_base_build.append(
+          (repo_root / "requirements" / "requirements_torch_2_15_0.txt").read_text(
+              encoding="utf-8"
+          )
+      )
+      _compile_stub_so(
+          dest_dir / "env_2_15_0.so",
+          undefined_symbols=["_ZN3c105ErrorC1Ev"],
+      )
+
+    with mock.patch.object(
+        check_pytorch_abi_hwm_diff,
+        "_build_diffbase_glues",
+        side_effect=fake_build_diffbase_glues,
+    ):
+      stdout_buf = io.StringIO()
+      stderr_buf = io.StringIO()
+      with (
+          contextlib.redirect_stdout(stdout_buf),
+          contextlib.redirect_stderr(stderr_buf),
+      ):
+        rc = check_pytorch_abi_hwm_diff.main([
+            f"--repo-root={test_repo}",
+            f"--base-sha={base_sha}",
+            f"--head-sha={head_sha}",
+            f"--wheel-dir={dist_dir}",
+        ])
+    self.assertEqual(rc, 0, msg=stderr_buf.getvalue())
+    self.assertEqual(
+        observed_req_during_base_build,
+        ["torch==2.15.0+cpu --hash=sha256:new\n"],
+    )
+    self.assertEqual(run_git("rev-parse", "HEAD"), head_sha)
 
 
 if __name__ == "__main__":

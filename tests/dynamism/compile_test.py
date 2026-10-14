@@ -22,14 +22,9 @@ import torch
 from torch_tpu._internal import testing as tt_testing
 from torch_tpu._internal.compile import _backend
 from torch_tpu._internal.utils import test_utils as utils
-from tests import oss_utils
 from tests import seed_test_utils
 
 
-@oss_utils.skip_if_libtpu_version(
-    lambda v: v < (0, 0, 47),
-    "Bounded dynamism requires libtpu >= 0.0.47",
-)
 class CompileTest(seed_test_utils.RepeatableTest):
 
   def setUp(self):
@@ -622,10 +617,6 @@ class CompileTest(seed_test_utils.RepeatableTest):
     utils.assert_close(out.cpu(), expected)
 
 
-@oss_utils.skip_if_libtpu_version(
-    lambda v: v < (0, 0, 47),
-    "Bounded dynamism requires libtpu >= 0.0.47",
-)
 class SymIntArithmeticTest(seed_test_utils.RepeatableTest):
 
   def setUp(self):
@@ -677,10 +668,6 @@ class SymIntArithmeticTest(seed_test_utils.RepeatableTest):
     self.assertEqual(out1, 9)
 
 
-@oss_utils.skip_if_libtpu_version(
-    lambda v: v < (0, 0, 47),
-    "Bounded dynamism requires libtpu >= 0.0.47",
-)
 class DynamicReshapeTest(seed_test_utils.RepeatableTest):
 
   def setUp(self):
@@ -972,10 +959,6 @@ class DynamicReshapeTest(seed_test_utils.RepeatableTest):
     utils.assert_close(out1, expected)
 
 
-@oss_utils.skip_if_libtpu_version(
-    lambda v: v < (0, 0, 47),
-    "Bounded dynamism requires libtpu >= 0.0.47",
-)
 class DynamicBroadcastTest(seed_test_utils.RepeatableTest):
 
   def test_expand_dynamic_input_unambiguous(self):
@@ -1103,10 +1086,6 @@ class DynamicBroadcastTest(seed_test_utils.RepeatableTest):
     utils.assert_close(out, expected)
 
 
-@oss_utils.skip_if_libtpu_version(
-    lambda v: v < (0, 0, 47),
-    "Bounded dynamism requires libtpu >= 0.0.47",
-)
 class DynamicSliceTest(seed_test_utils.RepeatableTest):
 
   def setUp(self):
@@ -1295,10 +1274,6 @@ class DynamicSliceTest(seed_test_utils.RepeatableTest):
       utils.assert_close(out, expected)
 
 
-@oss_utils.skip_if_libtpu_version(
-    lambda v: v < (0, 0, 47),
-    "Bounded dynamism requires libtpu >= 0.0.47",
-)
 class DynamicConvolutionTest(seed_test_utils.RepeatableTest):
 
   def setUp(self):
@@ -1640,10 +1615,6 @@ class DynamicConvolutionTest(seed_test_utils.RepeatableTest):
       self.assertEqual(mock_dc.call_count, 1)
 
 
-@oss_utils.skip_if_libtpu_version(
-    lambda v: v < (0, 0, 47),
-    "Bounded dynamism requires libtpu >= 0.0.47",
-)
 class DynamicDropoutTest(seed_test_utils.RepeatableTest):
 
   def setUp(self):
@@ -1813,10 +1784,6 @@ class DynamicDropoutTest(seed_test_utils.RepeatableTest):
       utils.assert_close(out_cpu[mask], (x_cpu * scale)[mask])
 
 
-@oss_utils.skip_if_libtpu_version(
-    lambda v: v < (0, 0, 47),
-    "Bounded dynamism requires libtpu >= 0.0.47",
-)
 class DynamicErrorHandlingTest(seed_test_utils.RepeatableTest):
 
   def test_mlir_lowering_failure_raises_not_implemented_error(self):
@@ -1868,10 +1835,6 @@ class DynamicErrorHandlingTest(seed_test_utils.RepeatableTest):
       self.assertEqual(mock_dyn_compiler.call_args.kwargs["bucket_size"], 64)
 
 
-@oss_utils.skip_if_libtpu_version(
-    lambda v: v < (0, 0, 47),
-    "Bounded dynamism requires libtpu >= 0.0.47",
-)
 class SymMaxMinTest(seed_test_utils.RepeatableTest):
 
   def setUp(self):
@@ -1895,10 +1858,6 @@ class SymMaxMinTest(seed_test_utils.RepeatableTest):
     utils.assert_close(out, expected)
 
 
-@oss_utils.skip_if_libtpu_version(
-    lambda v: v < (0, 0, 47),
-    "Bounded dynamism requires libtpu >= 0.0.47",
-)
 class IndexPutDynamicBooleanMaskTest(seed_test_utils.RepeatableTest):
 
   def setUp(self):

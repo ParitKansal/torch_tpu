@@ -23,12 +23,9 @@
 #define TORCH_TPU_CSRC_INTERNAL_MOSAIC_KILN_CORE_ELEMENTWISE_IMPL_H_
 
 #include <cstdint>
-#include <numbers>
 #include <string_view>
 
 #include "absl/log/absl_check.h"
-#include "csrc/common/libtpu_version.h"
-#include "csrc/common/version.h"
 #include "csrc/internal/mosaic/kiln/core/context.h"
 #include "csrc/internal/mosaic/kiln/core/dtype.h"
 #include "csrc/internal/mosaic/kiln/core/elementwise.h"
@@ -297,13 +294,7 @@ T ElementwiseOps<T, CmpResult>::Log(T v) {
 
 template <typename T, typename CmpResult>
 T ElementwiseOps<T, CmpResult>::Log2(T v) {
-  // Older libtpu releases have no native log2 lowering.
-  static const bool is_natively_supported =
-      torch_tpu::GetLibtpuVersion() >= torch_tpu::Version(0, 0, 48);
-  if (is_natively_supported) {
-    return UnaryFloat<mlir::math::Log2Op>(v, "Log2()");
-  }
-  return Log(v) * v.MakeConstant(std::numbers::log2e);
+  return UnaryFloat<mlir::math::Log2Op>(v, "Log2()");
 }
 
 template <typename T, typename CmpResult>

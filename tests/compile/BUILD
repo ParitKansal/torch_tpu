@@ -160,7 +160,6 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/compile:split_compiler",
         "//src/torch_tpu/_internal/distributed:collective_ops",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:oss_utils",
         "//tests:seed_test_utils",
     ],
 )
@@ -335,7 +334,6 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/device_utils:annotations",
         "//src/torch_tpu/_internal/execution_mode",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:oss_utils",
         "//tests:seed_test_utils",
     ],
 )

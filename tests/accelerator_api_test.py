@@ -29,7 +29,6 @@ from torch_tpu._internal import testing as tt_testing
 from torch_tpu._internal.utils import annotations
 from torch_tpu._internal.utils import test_utils as utils
 from torch_tpu._internal.utils import utils as tt_utils
-from tests import oss_utils
 from tests import seed_test_utils
 
 EagerMode: TypeAlias = execution_mode.EagerMode
@@ -645,11 +644,6 @@ class AcceleratorMemoryTest(seed_test_utils.RepeatableTest):
     ):
       memory_stats_fn("cpu")
 
-  @oss_utils.skip_if_libtpu_version(
-      lambda v: v < (0, 0, 42),
-      "TODO(b/565506249): Requires libtpu >= 0.0.42 for"
-      " reset_peak_memory_stats.",
-  )
   @parameterized.named_parameters(
       (
           "top_level",
@@ -703,11 +697,6 @@ class AcceleratorMemoryTest(seed_test_utils.RepeatableTest):
     ):
       reset_peak_fn(device_index=0)  # pytype: disable=wrong-keyword-args
 
-  @oss_utils.skip_if_libtpu_version(
-      lambda v: v < (0, 0, 42),
-      "TODO(b/565506249): Requires libtpu >= 0.0.42 for"
-      " reset_peak_memory_stats.",
-  )
   @parameterized.named_parameters(
       (
           "top_level",

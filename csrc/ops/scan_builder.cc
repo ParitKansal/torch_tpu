@@ -25,8 +25,6 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "csrc/common/error_utils.h"
-#include "csrc/common/libtpu_version.h"
-#include "csrc/common/version.h"
 #include "csrc/ops/op_builder_utils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -47,8 +45,6 @@
 namespace torch_tpu {
 
 namespace {
-
-constexpr Version kMinLibtpuVersionWithNativeScan(0, 0, 44);
 
 mlir::Value GetScanDimSize(mlir::MlirBuilder& builder, mlir::MlirOp input,
                            const int64_t scan_dim) {
@@ -501,12 +497,10 @@ absl::StatusOr<DynamicMlirOpResults> BuildScanShlo(
 
   // Associative scans go to the native scan emitter via chlo.ScanOp for static
   // shapes; non-associative scans and dynamic shapes use the StableHLO while
-  // loop below. Falls back to the while loop when the compiler (libtpu) is too
-  // old to compile the native scan emitter (b/529376045) or when inputs are
-  // dynamic since the TPU compiler does not yet support dynamic scans.
+  // loop below. Falls back to the while loop when inputs are dynamic since the
+  // TPU compiler does not yet support dynamic scans.
   const bool is_static = type.hasStaticShape();
-  if (options.is_associative &&
-      GetLibtpuVersion() >= kMinLibtpuVersionWithNativeScan && is_static) {
+  if (options.is_associative && is_static) {
     const ScanOptions emit_options = {.direction = options.direction,
                                       .should_squeeze = false,
                                       .is_associative = true};
@@ -572,14 +566,12 @@ absl::StatusOr<DynamicMlirOpResults> BuildScanShlo(
 
   // Associative scans go to the native scan emitter via chlo.ScanOp for static
   // shapes; non-associative scans and dynamic shapes use the StableHLO while
-  // loop below. Falls back to the while loop when the compiler (libtpu) is too
-  // old to compile the native scan emitter (b/529376045) or when inputs are
-  // dynamic since the TPU compiler does not yet support dynamic scans.
+  // loop below. Falls back to the while loop when inputs are dynamic since the
+  // TPU compiler does not yet support dynamic scans.
   const bool all_static = llvm::all_of(scan_inputs, [](mlir::MlirOp op) {
     return GetTensorTypeOrDie(op).hasStaticShape();
   });
-  if (options.is_associative &&
-      GetLibtpuVersion() >= kMinLibtpuVersionWithNativeScan && all_static) {
+  if (options.is_associative && all_static) {
     return BuildAssociativeScanChlo(builder, scan_inputs, scan_dim,
                                     num_scan_inputs, carry_inits, output_inits,
                                     body_builder, options);

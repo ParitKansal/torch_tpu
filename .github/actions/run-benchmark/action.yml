@@ -60,9 +60,9 @@ inputs:
     required: false
     default: ""
   libtpu_spec:
-    description: 'libtpu requirement, e.g. "libtpu==0.0.41". Empty installs none.'
+    description: 'libtpu requirement, e.g. "libtpu==0.0.50". Empty installs none.'
     required: false
-    default: "libtpu==0.0.41"
+    default: "libtpu==0.0.50"
   extras:
     description: >-
       Which pyproject.toml optional-dependency groups to install alongside the

@@ -334,10 +334,6 @@ def verify_op_supports_dynamism(
           f" {reason}."
       )
 
-  libtpu = utils.libtpu_version()
-  if op.name == "addcdiv" and libtpu is not None and libtpu < (0, 0, 47):
-    return "addcdiv requires libtpu >= 0.0.47 for dynamism support."
-
   ### [TEST INFRA TASKS] ###
   # The following indicate changes needed in this file to increase coverage.
 
@@ -391,22 +387,6 @@ def verify_op_supports_dynamism(
   reduction_deny_list = ["all", "any"]
   if op.name in reduction_deny_list:
     return f"reduction op {op.name} is not supported with dynamism."
-
-  ### [OSS BUGS] ###
-  # In OSS (libtpu 0.0.41 in CI), eager ops sometimes return wrong values for
-  # float64 and int64 inputs with a bounded dim, e.g. int64 results that lose
-  # their upper 32 bits. The bounded dim is chosen at random, so the ops that
-  # fail can change between runs. Skip these dtypes for all ops.
-  # TODO: b/449736443 - Re-enable once these dtypes pass in OSS.
-  if (
-      mode == EAGER
-      and libtpu is not None
-      and canonical_input.dtype in (torch.float64, torch.int64)
-  ):
-    return (
-        f"{canonical_input.dtype} is not supported in eager dynamism mode in"
-        " OSS."
-    )
 
   # Valid testcase!
   return None

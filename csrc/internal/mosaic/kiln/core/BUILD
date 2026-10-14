@@ -85,8 +85,6 @@ torch_tpu_cc_library(
         ":context",
         ":dtype",
         ":elementwise",
-        "//csrc/common:libtpu_version",
-        "//csrc/common:version",
         "@com_google_absl//absl/log:absl_check",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",

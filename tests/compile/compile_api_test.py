@@ -35,7 +35,6 @@ from torch_tpu._internal.compile.compiler import StaticCompiler
 from torch_tpu._internal.compile.debug import TpuCompileDebug
 from torch_tpu._internal.device_utils import annotations
 from torch_tpu._internal.utils import test_utils as utils
-from tests import oss_utils
 from tests import seed_test_utils
 
 EagerMode: TypeAlias = execution_mode.EagerMode
@@ -707,10 +706,6 @@ class CompileApiTest(seed_test_utils.RepeatableTest):
       expected = torch.tensor([[1, 1, 1, 1, 0, 0, 0, 0]], dtype=torch.int64)
       utils.assert_close(padded_tensor.cpu(), expected)
 
-  @oss_utils.skip_if_libtpu_version(
-      lambda v: v < (0, 0, 47),
-      'Bounded dynamism requires libtpu >= 0.0.47',
-  )
   def test_get_or_compile_slice_module(self):
     target_shapes = [[1, 4]]
     padded_shapes = [[1, 8]]

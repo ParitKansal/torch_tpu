@@ -540,15 +540,13 @@ class PrecisionTest(seed_test_utils.RepeatableTest):
 
     ref_out = run("cpu", torch.float64)
     fwd_err = {}
-    # HIGH (bf16x3) requires OSS libtpu >= 0.0.48.
     for mode in (Precision.DEFAULT, Precision.HIGH, Precision.HIGHEST):
       out = run("tpu", torch.float32, mode)
       fwd_err[mode] = rel_err(out, ref_out)
 
     self.assertLess(fwd_err[Precision.HIGHEST], 1e-4)
-    self.assertLess(fwd_err[Precision.HIGHEST], fwd_err[Precision.DEFAULT])
-    if (ver := utils.libtpu_version()) is None or ver >= (0, 0, 48):
-      self.assertLess(fwd_err[Precision.HIGH], fwd_err[Precision.DEFAULT])
+    self.assertLess(fwd_err[Precision.HIGHEST], fwd_err[Precision.HIGH])
+    self.assertLess(fwd_err[Precision.HIGH], fwd_err[Precision.DEFAULT])
 
   def test_sdpa_math_precision_in_shlo(self):
     device = torch.device("tpu")
@@ -607,11 +605,8 @@ class PrecisionTest(seed_test_utils.RepeatableTest):
     self.assertLess(math_err["highest"], math_err["high"])
     self.assertLess(math_err["high"], math_err["medium"])
     self.assertLess(default_err["highest"], 1e-4)
-    if (ver := utils.libtpu_version()) is None or ver >= (0, 0, 48):
-      self.assertLess(default_err["highest"], default_err["high"])
-      self.assertLess(default_err["high"], default_err["medium"])
-    else:
-      self.assertLess(default_err["highest"], default_err["medium"])
+    self.assertLess(default_err["highest"], default_err["high"])
+    self.assertLess(default_err["high"], default_err["medium"])
 
 
 if __name__ == "__main__":

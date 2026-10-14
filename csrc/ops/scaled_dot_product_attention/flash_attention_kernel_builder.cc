@@ -47,8 +47,6 @@
 #include "csrc/common/dtype.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/fixed_size_span.h"
-#include "csrc/common/libtpu_version.h"
-#include "csrc/common/version.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/events_queue.h"
 #include "csrc/eager/op_dispatcher.h"
@@ -413,9 +411,7 @@ absl::StatusOr<mlir::torch_tpu::FlashAttnConfig> CreateFlashAttnConfig(
         mlir::stablehlo::Precision::HIGHEST) {  // EXPLICIT_PRECISION_OK=sdpa
       config.precision = mlir::tpu::ContractPrecision::kFP32;
     } else if (precision == mlir::stablehlo::Precision::
-                                HIGH &&  // EXPLICIT_PRECISION_OK=sdpa
-               GetLibtpuVersion() >= Version(0, 0, 48)) {
-      // HIGH (kBF16x3) requires OSS libtpu >= 0.0.48.
+                                HIGH) {  // EXPLICIT_PRECISION_OK=sdpa
       config.precision = mlir::tpu::ContractPrecision::kBF16x3;
     }
   }

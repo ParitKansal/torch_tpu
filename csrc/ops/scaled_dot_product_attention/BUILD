@@ -140,8 +140,6 @@ torch_tpu_cc_library(
     hdrs = ["util.h"],
     deps = [
         ":flash_attention_config",
-        "//csrc/common:libtpu_version",
-        "//csrc/common:version",
         "//csrc/internal/mosaic:op_builders",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/log",
@@ -247,8 +245,6 @@ torch_tpu_cc_library(
         "//csrc/common:dtype",
         "//csrc/common:error_utils",
         "//csrc/common:fixed_size_span",
-        "//csrc/common:libtpu_version",
-        "//csrc/common:version",
         "//csrc/eager:device_buffer",
         "//csrc/eager:events_queue",
         "//csrc/eager:op_dispatcher",

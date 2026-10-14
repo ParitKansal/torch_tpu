@@ -19,14 +19,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <numbers>
 #include <string>
 
 #include "absl/base/casts.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
-#include "csrc/common/libtpu_version.h"
-#include "csrc/common/version.h"
 #include "csrc/internal/mosaic/op_builders.h"
 #include "csrc/ops/scaled_dot_product_attention/flash_attention_config.h"
 #include "llvm/ADT/STLExtras.h"
@@ -136,8 +133,6 @@ TypedValue<VectorType> LoadTileSlice(ImplicitLocOpBuilder& b, Value arg,
   MemRefType arg_type = cast<MemRefType>(arg.getType());
   SmallVector<Value> indices = TileIndices(b, arg_type, row_offset, col_offset);
 
-  // Newer versions of LibTPU support sub-rank loads, but until we update in
-  // OSS we must do it manually.
   SmallVector<int64_t> full_shape(arg_type.getRank(), 1);
   full_shape[full_shape.size() - 2] = num_rows;
   full_shape[full_shape.size() - 1] = num_cols;
@@ -166,8 +161,6 @@ void StoreTileSlice(ImplicitLocOpBuilder& b, Value value, Value arg,
   ArrayRef<int64_t> value_shape =
       cast<VectorType>(converted_value.getType()).getShape();
 
-  // Newer versions of LibTPU support sub-rank stores, but until we update in
-  // OSS we must do it manually.
   SmallVector<int64_t> full_shape(arg_type.getRank(), 1);
   full_shape[full_shape.size() - 2] = value_shape[0];
   full_shape[full_shape.size() - 1] = value_shape[1];
@@ -504,14 +497,7 @@ KVWindowMaps CreateKVWindowMaps(OpBuilder& builder, func::FuncOp fn,
 }
 
 Value CreateLog2(ImplicitLocOpBuilder& b, Value input) {
-  static bool is_natively_supported =
-      ::torch_tpu::GetLibtpuVersion() >= ::torch_tpu::Version(0, 0, 48);
-  if (is_natively_supported) {
-    return math::Log2Op::create(b, input);
-  }
-  float log2e = std::numbers::log2e_v<float>;
-  Value natural_log = math::LogOp::create(b, input);
-  return ScaleValue(b, natural_log, log2e);
+  return math::Log2Op::create(b, input);
 }
 
 Value BuildDropoutKeepMask(ImplicitLocOpBuilder& b,

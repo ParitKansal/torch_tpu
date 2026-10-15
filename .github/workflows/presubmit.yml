@@ -69,6 +69,7 @@ concurrency:
 jobs:
   run_tests:
     name: "Presubmit on ${{ matrix.job_info.name || matrix.job_info.runner }}"
+    if: false  # EXPERIMENT (DO NOT SUBMIT)
     # Available self-hosted runners.
     strategy:
       fail-fast: false
@@ -193,14 +194,11 @@ jobs:
           echo "Selected RBE region: $region (${flags:-default instance})"
           echo "extra_bazel_flags=$flags" >> "$GITHUB_OUTPUT"
 
-      - name: Run Impacted Tests via bazel-diff
-        uses: ./.github/actions/bazel-diff
-        with:
-          base_sha: ${{ inputs.override_base_sha }}
-          current_sha: ${{ inputs.override_current_sha || github.sha }}
-          bazel_config: "ci_rbe_presubmit"
-          extra_bazel_flags: ${{ steps.rbe_region.outputs.extra_bazel_flags }}
-          test_all: ${{ contains(github.event.pull_request.labels.*.name, 'ci:disable-bazel-diff') }}
+      # EXPERIMENT (DO NOT SUBMIT): run only ops_test_dynamic_tpu-v5lite.
+      - name: Run ops_test_dynamic_tpu-v5lite
+        env:
+          EXTRA_BAZEL_FLAGS: ${{ steps.rbe_region.outputs.extra_bazel_flags }}
+        run: bazel test --config=ci_rbe_presubmit ${EXTRA_BAZEL_FLAGS} //tests:ops_test_dynamic_tpu-v5lite
 
   # Runs the tests tagged `requires-newest-deps` (e.g. //tests/api:tt_apis_test,
   # since tests/api/tt_apis.yaml tracks the public APIs with the newest
@@ -208,6 +206,7 @@ jobs:
   # them.
   tpu_v5_newest_deps:
     name: "Presubmit on TPU v5 (newest deps)"
+    if: false  # EXPERIMENT (DO NOT SUBMIT)
     runs-on: linux-x86-ct5lp-224-8tpu
     container:
       image: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:30a9cf2ed330736957b3256dd3df69a13a556ae46626e9ad2ba205fa7a3c0051"  # Tag infrastructure-public-image-f0ac56f68949 (built 2026-09-21)

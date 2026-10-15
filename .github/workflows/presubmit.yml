@@ -106,19 +106,27 @@ jobs:
   # workflow call, however, only ends in `success` when every job inside it
   # either succeeded or was skipped by its own `if:`, so gating on the calls'
   # aggregate result fails presubmit on any error without claiming a runner.
+  # The newest-dependencies job must pass too; otherwise a failure there (e.g.
+  # in //tests/api:tt_apis_test) doesn't block submission.
   presubmit_tests_passed:
     name: "Presubmit"
-    needs: run_tests
+    needs: [run_tests, tpu_v5_newest_deps]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Check presubmit results
         env:
           RUN_TESTS_RESULT: ${{ needs.run_tests.result }}
+          NEWEST_DEPS_RESULT: ${{ needs.tpu_v5_newest_deps.result }}
         run: |
           echo "run_tests: ${RUN_TESTS_RESULT}"
+          echo "tpu_v5_newest_deps: ${NEWEST_DEPS_RESULT}"
           if [[ "${RUN_TESTS_RESULT}" != "success" ]]; then
             echo "::error::Presubmit did not succeed (result: ${RUN_TESTS_RESULT})"
+            exit 1
+          fi
+          if [[ "${NEWEST_DEPS_RESULT}" != "success" ]]; then
+            echo "::error::Presubmit on TPU v5 (newest deps) did not succeed (result: ${NEWEST_DEPS_RESULT})"
             exit 1
           fi
 

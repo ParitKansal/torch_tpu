@@ -67,12 +67,14 @@ def _(mo):
     *   [View compilation artifacts](4_debugging_and_performance_analysis_4_viewing_compilation_artifacts.py):
         How to dump, view and understand compilation artifacts.
     
-    
     ## Analyze performance
     *   [Numerical precision and parity](4_debugging_and_performance_analysis_1_numerical_precision.py):
         Controlling precision in TorchTPU.
     *   [Profile performance with XProf](4_debugging_and_performance_analysis_2_xprof_for_torchtpu.py):
         How to use XProf as a TorchTPU profiler.
+    
+    ## FAQ
+    *   [TorchTPU FAQ](faq.py): Frequently asked questions about TorchTPU.
     """)
   return
 

@@ -186,18 +186,19 @@ generated from Bazel action graph, [clangd](https://clangd.llvm.org/) is able to
 enrich the editor with various smart features, including code completions, go-to
 definitions, *etc.*
 
-1.  Install VSCode extensions via UI or the following command:
-
-    ```sh
-    code --install-extension llvm-vs-code-extensions.vscode-clangd
-    # Uninstall Microsoft C++ extensions to avoid interference.
-    code --uninstall-extension ms-vscode.cpptools
-    ```
-
 1.  Generate the initial `compile_commands.json`:
 
     ```sh
     tools/setup_clangd.py
+    ```
+
+    If the VSCode `code` CLI is on `PATH`, the script also installs the `clangd`
+    extension automatically. Otherwise, install the extension via the editor UI.
+
+1.  Uninstall the Microsoft C++ extension, which interferes with `clangd`:
+
+    ```sh
+    code --uninstall-extension ms-vscode.cpptools
     ```
 
 It may take a while (> 30 minutes) for the first run to make a full build, but

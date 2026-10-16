@@ -37,7 +37,7 @@ You can share feedback by emailing
 [torchtpu-feedback@google.com](mailto:torchtpu-feedback@google.com) and we
 welcome contributions directly to the repo:
 [https://github.com/google-pytorch/torch_tpu](https://github.com/google-pytorch/torch_tpu).
-You can also use the tag "TPU" at [dicuss.pytorch.com](http://dicuss.pytorch.com).
+You can also use the tag "TPU" at [discuss.pytorch.org](https://[dicuss.pytorch.com](https://discuss.pytorch.org/)).
 
 ## Will there be any community engagement forums?
 

@@ -2,11 +2,22 @@
 torch_tpu_version: 0.1.1.dev20260922
 ---
 
-# TorchTPU supported feature set
+# TorchTPU supported feature set and future work
 
-## Current supported features
+## Current supported feature set
+
+The table below reflects our current feature coverage as of the initial open-source release.
+
+To help you evaluate TorchTPU for your workloads, we categorize features into two tiers:
+
+* **Validated:** Capabilities that have end-to-end continuous testing, automated CI/CD coverage, and benchmark verification across standard model architectures.
+* **Experimental:** Early-stage implementations, emerging APIs, or prototype features. These are functional and available for early feedback, but may undergo behavioral refinement or API changes based on community input.
+
+!!! note
+    TorchTPU is evolving rapidly in the open. For the most up-to-date status or to request specific features, visit our [GitHub](https://github.com/google-pytorch/torch_tpu).*
 
 <!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
+
 |  | **Validated** | **Experimental** |
 | ----- | ----- | ----- |
 | **PyTorch Community Engagement** | <ul><li>OSS release for TorchTPU, vLLM, SGLang, TorchTitan, TorchRec</li><li>Accepting external PRs</li><li>Documentation / Tutorials</li><li>CI/CD</li><li>Colab</li></ul> | <ul><li>TPU Agent for ATEN migration</li></ul> |
@@ -20,18 +31,27 @@ torch_tpu_version: 0.1.1.dev20260922
 | **Production-ready Solutions** | <ul><li>Inference (multi-host, P/D disagg)</li><li>Fine-tuning (up to \~8K chips)</li></ul> |  |
 <!-- mdformat on -->
 
-## Future roadmap
+## Future work
+
+This section outlines our future development horizons and explorations, not a committed release schedule.
+
+As a community-first open-source project, our development priorities are intentionally responsive to community feedback and developer adoption. Features, timelines, and architectural approaches may evolve as we learn what workloads matter most to you.
+
+We organize our upcoming work into two broad horizons:
+
+* **Near-Term Focus:** Areas of active design, ongoing prototyping, and performance hardening that the core team is currently prioritizing.
+* **Future Exploration:** Long-term architectural explorations, prospective ecosystem integrations, and community-requested backlog items that we are actively investigating.
 
 <!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
-|  | **Soon-ish** | **Later** |
+|  | **Near-term focus** | **Future exploration** |
 | ----- | ----- | ----- |
 | **PyTorch Community Engagement** | <ul><li>More docs / tutorial / blogs</li></ul> | <ul><li>TPU Agent for Kernel migration</li></ul> |
-| **TPU Support** | <ul><li>v8i/t/r</li></ul> |  |
+| **TPU Support** | <ul><li>v8i, v8t</li></ul> |  |
 | **Basic functionality** | <ul><li>Streams</li><li>Graph capture</li><li>Eager mode with fast startup time</li><li>Dynamic ops (no recompilation)</li></ul> |  |
 | **Model Architectures** | <ul><li>Day 1 model support</li></ul> |  |
-| **Kernel Support** |  | <ul><li>?</li></ul> |
+| **Kernel Support** |  |  |
 | **Quantization** | <ul><li>Block-wise FP8/FP4 w/ torchao (peak perf on TPUv8t)</li></ul> |  |
-| **Distributed** | <ul><li>FSDPv2 (w/ perf)</li><li>MPMD (w/ perf)</li><li>Training \> 8K chips</li><li>Multi-tier checkpointing</li><li>Goodput</li></ul> | Training \>\> 8K chips  |
+| **Distributed** | <ul><li>FSDPv2 (w/ perf)</li><li>MPMD (w/ perf)</li><li>Training \> 8K chips</li><li>Multi-tier checkpointing</li><li>Goodput</li></ul> | <ul><li>Training >> 8K chips</li></ul>  |
 | **Ecosystem Integrations** | <ul><li>VeRL</li></ul> |  |
 | **Production-ready Solutions** | <ul><li>RL</li></ul> | <ul><li>Pre-training</li></ul> |
 <!-- mdformat on -->

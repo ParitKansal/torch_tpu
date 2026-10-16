@@ -47,7 +47,7 @@ def _(mo):
 
     ## Is TorchTPU replacing JAX?
 
-    No. TorchTPU is designed to complement JAX by providing a native PyTorch
+    No. TorchTPU is designed to complement the TPU ecosystem by providing a native PyTorch
     entry point to Cloud TPUs. It allows developers with existing PyTorch
     codebases to run directly on TPUs with zero or minimal rewrites, eliminating
     the need to rewrite models in JAX or manage separate codebases for GPU and
@@ -74,7 +74,7 @@ def _(mo):
 
     ## What performance can I expect when onboarding standard models?
 
-    At the time of writing, we have validated out-of-box execution on 5,000 most
+    At the time of writing, we have validated out-of-box execution on the 5,000 most
     downloaded Hugging Face models, including:
 
     * **LLMs:** LLama, DeepSeek, Mistral, Gemma, Qwen, GPT, OPT, BLOOM, Falcon,
@@ -94,7 +94,7 @@ def _(mo):
     ## Which TPU generations are actively supported? What's the plan for future hardware support?
 
     TorchTPU actively supports v5e, v5p, Trillium (TPU v6e) and Ironwood (TPU
-    v7x). Validation and optimization for TPU v8 and future chips will continue
+    v7x). Validation and optimization for TPU v8 and future chips is ongoing
     as part of our roadmap.
 
     ## Where can we find TorchTPU's supported features & future roadmap?

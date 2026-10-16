@@ -34,7 +34,7 @@ def _(mo):
     The simplest way to use TorchTPU is on a TPU VM.
     In this example we will run a simple tensor parallel example. 
     We do not focus on the example, just the setup code to get running on a VM.
-    In the following tutorial we will see how to achieve something similar through GKE, which is necessary to access recent TPU hardware.
+    In the following tutorial, we will see how to achieve something similar through GKE, which is necessary to access recent TPU hardware.
     
     
     ## 1. Install and set up
@@ -54,13 +54,7 @@ def _(mo):
     ### Step 2: Install TorchTPU and dependencies
 
     ```bash
-    # 1. Authenticate to get access to wheel files
-    pip install keyrings.google-artifactregistry-auth
-    gcloud auth login
-    gcloud auth application-default login
-
-    # 2. Install torch_tpu, PyTorch 2.11 CPU will install automatically, do not install manually.
-    pip install --pre --index-url "https://oauth2accesstoken:$(gcloud auth print-access-token)@us-python.pkg.dev/ml-oss-artifacts-transient/torch-tpu-virtual-registry/simple/" torch_tpu
+    pip install torch_tpu
     ```
     """)
   return

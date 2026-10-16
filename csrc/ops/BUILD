@@ -253,6 +253,7 @@ torch_tpu_cc_test(
         "//csrc/common:context_states",
         "//csrc/common:oss_test_main",
         "//shims/torch:torch_headers",
+        "@com_google_absl//absl/cleanup",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Support",
         "@stablehlo//stablehlo/integrations/cpp/builder:mlir_builder",

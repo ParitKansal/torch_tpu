@@ -98,7 +98,8 @@ class PythonContext {
  public:
   PythonContext() = default;
   PythonContext(std::vector<std::string> op_call_chain,
-                MaybeSharedTraceback traceback);
+                MaybeSharedTraceback traceback,
+                std::vector<std::string> name_scopes = {});
   // This type is move-only.
   PythonContext(PythonContext&& other) = default;
   PythonContext& operator=(PythonContext&& other) = default;
@@ -107,13 +108,19 @@ class PythonContext {
 
   // Returns a copy of this PythonContext.
   [[nodiscard]] PythonContext Copy() const {
-    return PythonContext(op_call_chain_, traceback_);
+    return PythonContext(op_call_chain_, traceback_, name_scopes_);
   }
 
   // Returns the names of the ops in the op call chain leading to the current
   // op.
   [[nodiscard]] const std::vector<std::string>& op_call_chain() const {
     return op_call_chain_;
+  }
+
+  // Returns the hierarchical name scopes (e.g. from nn_module_stack) active
+  // when the op was captured.
+  [[nodiscard]] const std::vector<std::string>& name_scopes() const {
+    return name_scopes_;
   }
 
   // Returns the python traceback of the op, if one has been captured.
@@ -130,6 +137,8 @@ class PythonContext {
   std::vector<std::string> op_call_chain_;
   // The python traceback of the op, if one has been captured.
   MaybeSharedTraceback traceback_;
+  // Optional hierarchical name scopes surrounding the op.
+  std::vector<std::string> name_scopes_;
 };
 
 // Encapsulates the name of the Python API boundary call.
@@ -201,6 +210,11 @@ class ScopedPythonContextCapturer {
   // ScopedPythonContextCapturer is alive for the current thread.
   [[nodiscard]] static std::optional<PythonContext> MaybeGetContext();
 
+  // Pushes or pops a hierarchical name scope (e.g. module hierarchy) on the
+  // current thread's context capturer stack.
+  static void PushNameScope(std::string scope);
+  static void PopNameScope();
+
   // For testing only: override the traceback of all currently alive contexts.
   static void SetTracebackForTesting(MaybeSharedTraceback traceback) {
     traceback_ = std::move(traceback);
@@ -229,6 +243,11 @@ class ScopedPythonContextCapturer {
                        // thread.
       std::vector<std::string>
           op_names_;
+  // Hierarchical name scopes active on the current thread, from outer to inner.
+  static thread_local  // CPP_THREAD_LOCAL_OK=needed only in the dispatching
+                       // thread.
+      std::vector<std::string>
+          name_scopes_;
   // nullptr when the context capturer stack for the current thread is
   // empty, or when traceback capture is disabled.
   // Otherwise, the traceback of all contexts in the stack.

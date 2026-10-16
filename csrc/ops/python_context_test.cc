@@ -16,6 +16,7 @@
 
 #include "csrc/ops/python_context.h"
 
+#include "absl/cleanup/cleanup.h"
 #include "csrc/common/context_manager.h"
 #include "csrc/common/context_states.h"
 #include "csrc/ops/op_names.h"
@@ -204,6 +205,27 @@ TEST(GetOriginalOpName, ReturnsFirstOpNameWhenProviderIsAlive) {
     EXPECT_EQ(GetRootOpName(OpName::kSub), "add");
   }
   EXPECT_EQ(GetRootOpName(OpName::kSub), "sub");
+}
+
+TEST(ScopedPythonContextCapturer, CapturesNameScopesAndFormatsMlirLocation) {
+  mlir::MLIRContext ctx;
+  ScopedPythonContextCapturer::PushNameScope(
+      "layers.0[SimpleTransformerBlock]");
+  absl::Cleanup pop_block = [] { ScopedPythonContextCapturer::PopNameScope(); };
+  ScopedPythonContextCapturer::PushNameScope("attn[SimpleAttention]");
+  absl::Cleanup pop_attn = [] { ScopedPythonContextCapturer::PopNameScope(); };
+  {
+    ScopedPythonContextCapturer capturer(OpName::kBmm);
+    const auto context = ScopedPythonContextCapturer::GetContext();
+    EXPECT_THAT(context.name_scopes(),
+                ElementsAre("layers.0[SimpleTransformerBlock]",
+                            "attn[SimpleAttention]"));
+    EXPECT_EQ(GetRootOpName(OpName::kAdd), "bmm");
+    const mlir::Location loc = MakeMlirLocation(ctx, context);
+    EXPECT_THAT(mlir::debugString(loc),
+                HasSubstr("layers.0[SimpleTransformerBlock]/"
+                          "attn[SimpleAttention]/bmm/bmm"));
+  }
 }
 
 }  // namespace

@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import copy
 import dataclasses
+import re
 import threading
 from typing import Any, TypeAlias
 
@@ -142,6 +143,59 @@ class ExportedMlir:
     return tpu_torch_compile.serialize_mlir_portable_artifact(self.module)
 
 
+# Dynamo roots module FQNs at the frame local or global that holds the module,
+# e.g. `L['self']` or `G['model']`.
+_DYNAMO_ROOT_RE = re.compile(r"^[LG]\[['\"]([^'\"]+)['\"]\]")
+
+
+def _extract_node_name_scopes(node: torch.fx.Node) -> list[str]:
+  """Extracts hierarchical module name scopes from FX node metadata.
+
+  Args:
+    node: The FX node, whose `nn_module_stack` (or `fwd_nn_module_stack` for
+      backward nodes) metadata lists its enclosing modules.
+
+  Returns:
+    One scope per enclosing module from outer to inner, each formatted as the
+    module path relative to its parent module followed by the module class
+    name, e.g. `["layers.0[TransformerBlock]", "attn[Attention]"]`. The root
+    module is omitted so that ops directly in it stay unscoped.
+  """
+  nn_stack = node.meta.get("nn_module_stack") or node.meta.get(
+      "fwd_nn_module_stack"
+  )
+  if not isinstance(nn_stack, Mapping):
+    return []
+
+  scopes: list[str] = []
+  prev_path = ""
+  for value in nn_stack.values():
+    if not isinstance(value, tuple) or len(value) < 2:
+      continue
+    fqn, mod_cls = value[0], value[1]
+    # Make Dynamo FQNs relative to the compiled module like torch.export FQNs,
+    # e.g. `L['self'].layers.0` to `layers.0` when compiling the module, and
+    # `L['model'].layers.0` to `model.layers.0` when compiling a function that
+    # takes the module as its `model` argument.
+    path = _DYNAMO_ROOT_RE.sub(r"\1", str(fqn))
+    # Skip the root module (`""` in torch.export or `L['self']` in Dynamo).
+    if path in ("", "self"):
+      continue
+    path = path.removeprefix("self.")
+    rel_path = path.removeprefix(prev_path + ".") if prev_path else path
+    prev_path = path
+
+    cls_name = (
+        mod_cls
+        if isinstance(mod_cls, str)
+        else getattr(mod_cls, "__name__", str(mod_cls))
+    )
+    cls_name = cls_name.rsplit(".", 1)[-1]
+    clean_name = rel_path.replace("/", "_")
+    scopes.append(f"{clean_name}[{cls_name}]")
+  return scopes
+
+
 class EagerLikeFxInterpreter(torch.fx.Interpreter):
   """Interpreter for TorchTPU.
 
@@ -204,7 +258,12 @@ class EagerLikeFxInterpreter(torch.fx.Interpreter):
       return super(EagerLikeFxInterpreter, self).run_node(node)
 
     self._set_func_code_to_node_source_locations(dispatch_fx_node, node)
-    return dispatch_fx_node(node)
+    # Prefix the names of the node's ops with its module scopes.
+    with contextlib.ExitStack() as stack:
+      for scope in _extract_node_name_scopes(node):
+        tpu_torch_compile.push_name_scope(scope)
+        stack.callback(tpu_torch_compile.pop_name_scope)
+      return dispatch_fx_node(node)
 
 
 def exported_to_mlir(

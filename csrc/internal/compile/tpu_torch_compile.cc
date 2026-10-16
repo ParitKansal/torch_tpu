@@ -2344,6 +2344,12 @@ TT_PYBIND11_MODULE(tpu_torch_compile, m) {
         "Pops the current state of the enable_tracebacks context manager.");
   m.def("push_enable_tracebacks", &PyPushEnableTracebacks, py::arg("enabled"),
         "Pushes a new state onto the enable_tracebacks context manager.");
+  m.def("push_name_scope", &ScopedPythonContextCapturer::PushNameScope,
+        py::arg("scope"),
+        "Pushes a hierarchical name scope onto the PythonContext capturer.");
+  m.def("pop_name_scope", &ScopedPythonContextCapturer::PopNameScope,
+        "Pops the top hierarchical name scope from the PythonContext "
+        "capturer.");
   m.def("serialize_executable", PySerializeExecutable, py::arg("executable"),
         "Serializes a PjRtLoadedExecutable to bytes for caching.");
   m.def("load_serialized_executable", PyLoadSerializedExecutable,

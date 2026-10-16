@@ -196,15 +196,23 @@ std::string MakeNameScopeOpStringFromCallChain(
   // For single op call chains, the name scope is the op itself.
   auto name_scope =
       op_call_chain.size() == 1 ? op_call_chain : op_call_chain.drop_back();
-  return absl::StrCat(absl::StrJoin(name_scope, "/"), "/", curr_op);
+  const std::string op_str =
+      absl::StrCat(absl::StrJoin(name_scope, "/"), "/", curr_op);
+  if (python_context.name_scopes().empty()) {
+    return op_str;
+  }
+  return absl::StrCat(absl::StrJoin(python_context.name_scopes(), "/"), "/",
+                      op_str);
 }
 
 }  // namespace
 
 PythonContext::PythonContext(std::vector<std::string> op_call_chain,
-                             MaybeSharedTraceback traceback)
+                             MaybeSharedTraceback traceback,
+                             std::vector<std::string> name_scopes)
     : op_call_chain_(std::move(op_call_chain)),
-      traceback_(std::move(traceback)) {}
+      traceback_(std::move(traceback)),
+      name_scopes_(std::move(name_scopes)) {}
 
 SharedTraceback CaptureCurrentPythonTrackback(PythonStackLocationOptions opts) {
   const bool include_cpp = opts == PythonStackLocationOptions::kPythonAndCpp;
@@ -290,17 +298,31 @@ PythonContext ScopedPythonContextCapturer::GetContext() {
          "ScopedPythonContextCapturer is alive. This is a torch_tpu bug. Make "
          "sure a ScopedPythonContextCapturer object is defined "
          "somewhere up the stack. See go/catto-design for details.";
-  return PythonContext(op_names_, traceback_);
+  return PythonContext(op_names_, traceback_, name_scopes_);
 }
 
 std::optional<PythonContext> ScopedPythonContextCapturer::MaybeGetContext() {
   if (op_names_.empty()) return std::nullopt;
-  return PythonContext(op_names_, traceback_);
+  return PythonContext(op_names_, traceback_, name_scopes_);
+}
+
+void ScopedPythonContextCapturer::PushNameScope(std::string scope) {
+  name_scopes_.push_back(std::move(scope));
+}
+
+void ScopedPythonContextCapturer::PopNameScope() {
+  ABSL_CHECK(!name_scopes_.empty())  // CRASH_OK
+      << "ScopedPythonContextCapturer::PopNameScope() called when the "
+         "name_scopes_ stack is empty. This is a torch_tpu bug.";
+  name_scopes_.pop_back();
 }
 
 thread_local  // CPP_THREAD_LOCAL_OK=needed only in the dispatching thread.
     std::vector<std::string>
         ScopedPythonContextCapturer::op_names_;  // NOLINT
+thread_local  // CPP_THREAD_LOCAL_OK=needed only in the dispatching thread.
+    std::vector<std::string>
+        ScopedPythonContextCapturer::name_scopes_;  // NOLINT
 thread_local  // CPP_THREAD_LOCAL_OK=needed only in the dispatching thread.
     MaybeSharedTraceback ScopedPythonContextCapturer::traceback_;  // NOLINT
 

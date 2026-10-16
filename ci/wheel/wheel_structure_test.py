@@ -45,7 +45,11 @@ from typing import Final
 import zipfile
 
 from absl.testing import absltest
-from ci.wheel import pytorch_abi_symbols
+
+try:
+  from ci.wheel import pytorch_abi_symbols
+except ModuleNotFoundError:
+  import pytorch_abi_symbols  # type: ignore[no-redef]
 
 # The single shared, version-independent XLA/MLIR base library.
 _XLA_BASE: Final[str] = "torch_tpu/csrc/common/libxla_base.so"
@@ -92,15 +96,21 @@ def _wheel_path() -> pathlib.Path:
 
 
 def _pytorch_2_15_0_symbols_path() -> pathlib.Path:
-  path = os.environ.get("PYTORCH_2_15_0_SYMBOLS_PATH")
-  assert path, "PYTORCH_2_15_0_SYMBOLS_PATH environment variable is not set"
-  return pathlib.Path(path)
+  if path := os.environ.get("PYTORCH_2_15_0_SYMBOLS_PATH"):
+    return pathlib.Path(path)
+  return pathlib.Path(__file__).with_name("pytorch_symbols_2_15_0.txt")
 
 
-def _pytorch_2_15_0_wheel_path() -> pathlib.Path:
-  path = os.environ.get("PYTORCH_2_15_0_WHEEL_PATH")
-  assert path, "PYTORCH_2_15_0_WHEEL_PATH environment variable is not set"
-  return pathlib.Path(path)
+def _pytorch_2_15_0_defined_symbols() -> Set[str]:
+  if path := os.environ.get("PYTORCH_2_15_0_WHEEL_PATH"):
+    return pytorch_abi_symbols.extract_pytorch_wheel_defined_symbols(
+        pathlib.Path(path)
+    )
+  import torch  # pylint: disable=g-import-not-at-top
+
+  return pytorch_abi_symbols.extract_pytorch_lib_dir_defined_symbols(
+      pathlib.Path(torch.__file__).parent / "lib"
+  )
 
 
 def _strong_defined_symbols(so: pathlib.Path) -> Sequence[str]:
@@ -271,9 +281,7 @@ class WheelStructureTest(absltest.TestCase):  # ABSLTEST_OK=Wheel test
     wheel_symbols = pytorch_abi_symbols.extract_dir_pytorch_symbols(
         self._wheel_root, "2.15.0"
     )
-    pytorch_defined = pytorch_abi_symbols.extract_pytorch_wheel_defined_symbols(
-        _pytorch_2_15_0_wheel_path()
-    )
+    pytorch_defined = _pytorch_2_15_0_defined_symbols()
     result = pytorch_abi_symbols.check_symbols_compatible(
         high_water_mark,
         wheel_symbols,

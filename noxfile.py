@@ -34,6 +34,8 @@ import nox
 
 nox.options.default_venv_backend = "uv"
 nox.options.sessions = ["lint"]
+os.environ.setdefault("UV_HTTP_RETRIES", "10")
+os.environ.setdefault("UV_HTTP_TIMEOUT", "120")
 
 # The indexes that may satisfy the `torch` dependency for each variant. The
 # `cpu` and `cuda` variants include PyTorch's RC test channels so release

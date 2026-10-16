@@ -55,13 +55,17 @@ on:
   repository_dispatch:
     types:
       - push
+  # TODO(b/566301487): Revert temporary PR test trigger before submitting.
+  pull_request:
+    branches:
+      - main
 
 run-name: >-
-  Dispatch - ${{ github.event.client_payload.payload.ref }}
+  Dispatch - ${{ github.event.client_payload.payload.ref || github.head_ref }}
 
 concurrency:
   group: >-
-    oot-${{ github.event.client_payload.payload.repository.full_name }}-${{ github.event.client_payload.payload.ref || github.run_id }}
+    oot-${{ github.event.client_payload.payload.repository.full_name || github.repository }}-${{ github.event.client_payload.payload.ref || github.head_ref || github.run_id }}
   cancel-in-progress: false
 
 permissions:
@@ -71,7 +75,8 @@ jobs:
   run_tests:
     # Only trigger on upstream main branch merges and filter out the massive firehose of ciflow
     # tags, ghstack branches, and developer pushes that the PyTorch CRCR relay blindly forwards.
-    if: github.event.client_payload.payload.ref == 'refs/heads/main'
+    # TODO(b/566301487): Remove `|| github.event_name == 'pull_request'` before submitting.
+    if: github.event.client_payload.payload.ref == 'refs/heads/main' || github.event_name == 'pull_request'
     name: "Presubmit on ${{ matrix.job_info.name || matrix.job_info.runner }} against dispatched PyTorch"
     permissions:
       contents: read
@@ -110,13 +115,18 @@ jobs:
           mkdir -p /home/runner
           ln -sfn /__w /home/runner/_work
 
-      - name: Report in_progress to CRCR
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: pytorch/test-infra/.github/actions/cross-repo-ci-relay-callback@28dee7456d0348d74a5faa85098bb028b263ee2b  # main
-        with:
-          status: in_progress
-          job-name: "Presubmit on ${{ matrix.job_info.name || matrix.job_info.runner }}"
+      - name: Resolve PyTorch SHA
+        id: resolve_sha
+        env:
+          DISPATCH_SHA: ${{ github.event.client_payload.payload.after }}
+        run: |
+          if [ -n "${DISPATCH_SHA}" ]; then
+            PYTORCH_SHA="${DISPATCH_SHA}"
+          else
+            PYTORCH_SHA=$(git ls-remote https://github.com/pytorch/pytorch.git refs/heads/main | awk '{print $1}')
+          fi
+          echo "Resolved PyTorch SHA: ${PYTORCH_SHA}"
+          echo "pytorch_sha=${PYTORCH_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout TorchTPU
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -125,7 +135,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: pytorch/pytorch
-          ref: ${{ github.event.client_payload.payload.after }}
+          ref: ${{ steps.resolve_sha.outputs.pytorch_sha }}
           path: pytorch
 
       - name: Fix Git Workspace Ownership
@@ -133,7 +143,7 @@ jobs:
 
       - name: Run TorchTPU Native Tests
         env:
-          PYTORCH_SHA: ${{ github.event.client_payload.payload.after }}
+          PYTORCH_SHA: ${{ steps.resolve_sha.outputs.pytorch_sha }}
         run: |
           echo "Testing against PyTorch SHA: ${PYTORCH_SHA}"
 
@@ -159,17 +169,6 @@ jobs:
             exit $BAZEL_EXIT_CODE
           fi
 
-      - name: Log event to step summary
-        if: always()
-        env:
-          EVENT_JSON: ${{ toJson(github.event) }}
-        run: |
-          {
-            echo '```json'
-            echo "$EVENT_JSON"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Report completion to CRCR
         if: always()
         continue-on-error: true
@@ -179,3 +178,21 @@ jobs:
           status: completed
           conclusion: ${{ job.status }}
           job-name: "Presubmit on ${{ matrix.job_info.name || matrix.job_info.runner }}"
+          delivery-id: ${{ steps.resolve_sha.outputs.pytorch_sha }}
+          event-type: nightly
+
+      - name: Log event to step summary
+        if: always()
+        env:
+          EVENT_JSON: ${{ toJson(github.event) }}
+        run: |
+          if [ -f /tmp/relay_response.json ]; then
+            echo "CRCR Relay response body:"
+            cat /tmp/relay_response.json
+            echo ""
+          fi
+          {
+            echo '```json'
+            echo "$EVENT_JSON"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

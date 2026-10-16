@@ -85,7 +85,7 @@ def _(mo):
     As an early product, TorchTPU does currently have known limitations that will be addressed over time. TorchTPU is a collaborative, community-driven effort, and we invite you to join us on this journey. Please review our [feature set and roadmap](./6_reference_1_supported_feature_set.md) to see what is on the horizon, or jump right in by [submitting PRs](https://github.com/google-pytorch/torch_tpu) on GitHub to help us resolve these limitations. This is a community project, and we'd love to hear from you and invite you to collaborate with us via [GitHub](https://github.com/google-pytorch/torch_tpu), [https://discuss.pytorch.org/c/tpu](https://discuss.pytorch.org/c/tpu), [https://dev-discuss.pytorch.org/c/tpu/](https://dev-discuss.pytorch.org/c/tpu/) and [torchtpu-feedback@google.com](mailto:torchtpu-feedback@google.com).
 
     * Dynamic Shapes cause recompilations
-      * `torch.compile` sets `dynamic=False` by default on TorchTPU. `dynamic=None` or `dynamic=True` are not yet supported for production. [See discussion on bounded dynamism](./2_in_depth_6_dynamic_shapes.md)
+      * `torch.compile` sets `dynamic=False` by default on TorchTPU. `dynamic=None` or `dynamic=True` are not yet supported for production. [See discussion on dynamic shapes](./2_in_depth_6_dynamic_shapes.md)
       * As example, running decode/generate step on Hugging Face LLMs will involve recompilations at each step unless bounded dynamism is enabled.
     * View ops may be expensive on TPU. See [TorchTPU memory model](./2_in_depth_2_torchtpu_and_tpu_memory_model.md)
     * MPMD with collectives is supported for functionality, but it will not reach peak performance yet. Collective overlap with compute has [some constraints](./2_in_depth_5_distributed.md):
@@ -94,6 +94,8 @@ def _(mo):
       * Use the `spmd_safe` decorator on regions **users guarantees** to be exactly the same is the recommended way to get peak performance from XLA optimizations on communicating modules
     * TorchTPU does not currently have native FlexAttention support
     * Current generation TPUs do not support fast accumulation in lower precision than fp32.
+    * Only one process can access a TPU device, limiting support for co-located RL.
+    
 
     **Other recommendations:**
 
@@ -101,7 +103,6 @@ def _(mo):
     | :--- | :--- |
     | Eager modes have a non-zero warmup time | Enable persistent compilation cache |
     | Torch.compile takes a long time | Enable persistent compilation cache |
-    | Only 1 process can access a TPU device | co-location RL is not yet supported |
     | CNN in PyTorch default using channel-first layout is very inefficient on TPU | Use this [PyTorch option](https://docs.pytorch.org/tutorials/intermediate/memory_format_tutorial.html) to set a channel last layout for better performance. |
     | Device mesh mapping may be suboptimal by default due to differences in topology between TPUs and other architectures | Use `topology_aware_mesh` for optimal device mesh mapping, and ability to customize device mesh mapping |
 

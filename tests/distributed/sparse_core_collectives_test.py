@@ -23,13 +23,11 @@ with a collective over the world, whose devices follow the world rank order.
 from absl.testing import absltest
 import torch
 from torch import distributed as dist
-import torch.multiprocessing as mp
 from torch_tpu._internal.distributed import spmd_util
 from torch_tpu._internal.utils import test_utils as utils
 from torch_tpu._internal.distributed import multiprocessing
 from tests import oss_utils
-from tests import seed_test_utils
-from tests.distributed import distributed_utils
+from tests.distributed import continuous_test_utils
 
 _WORLD = 8
 
@@ -155,114 +153,95 @@ def _lookup(
   )
 
 
-def run_sparse_dense_matmul_lookup() -> None:
-  """A compiled lookup into a table sharded across all devices."""
-  dist.init_process_group(backend="tpu_dist")
-  rank = dist.get_rank()
-  assert dist.get_world_size() == _WORLD
+class SparseCoreCollectivesTest(
+    continuous_test_utils.TpuMultiProcContinuousTest
+):
 
-  compiled = torch.compile(
-      _lookup, backend="tpu", fullgraph=True, dynamic=False
-  )
-  activations = compiled(*_lookup_inputs(rank))
-  utils.assert_close(activations.cpu(), _expected_activations(rank))
+  @property
+  def world_size(self) -> int:
+    return _WORLD
 
-
-def run_sparse_dense_matmul_with_world_all_reduce() -> None:
-  """A lookup and a world all-reduce of its activations share one program."""
-  dist.init_process_group(backend="tpu_dist")
-  rank = dist.get_rank()
-  assert dist.get_world_size() == _WORLD
-
-  # `serializable=False` compiles the program in every run instead of loading
-  # it from the AOTAutograd cache.
-  @torch.compile(
-      backend="tpu",
-      fullgraph=True,
-      dynamic=False,
-      options={"serializable": False},
-  )
-  @spmd_util.spmd_safe
-  def lookup_and_reduce(
-      row_pointers: torch.Tensor,
-      embedding_ids: torch.Tensor,
-      sample_ids: torch.Tensor,
-      gains: torch.Tensor,
-      table: torch.Tensor,
-  ) -> torch.Tensor:
-    activations = _lookup(row_pointers, embedding_ids, sample_ids, gains, table)
-    dist.all_reduce(activations)
-    return activations
-
-  out = lookup_and_reduce(*_lookup_inputs(rank))
-  expected = sum(_expected_activations(r) for r in range(_WORLD))
-  utils.assert_close(out.cpu(), expected)
-
-
-def run_sparse_gather_with_world_all_reduce() -> None:
-  """A SparseCore gather and a world all-reduce share one program."""
-  dist.init_process_group(backend="tpu_dist")
-  rank = dist.get_rank()
-  assert dist.get_world_size() == _WORLD
-
-  # CSR row j gathers the table rows 8 * j, ..., 8 * j + 7.
-  non_zeroes = _CSR_ROWS * _CSR_ROW_NON_ZEROES
-  row_pointers = (
-      torch.arange(1, _CSR_ROWS + 1, dtype=torch.int32) * _CSR_ROW_NON_ZEROES
-  ).to("tpu")
-  indices = torch.full(
-      (_CSR_ROWS * _CSR_MAX_ROW_NON_ZEROES,), 2**31 - 1, dtype=torch.int32
-  )
-  indices[:non_zeroes] = torch.arange(non_zeroes, dtype=torch.int32)
-  indices = indices.to("tpu")
-  table_rows = torch.arange(_TABLE_ROWS, dtype=torch.float32).unsqueeze(1)
-
-  # `serializable=False` compiles the program in every run instead of loading
-  # it from the AOTAutograd cache.
-  @torch.compile(backend="tpu", fullgraph=True, options={"serializable": False})
-  @spmd_util.spmd_safe
-  def gather_and_reduce(table: torch.Tensor) -> torch.Tensor:
-    gathered = torch.tpu.ops.sparse_gather(
-        row_pointers,
-        indices,
-        table,
-        max_non_zeroes_per_row=_CSR_MAX_ROW_NON_ZEROES,
+  def test_sparse_dense_matmul_lookup(self) -> None:
+    """A compiled lookup into a table sharded across all devices."""
+    compiled = torch.compile(
+        _lookup, backend="tpu", fullgraph=True, dynamic=False
     )
-    dist.all_reduce(gathered)
-    return gathered
-
-  # Row r of the table of a rank holds r + rank.
-  table = (table_rows + float(rank)).repeat(1, _TABLE_WIDTH)
-  out = gather_and_reduce(table.to("tpu")).cpu()[:non_zeroes]
-  expected = (
-      _WORLD * table_rows[:non_zeroes] + float(sum(range(_WORLD)))
-  ).repeat(1, _TABLE_WIDTH)
-  utils.assert_close(out, expected)
-
-
-class SparseCoreCollectivesTest(seed_test_utils.MultiProcessRepeatableTest):
-
-  def test_sparse_dense_matmul_lookup(self):
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD, fn=run_sparse_dense_matmul_lookup
-    )
+    activations = compiled(*_lookup_inputs(self.rank))
+    utils.assert_close(activations.cpu(), _expected_activations(self.rank))
 
   @oss_utils.skip_if_libtpu_version(
       lambda v: v < (0, 0, 50),
       "TODO(b/572969237): Requires libtpu >= 0.0.50 to repack SparseGather"
       " operands flattened by partitioning.",
   )
-  def test_sparse_gather_with_world_all_reduce(self):
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD, fn=run_sparse_gather_with_world_all_reduce
+  def test_sparse_gather_with_world_all_reduce(self) -> None:
+    """A SparseCore gather and a world all-reduce share one program."""
+    # CSR row j gathers the table rows 8 * j, ..., 8 * j + 7.
+    non_zeroes = _CSR_ROWS * _CSR_ROW_NON_ZEROES
+    row_pointers = (
+        torch.arange(1, _CSR_ROWS + 1, dtype=torch.int32) * _CSR_ROW_NON_ZEROES
+    ).to("tpu")
+    indices = torch.full(
+        (_CSR_ROWS * _CSR_MAX_ROW_NON_ZEROES,), 2**31 - 1, dtype=torch.int32
     )
+    indices[:non_zeroes] = torch.arange(non_zeroes, dtype=torch.int32)
+    indices = indices.to("tpu")
+    table_rows = torch.arange(_TABLE_ROWS, dtype=torch.float32).unsqueeze(1)
 
-  def test_sparse_dense_matmul_with_world_all_reduce(self):
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD, fn=run_sparse_dense_matmul_with_world_all_reduce
+    # `serializable=False` compiles the program in every run instead of loading
+    # it from the AOTAutograd cache.
+    @torch.compile(
+        backend="tpu", fullgraph=True, options={"serializable": False}
     )
+    @spmd_util.spmd_safe
+    def gather_and_reduce(table: torch.Tensor) -> torch.Tensor:
+      gathered = torch.tpu.ops.sparse_gather(
+          row_pointers,
+          indices,
+          table,
+          max_non_zeroes_per_row=_CSR_MAX_ROW_NON_ZEROES,
+      )
+      dist.all_reduce(gathered)
+      return gathered
+
+    # Row r of the table of a rank holds r + rank.
+    table = (table_rows + float(self.rank)).repeat(1, _TABLE_WIDTH)
+    out = gather_and_reduce(table.to("tpu")).cpu()[:non_zeroes]
+    expected = (
+        self.world_size * table_rows[:non_zeroes]
+        + float(sum(range(self.world_size)))
+    ).repeat(1, _TABLE_WIDTH)
+    utils.assert_close(out, expected)
+
+  def test_sparse_dense_matmul_with_world_all_reduce(self) -> None:
+    """A lookup and a world all-reduce of its activations share one program."""
+
+    # `serializable=False` compiles the program in every run instead of loading
+    # it from the AOTAutograd cache.
+    @torch.compile(
+        backend="tpu",
+        fullgraph=True,
+        dynamic=False,
+        options={"serializable": False},
+    )
+    @spmd_util.spmd_safe
+    def lookup_and_reduce(
+        row_pointers: torch.Tensor,
+        embedding_ids: torch.Tensor,
+        sample_ids: torch.Tensor,
+        gains: torch.Tensor,
+        table: torch.Tensor,
+    ) -> torch.Tensor:
+      activations = _lookup(
+          row_pointers, embedding_ids, sample_ids, gains, table
+      )
+      dist.all_reduce(activations)
+      return activations
+
+    out = lookup_and_reduce(*_lookup_inputs(self.rank))
+    expected = sum(_expected_activations(r) for r in range(self.world_size))
+    utils.assert_close(out.cpu(), expected)
 
 
 if __name__ == "__main__":
-  mp.set_start_method("spawn")
   multiprocessing.handle_test_main(absltest.main)

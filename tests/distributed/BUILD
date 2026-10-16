@@ -176,7 +176,7 @@ torch_tpu_py_test(
         "requires-tpu-v7x:4",
     ],
     deps = [
-        ":distributed_utils",
+        ":continuous_test_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
@@ -184,7 +184,6 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/distributed:spmd_util",
         "//src/torch_tpu/_internal/utils:test_utils",
         "//tests:oss_utils",
-        "//tests:seed_test_utils",
     ],
 )
 

@@ -28,7 +28,6 @@
 #include "absl/status/statusor.h"
 #include "c10/core/Device.h"
 #include "c10/core/ScalarType.h"
-#include "c10/core/StorageImpl.h"
 #include "c10/core/SymInt.h"
 #include "c10/core/SymIntArrayRef.h"
 #include "c10/core/TensorImpl.h"
@@ -101,20 +100,6 @@ std::optional<bool> ConstTensor::is_signed() const {
     return std::nullopt;
   }
   return c10::isSignedType(type);  // MLIR_SIGNED_INT_OK=c10 dtype, not MLIR
-}
-
-bool ConstTensor::has_storage_data() const {
-  if (!has_storage()) {
-    return false;
-  }
-  // TensorImpl::storage() and StorageImpl::data() may throw, so read the raw
-  // data pointer through StorageImpl::_mutable_data_ptr_no_checks(), which
-  // skips those checks (and is available in upstream PyTorch, unlike a getter
-  // for the checks). It is non-const, but this only reads the pointer and
-  // mutates nothing.
-  c10::StorageImpl* storage =
-      tensor_.unsafeGetTensorImpl()->unsafe_storage().unsafeGetStorageImpl();
-  return storage->_mutable_data_ptr_no_checks().get() != nullptr;
 }
 
 std::optional<ConstTensor> ConstTensor::base() const {

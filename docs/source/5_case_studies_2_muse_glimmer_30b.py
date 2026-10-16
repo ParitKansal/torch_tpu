@@ -37,7 +37,7 @@ on 4x Ironwood TPUs.
 
 For information on how to run this example on TPUs in your GKE (Google
 Kubernetes Engine) cluster, please refer to example
-[README](https://github.com/google-pytorch/torch_tpu/tree/main/examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop).
+[README](../../examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/README.md).
 Here we instead explain some of the implementation choices.
 
 The focus of this example is simplicity and readability. It runs on just a
@@ -63,10 +63,11 @@ It consists of 52 layers of causal self-attention and feed-forward (FFN) blocks.
 Every 4-th layer of the model uses full attention, and all the other layers use
 sliding-window attention (SWA).
 
-The model code is fully self-contained in [model_fsdp.py](https://github.com/google-pytorch/torch_tpu/blob/main/examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/model_fsdp.py)
-(and [rope.py](https://github.com/google-pytorch/torch_tpu/blob/main/examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/rope.py).
+The model code is fully self-contained in [model_fsdp.py](../../examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/model_fsdp.py)
+(and [rope.py](../../examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/rope.py)
+for rotary positional encoding).
 
-Configuration is specified in [model_fsdp.py](https://github.com/google-pytorch/torch_tpu/blob/main/examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/model_fsdp.py):
+Configuration is specified in [model_fsdp.py](../../examples/muse_glimmer_30b/pure_pytorch_fsdp_trainloop/model_fsdp.py):
 """)
   return
 
@@ -219,15 +220,15 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
   mo.md(r"""
-!!! note
-    Activation checkpointing (AC) is applied inside the model layer
-    (`DecoderBlock` module) `forward` method, and `torch.compile` is applied
-    outside / on the layer itself – this ordering is important.
-    You could keep AC inside the layer, and apply `torch.compile` on the whole model
-    – this would work fine.
-    But you cannot swap them, e.g. if you were to apply AC the same way,
-    but apply `torch.compile` inside on attention and FFN sub-layers separately,
-    it would not work as expected.
+> [!NOTE]
+> Activation checkpointing (AC) is applied inside the model layer
+(`DecoderBlock` module) `forward` method, and `torch.compile` is applied
+outside / on the layer itself – this ordering is important.
+You could keep AC inside the layer, and apply `torch.compile` on the whole model
+– this would work fine.
+But you cannot swap them, e.g. if you were to apply AC the same way,
+but apply `torch.compile` inside on attention and FFN sub-layers separately,
+it would not work as expected.
 
 `torch.compile` works particularly well with AC in TorchTPU: during the (global)
 backward pass, each layer performs a small joint forward+backward pass (due to
@@ -248,7 +249,7 @@ directly.
 
 > [!TIP]
 > For an even simpler description of this approach, take a look at our
-[manual FSDP example](https://github.com/google-pytorch/torch_tpu/tree/main/examples/fsdp/manual).
+[manual FSDP example](../../examples/fsdp/manual).
 
 We do FSDP by manually sharding all attention and FFN projection weights, e.g.:
 """)

@@ -21,8 +21,9 @@ In this guide, you will learn:
     call.
 3.  **Manual FSDP**: putting collectives directly in the model definition.
 4.  **Best practices** that apply to every approach.
-5.  **Running the examples**: launch commands and what each example
-    checks. <!----> ## 1. Choosing an FSDP approach
+5.  **Running the examples**: launch commands and what each example checks.
+
+## 1. Choosing an FSDP approach
 
 On TPU, performance comes from compiling the whole training step into a single
 XLA program with `torch.compile(backend="tpu")`. When the XLA compiler sees all
@@ -50,7 +51,6 @@ compiled.
 For a side-by-side comparison of compiled FSDPv2 and compiled SimpleFSDP, see
 the
 [FSDPv2 to SimpleFSDP tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/fsdp/fsdp_to_simple_fsdp/fsdp_to_simple_fsdp.md).
-<!---->
 
 ## 2. Recommended: SimpleFSDP
 
@@ -72,8 +72,9 @@ To learn how to use SimpleFSDP, see:
 *   [SimpleFSDP README](https://github.com/google-pytorch/torch_tpu/blob/main/examples/fsdp/fsdp_to_simple_fsdp/README.md):
     quick start and available options.
 *   [FSDPv2 to SimpleFSDP tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/fsdp/fsdp_to_simple_fsdp/fsdp_to_simple_fsdp.md):
-    how to migrate existing `fully_shard` code. <!----> ## 3. Alternative:
-    Manual FSDP
+    how to migrate existing `fully_shard` code.
+
+## 3. Alternative: Manual FSDP
 
 If you control the model definition, you can write FSDP directly with manual
 collectives (`torch.distributed._functional_collectives`). Each layer stores
@@ -87,7 +88,6 @@ definition.
 
 To learn how to implement manual FSDP, see the
 [manual FSDP guide](https://github.com/google-pytorch/torch_tpu/blob/main/examples/fsdp/manual/manual_fsdp.md).
-<!---->
 
 ## 4. Best practices
 
@@ -124,7 +124,9 @@ These recommendations apply to SimpleFSDP and manual FSDP.
     unsharded or FSDPv2 reference with `assert_close`, and measure memory
     retained across the forward-backward boundary. The examples include a parity
     check (`fsdp_to_simple_fsdp_worker.py`) and a memory test
-    (`manual_fsdp_memory_test.py`). <!----> ## 5. Running the examples
+    (`manual_fsdp_memory_test.py`).
+
+## 5. Running the examples
 
 Each example comes with a launcher script that runs on 8 TPU cores (for example,
 `v6e-8`):

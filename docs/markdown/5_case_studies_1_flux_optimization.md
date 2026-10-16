@@ -28,7 +28,7 @@ repository.
 
 If you are new to examples, you may want to familiarize yourself with running
 examples on GKE
-[through our other documents](./1_basics_3_get_started_on_gke.md). <!---->
+[through our other documents](./1_basics_3_get_started_on_gke.md).
 
 ## Results at a glance
 

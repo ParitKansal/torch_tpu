@@ -107,6 +107,10 @@ class TpuMultiProcContinuousTest(
 
   @classmethod
   def _run_test_given_id(cls, test_id: str, **kwargs: Any) -> None:
+    # absl parameterized appends ' (param=val)' to TestCase.id(), which breaks
+    # MultiProcContinuousTest's test method lookup by name.
+    clean_test_id = test_id.split(" ", 1)[0]
+
     # Upstream `MultiProcContinuousTest` seeds every rank identically. Seed per
     # rank instead, like `dist_run()`.
     def seed_rngs_for_rank(seed: int | None = None) -> None:
@@ -115,7 +119,7 @@ class TpuMultiProcContinuousTest(
 
     try:
       with mock.patch.object(common_utils, "set_rng_seed", seed_rngs_for_rank):
-        super()._run_test_given_id(test_id, **kwargs)
+        super()._run_test_given_id(clean_test_id, **kwargs)
     finally:
       # Fence between tests: no rank reports completion (and thus starts the
       # next test, or exits after the last one) while another rank may still
@@ -132,10 +136,13 @@ class TpuMultiProcContinuousTest(
       if dist.is_initialized():
         # Synchronize before and after the barrier to ensure any deferred work
         # or collectives don't fuse across test boundaries.
-        torch.accelerator.synchronize()
+        if cls.device_type() == "tpu":
+          torch.accelerator.synchronize()
         dist.barrier()
-        torch.accelerator.synchronize()
-      torch.tpu._clear_cache()
+        if cls.device_type() == "tpu":
+          torch.accelerator.synchronize()
+      if cls.device_type() == "tpu":
+        torch.tpu._clear_cache()
 
   @classmethod
   def tearDownClass(cls) -> None:

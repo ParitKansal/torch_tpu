@@ -80,11 +80,13 @@ combined: collectives inside an `@spmd_safe` function are always fused, and,
 when enabled, the Compilation Handshake decides for the remaining collectives in
 each `torch.compile` graph.
 
+<!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
 | Mode | Configuration | Graph Behavior | Best For |
 | :---- | :---- | :---- | :---- |
 | Skinny collectives (default behavior) | Always on for any collective that the opt-ins below don't fuse | Compiles each collective op into its own standalone ("skinny") StableHLO module by inserting graph breaks around collectives. | General MPMD safety out of the box, at the cost of preventing XLA from overlapping compute and communication. |
 | `@spmd_safe` decorator (opt-in) | `@torch.tpu.distributed.spmd_safe` | Disables graph breaks around collectives inside the decorated function, fusing compute and collectives into a single StableHLO module. | Known-SPMD functions or training steps (e.g., SimpleFSDP or manual tensor parallelism) to maximize XLA compute-communication overlap. |
 | Compilation Handshake (opt-in) | `TORCH_TPU_SPMD_HANDSHAKE_STAGE=COMPILE_STAGE` or `DISPATCH_STAGE` (default: OFF) | In torch.compile graphs, checks that the compiled FX graphs match across all ranks; fuses collectives if they do and falls back to skinny collectives if they don't. | Automatically enabling collective fusion in `torch.compile` while guarding against accidental MPMD divergence. |
+<!-- mdformat on -->
 
 #### Using `@torch.tpu.distributed.spmd_safe`
 
@@ -94,7 +96,7 @@ rank-dependent control flow or uneven tensor shapes), decorate it with
 eager mode), this removes graph breaks around collectives so XLA can schedule
 asynchronous communication alongside matrix computation:
 
-```python {.marimo}
+```python
 import torch
 import torch.distributed as dist
 
@@ -134,7 +136,7 @@ Below is an example of rank-specific recompilation that is supported by
 `DISPATCH_STAGE`, whereas `COMPILE_STAGE` would time out because only
 `divergent_rank` recompiles on iteration 1:
 
-```python {.marimo}
+```python
 iteration = 0
 divergent_rank = ...
 
@@ -160,10 +162,12 @@ Initializing a distributed workload in TorchTPU uses standard
 `torch.distributed` APIs, paired with TorchTPU's launch environment helper to
 populate the TPU topology and slice-builder environment variables:
 
+<!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
 | Environment Variable | Description | Example |
 | :---- | :---- | :---- |
 | `TORCH_TPU_TOPOLOGY` | Physical mesh geometry of the TPU slice. | `"2,2,1"`, `"2,2,1,2"`, `"4,4,4"` |
 | `TORCH_TPU_SLICEBUILDER_ADDRESSES` | Comma-separated `host:port` addresses (one per device) used to construct the ICI mesh. | `"localhost:8471,localhost:8472,..."` |
+<!-- mdformat on -->
 
 You need to set these variables before starting the workers. In common setups (a
 single host, or a GKE TPU slice), TorchTPU can determine the correct values for
@@ -188,7 +192,7 @@ by a complete worker and launcher example:
 Inside each worker process, initialize the `tpu_dist` backend and acquire the
 local TPU device via `torch.device("tpu")`:
 
-```python {.marimo}
+```python
 import torch
 import torch.distributed as dist
 
@@ -253,6 +257,7 @@ aligned with physical ICI rings. Order your logical mesh dimensions from
 **lowest communication intensity** (outermost) to **highest communication
 intensity** (innermost):
 
+<!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
 | Parallelism Type | Typical Collectives | Communication Frequency | Recommended Physical Placement |
 | :---- | :---- | :---- | :---- |
 | **Tensor Parallel (TP)** | `all_reduce`, `reduce_scatter`, `all_gather` | Every transformer layer (Forward + Backward) | Fastest local ICI ring (same tray/host, contiguous 1-hop devices) |
@@ -260,10 +265,11 @@ intensity** (innermost):
 | **Expert Parallel (EP)** | `all_to_all`, `ragged_all_to_all` | Per MoE router layer | Local ICI axes (within slice) |
 | **Fully Sharded Data Parallel (FSDP)** | `all_gather`, `reduce_scatter` | Per module / transformer block | ICI axes (within slice) |
 | **Replicated Data Parallel (DP)** | `all_reduce` (gradients only) | Once per training step | Outer ICI axis or DCN (across slices) |
+<!-- mdformat on -->
 
 ### Example: Constructing a topology-aware 2D DeviceMesh
 
-```python {.marimo}
+```python
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 
@@ -309,13 +315,15 @@ eager mode and `torch.compile`.
 
 Integrating a distributed Pallas kernel involves three steps:
 
+<!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
 | Stage | Key Steps & Operations |
 | :---- | :---- |
 | **1. Pallas Kernel Body** | Query logical coordinates with `jax.lax.axis_index` and `jax.lax.axis_size`, construct an asynchronous transfer descriptor via `pltpu.make_async_remote_copy(..., device_id=(target,))`, and manage completion with `.start()` and `.wait()`. |
 | **2. `pl.pallas_call` & `jax.shard_map`** | Allocate DMA semaphores (`pltpu.SemaphoreType.DMA`) in `scratch_shapes` and wrap the kernel with `jax.shard_map` over a rank-aligned, world-sized `jax.sharding.Mesh` and `PartitionSpec`. |
 | **3. TorchTPU Registration** | Register a type-annotated JAX wrapper function using `torch.tpu.pallas.jax_op`, passing `mesh`, `input_partition_specs`, and `output_partition_specs`. |
+<!-- mdformat on -->
 
-```python {.marimo}
+```python
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu

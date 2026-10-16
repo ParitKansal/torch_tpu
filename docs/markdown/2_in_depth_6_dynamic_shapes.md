@@ -62,8 +62,9 @@ dimensions as follows:
     padded elements do not affect the output result.
 *   For dynamic output tensors, padding remains at the end of the buffer,
     allowing TorchTPU to return the buffer to PyTorch with a lightweight shape
-    metadata update rather than physically slicing the tensor. <!----> ##
-    Motivating use case: Autoregressive decoding
+    metadata update rather than physically slicing the tensor.
+
+## Motivating use case: Autoregressive decoding
 
 A primary workload that motivates bounded dynamism is **autoregressive LLM
 decoding** with a dynamically growing KV cache. In a standard decode loop, each
@@ -92,7 +93,6 @@ executable.
 For a hands-on walkthrough applying bounded dynamism to a full LLM decode loop
 (and comparing against static KV cache preallocation), see
 [LLM inference end-to-end](./3_practical_examples_1_llm_inference_end_to_end.md).
-<!---->
 
 ## Example: Autoregressive loop with a growing tensor
 

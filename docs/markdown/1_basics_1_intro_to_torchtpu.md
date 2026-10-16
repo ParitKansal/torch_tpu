@@ -4,13 +4,11 @@ torch_tpu_version: 0.1.1.dev20260922
 
 # Introduction to TorchTPU
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-pytorch/torch_tpu/blob/main/docs/notebooks/1_basics_1_intro_to_torchtpu.ipynb)
-
 TorchTPU is an open-source, native PyTorch backend for
 [Google Cloud TPUs](https://cloud.google.com/tpu), developed in collaboration
-between Google and Meta. With TorchTPU, you can run existing PyTorch models on
-TPU hardware with minimal code changes and scale training and inference
-workloads from a single chip to multi-slice TPU pods.
+between Google and the PyTorch team at Meta. With TorchTPU, you can run existing
+PyTorch models on TPU hardware with minimal code changes and scale training and
+inference workloads from a single chip to multi-slice TPU pods.
 
 ## Why use TorchTPU
 
@@ -159,7 +157,7 @@ To get started, check out the following tutorials:
 *   Learn in depth about
     [how TorchTPU works](./2_in_depth_1_how_torchtpu_works.md).
 *   Or investigate examples on:
-    *   [optimizing Flux](./3_practical_examples_1_flux_optimization.md)
+    *   [optimizing Flux](./5_case_studies_1_flux_optimization.md)
     *   [training Muse Glimmer](./5_case_studies_2_muse_glimmer_30b.md)
     *   the effective
         [application of FSDP](./3_practical_examples_3_fsdp_best_practices.md)

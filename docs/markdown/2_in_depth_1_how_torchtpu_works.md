@@ -54,10 +54,11 @@ produces a new value (at least conceptually). This is particularly significant
 for TorchTPU, which provides familiar Pytorch "view" semantics, including
 mutations, through view decomposition and inversion. The XLA compiler assumes
 that tensor shapes are known at compile time. This constraint is relaxed in
-TorchTPU by [bounded dynamism](./2_in_depth_6_dynamic_shapes.md). Recognizing
-this as a limitation for PyTorch workloads, we have been adding support for
-bounded dynamism, i.e., when the maximum bounds of a shape's dimensions are
-known at compile time, but the actual dimensions are known only at runtime.
+TorchTPU by [bounded dynamism](./3_practical_examples_6_bounded_dynamism.md).
+Recognizing this as a limitation for PyTorch workloads, we have been adding
+support for bounded dynamism, i.e., when the maximum bounds of a shape's
+dimensions are known at compile time, but the actual dimensions are known only
+at runtime.
 
 ## TorchTPU: An out of tree backend with autoload support
 

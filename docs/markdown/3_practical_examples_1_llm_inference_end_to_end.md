@@ -31,11 +31,7 @@ If the cache grows with `torch.cat`, its length changes every step. With `dynami
 3. **In-place writes, fixed-shape masks:** New entries are written with `index_copy_`; unwritten positions are masked with `-inf`.
 4. **Two compilations:** One for prefill and one for decode, reused by every later step.
 
-**`DynamicCache`** takes the opposite approach, and it's the default cache in
-HuggingFace models: it appends each step's keys and values with `torch.cat`, so
-the cache holds exactly `S + t` positions. This is simpler and uses no padded
-memory, but the key length changes every step, so it relies on bounded dynamism
-(`dynamic=None`) to avoid recompiling on every token. <!---->
+**`DynamicCache`** takes the opposite approach, and it's the default cache in HuggingFace models: it appends each step's keys and values with `torch.cat`, so the cache holds exactly `S + t` positions. This is simpler and uses no padded memory, but the key length changes every step, so it relies on bounded dynamism (`dynamic=None`) to avoid recompiling on every token.
 
 ## 2. Model and KV cache implementation
 
@@ -744,6 +740,4 @@ Output: The future of artificial intelligence is here, and it’s changing the w
 Artificial intelligence has been around for decades, but it’s only in recent years that we’ve seen a significant increase in its use and development.
 ```
 
-> **Note:** With `USE_FULL_MODEL = False` (see the top of the notebook), only
-> the first 4 of the 52 decoder layers are loaded, so the generated text is not
-> meaningful.
+> **Note:** With `USE_FULL_MODEL = False` (see the top of the notebook), only the first 4 of the 52 decoder layers are loaded, so the generated text is not meaningful.

@@ -2755,18 +2755,6 @@ _ADDITIONAL_TORCH_TPU_OPS: Final[Sequence[OpInfo]] = [
         supports_out=False,
     ),
     OpInfo(
-        "_upsample_bicubic2d_aa",
-        op=torch.ops.aten._upsample_bicubic2d_aa,  # pylint: disable=protected-access
-        aten_name="_upsample_bicubic2d_aa",
-        dtypes=common_dtype.floating_types_and(torch.bfloat16, torch.float16),
-        sample_inputs_func=functools.partial(
-            common_methods_invocations.sample_inputs_upsample_aa, "bicubic"
-        ),
-        supports_forward_ad=True,
-        supports_fwgrad_bwgrad=True,
-        supports_out=False,
-    ),
-    OpInfo(
         "torch.ops.aten._safe_softmax.default",
         dtypes=common_dtype.all_types_and(
             torch.half, torch.bfloat16, torch.bool

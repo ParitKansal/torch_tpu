@@ -80,15 +80,4 @@ void PyPopPrecision() { PopContextState<PrecisionContextState>(); }
   return precision;
 }
 
-[[nodiscard]] mlir::stablehlo::Precision GetAndAddPrecisionWithDefaultTo(
-    OpParamCacheKeys& param_keys,
-    const mlir::stablehlo::Precision default_precision,
-    const std::string_view param_name) {
-  const auto state = GetContextState<PrecisionContextState>();
-  const mlir::stablehlo::Precision precision =
-      state.value_or(default_precision);
-  ABSL_CHECK_OK(param_keys.SetParam(param_name, precision));  // CRASH_OK
-  return precision;
-}
-
 }  // namespace torch_tpu

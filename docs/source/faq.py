@@ -85,11 +85,12 @@ def _(mo):
     * **Text Encoders & Search:** BERT, ALBERT & Electra, RoBERTa, DeBERTa, T5,
       MT5 & Flan-T5
 
-    For more details, please refer to our published [Case studies](./index.md).
+    For more details, please refer to our published
+    [Case Studies](./index.md#case-studies).
 
     ## What support does TorchTPU provide for kernel development?
 
-    Refer to [TorchTPU Custom Kernel support](./2_in_depth_5_custom_kernels.md).
+    Refer to [TorchTPU Custom Kernel support](./2_in_depth_4_custom_kernels.md).
 
     ## Which TPU generations are actively supported? What's the plan for future hardware support?
 

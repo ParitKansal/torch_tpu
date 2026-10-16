@@ -37,9 +37,7 @@
 #include "absl/status/statusor.h"
 #include "c10/core/Device.h"
 #include "c10/core/ScalarType.h"
-#include "c10/core/StorageImpl.h"
 #include "c10/core/SymInt.h"
-#include "c10/util/Exception.h"
 #include "c10/util/typeid.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/fake_symbol.h"
@@ -124,9 +122,8 @@ TEST(ConstTensorTest, UndefinedTensor) {
 
   EXPECT_FALSE(tensor.defined());
   EXPECT_FALSE(tensor.has_storage());
-  EXPECT_FALSE(tensor.has_storage_data());
   EXPECT_FALSE(tensor.has_symbolic_sizes_strides());
-  EXPECT_FALSE(tensor.UnsafeToTensor().defined());
+  EXPECT_FALSE(tensor.ToTensor().defined());
   EXPECT_EQ(tensor.device(), std::nullopt);
   EXPECT_EQ(tensor.get_device(), std::nullopt);
   EXPECT_FALSE(tensor.options().has_device());
@@ -171,7 +168,7 @@ TEST(ConstTensorTest, RoundTrip) {
   const at::Tensor tensor = at::empty({2, 3});
   const ConstTensor const_tensor = tensor;
 
-  EXPECT_TRUE(const_tensor.UnsafeToTensor().is_same(tensor));
+  EXPECT_TRUE(const_tensor.ToTensor().is_same(tensor));
   EXPECT_TRUE(const_tensor.is_same(tensor));
   EXPECT_TRUE(const_tensor.is_same(ConstTensor(tensor)));
   EXPECT_FALSE(const_tensor.is_same(at::empty({2, 3})));
@@ -252,9 +249,6 @@ TEST(ConstTensorTest, StaticTensorAccessorsMatchTensor) {
     EXPECT_FALSE(const_tensor.is_python_dispatch());
     EXPECT_EQ(const_tensor.requires_grad(), tensor.requires_grad());
     EXPECT_EQ(const_tensor.has_storage(), tensor.has_storage());
-    EXPECT_EQ(const_tensor.has_storage_data(),
-              tensor.storage().data_ptr() != nullptr);
-    EXPECT_TRUE(const_tensor.has_storage_data());
     EXPECT_THAT(const_tensor.dim(), IsOkAndHolds(tensor.dim()));
     EXPECT_THAT(const_tensor.sym_sizes(), IsOkAndHolds(tensor.sym_sizes()));
     EXPECT_THAT(const_tensor.sym_strides(), IsOkAndHolds(tensor.sym_strides()));
@@ -372,7 +366,6 @@ TEST(ConstTensorTest, SymbolicTensorAccessorsDoNotSpecialize) {
   EXPECT_FALSE(tensor.is_meta());
   EXPECT_FALSE(tensor.requires_grad());
   EXPECT_TRUE(tensor.has_storage());
-  EXPECT_TRUE(tensor.has_storage_data());
   EXPECT_FALSE(tensor.is_xla());
   EXPECT_FALSE(tensor.is_mkldnn());
   EXPECT_FALSE(tensor.is_sparse_csr());
@@ -555,35 +548,8 @@ TEST(ConstTensorTest, MetaDeviceTensor) {
   EXPECT_FALSE(tensor.is_cpu());
   EXPECT_EQ(tensor.device(), c10::Device(c10::kMeta));
   EXPECT_TRUE(tensor.has_storage());
-  EXPECT_FALSE(tensor.has_storage_data());
   EXPECT_EQ(tensor.sym_numel(), 2);
   EXPECT_EQ(tensor.maybe_is_contiguous(), true);
-}
-
-TEST(ConstTensorTest, ZeroElementCpuTensorHasNoStorageData) {
-  // The CPU allocator returns a null data pointer for zero bytes, so real
-  // tensors without elements look like they have no data either.
-  const at::Tensor tensor = at::empty({0});
-  const ConstTensor const_tensor(tensor);
-
-  EXPECT_TRUE(const_tensor.is_cpu());
-  EXPECT_TRUE(const_tensor.has_storage());
-  EXPECT_EQ(tensor.storage().data_ptr(), nullptr);
-  EXPECT_FALSE(const_tensor.has_storage_data());
-}
-
-TEST(ConstTensorTest, HasStorageDataDoesNotThrowWhenDataPtrAccessThrows) {
-  const at::Tensor tensor = at::ones({2});
-  tensor.unsafeGetTensorImpl()
-      ->unsafe_storage()
-      .unsafeGetStorageImpl()
-      ->release_data_and_set_meta_custom_data_ptr_error_msg_(std::nullopt);
-  const ConstTensor const_tensor(tensor);
-
-  ASSERT_THROW(tensor.storage().data_ptr(), c10::Error);
-  EXPECT_TRUE(const_tensor.has_storage());
-  // The data is still allocated, only access to it is disabled.
-  EXPECT_TRUE(const_tensor.has_storage_data());
 }
 
 }  // namespace

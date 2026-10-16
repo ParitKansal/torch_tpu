@@ -841,7 +841,6 @@ enum class OpName {
   kUnsqueezeCopyOut,
   kUnsqueeze_,
   kUntypedStorageResize_,
-  kUpsampleBicubic2dAaOut,
   kUpsampleBicubic2dBackwardGradInput,
   kUpsampleBicubic2dOut,
   kUpsampleBilinear2dBackwardGradInput,
@@ -2529,8 +2528,6 @@ ToString(  // NOLINT(google-readability-function-size)
       return "unsqueeze_";
     case OpName::kUntypedStorageResize_:
       return "untyped_storage_resize_";
-    case OpName::kUpsampleBicubic2dAaOut:
-      return "_upsample_bicubic2d_aa.out";
     case OpName::kUpsampleBicubic2dBackwardGradInput:
       return "upsample_bicubic2d_backward.grad_input";
     case OpName::kUpsampleBicubic2dOut:

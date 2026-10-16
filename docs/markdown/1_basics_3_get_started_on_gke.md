@@ -4,8 +4,6 @@ torch_tpu_version: 0.1.1.dev20260922
 
 # Get started with TorchTPU on GKE
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-pytorch/torch_tpu/blob/main/docs/notebooks/1_basics_3_get_started_on_gke.ipynb)
-
 This tutorial walks through running PyTorch workloads on a Google Kubernetes
 Engine (GKE) TPU cluster in three parts:
 
@@ -109,7 +107,7 @@ The container runs `simple_pytorch.py`, which ships in the image under
 
 This is the whole program:
 
-```python {.marimo}
+```python
 import torch
 
 device = torch.device("tpu")  # Change from cuda to tpu
@@ -333,10 +331,10 @@ example or test running on GKE is a minimal process:
     `torch.device`) work with TorchTPU without code changes.
 *   **Non-deprecated examples are expected to work**: Actively maintained,
     non-deprecated upstream PyTorch examples and modern APIs work out of the box
-    (see [Supported feature set](6_reference_1_supported_feature_set.md) for
+    (see [Supported feature set](./6_reference_1_supported_feature_set.md) for
     details).
 *   **Distributed examples may need minor modifications**: Some upstream
     distributed examples are overtuned to other devices (such as GPU- or
     NCCL-specific backends, flags, or sharding assumptions) and may require
     minor modifications to run on TPU (see the distributed sections above and
-    [FSDP best practices](3_practical_examples_3_fsdp_best_practices.md)).
+    [FSDP best practices](./3_practical_examples_3_fsdp_best_practices.md)).

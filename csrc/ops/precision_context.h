@@ -48,13 +48,6 @@ void PyPopPrecision();
 mlir::stablehlo::Precision GetAndAddPrecisionTo(
     OpParamCacheKeys& param_keys, std::string_view param_name = "precision");
 
-// Returns the current thread-local precision if explicitly set via a
-// `torch_tpu.precision` context manager; otherwise returns
-// `default_precision`. Records the resulting precision in `param_keys`.
-[[nodiscard]] mlir::stablehlo::Precision GetAndAddPrecisionWithDefaultTo(
-    OpParamCacheKeys& param_keys, mlir::stablehlo::Precision default_precision,
-    std::string_view param_name = "precision");
-
 }  // namespace torch_tpu
 
 #endif  // TORCH_TPU_CSRC_OPS_PRECISION_CONTEXT_H_

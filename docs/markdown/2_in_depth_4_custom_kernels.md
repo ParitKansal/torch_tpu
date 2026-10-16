@@ -16,11 +16,13 @@ novel architectures not yet covered by standard PyTorch operators.
 TorchTPU provides three ways to use custom kernels on TPU, depending on your use
 case:
 
+<!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
 | Approach | Status | Best For |
 | :---- | :---- | :---- |
 | **Tokamax** | Production Ready | Drop-in acceleration for common LLM/MoE building blocks without writing kernel code. |
 | **Pallas (`torch.tpu.pallas.jax_op`)** | Production Ready | Writing bespoke, maximum-performance TPU kernels in JAX/Pallas and calling them from PyTorch. |
 | **Helion** | Experimental | Writing kernels that are portable across accelerators (e.g. GPU, TPU) using a PyTorch-native DSL. |
+<!-- mdformat on -->
 
 ## 1. Using pre-built kernels from Tokamax
 
@@ -61,7 +63,7 @@ register it as a PyTorch operator using `torch.tpu.pallas.jax_op`.
     output shapes and dtypes.
 3.  **Register the JAX function with TorchTPU** via `torch.tpu.pallas.jax_op`.
 
-```python {.marimo}
+```python
 import jax
 from jax.experimental import pallas as pl
 import torch
@@ -105,7 +107,7 @@ Decorate your function with `@helion.kernel`. Use standard PyTorch operations
 for host-side setup, and `hl.tile` to define the device execution loop over
 partitioned tiles:
 
-```python {.marimo}
+```python
 import helion
 import helion.language as hl
 import torch

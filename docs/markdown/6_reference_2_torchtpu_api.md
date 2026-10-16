@@ -17,10 +17,9 @@ environment variables. It is designed to help you:
 *   **Configure the runtime**: Tune compilation caching, debugging checks, and
     multi-host launch settings through environment variables.
 
-<!-- !!! note
-    For the exhaustive, automatically generated source-of-truth list of all public Python APIs and environment variables, see [TorchTPU Public APIs (`public_apis.md`)](https://github.com/google-pytorch/torch_tpu/blob/main/docs/markdown/public_apis.md). -->
-
-<!---->
+> [!NOTE] For the exhaustive, automatically generated source-of-truth list of
+> all public Python APIs and environment variables, see
+> [TorchTPU Public APIs (`public_apis.md`)](https://github.com/google-pytorch/torch_tpu/blob/main/docs/markdown/public_apis.md).
 
 ## **Core Device Queries**
 
@@ -138,10 +137,10 @@ rare case that you use an older PyTorch version, use
 `torch.tpu.current_stream()`, `torch.tpu.set_stream()`, or
 `torch.tpu.synchronize()` instead.
 
-!!! note Streams are a CUDA concept with no direct analogy in TPU. In TorchTPU's
-deferred execution model, the XLA compiler and PjRt runtime schedule and overlap
-operations automatically based on data dependencies, so manual multi-stream
-management is not needed. <!---->
+> [!NOTE] Streams are a CUDA concept with no direct analogy in TPU. In
+> TorchTPU's deferred execution model, the XLA compiler and PjRt runtime
+> schedule and overlap operations automatically based on data dependencies, so
+> manual multi-stream management is not needed.
 
 ## **TPU-Specific APIs**
 
@@ -215,7 +214,10 @@ TorchTPU registers `"tpu_dist"` (also aliased as `"tpu"`) as the default
 ### **TPU Custom Operators (`torch.tpu.ops`) and Pallas (`torch.tpu.pallas`)**
 
 TorchTPU exposes hardware-specialized operators under `torch.tpu.ops` and a
-custom JAX/Pallas kernel wrapper under `torch.tpu.pallas`.
+custom JAX/Pallas kernel wrapper under `torch.tpu.pallas`. See
+[Adding custom kernels using Pallas](./3_practical_examples_4_adding_custom_kernels_using_pallas.md)
+and
+[Distributed Pallas kernels](./3_practical_examples_5_distributed_pallas_kernels.md).
 
 #### **General, Attention, MoE, and Collective Operators**
 
@@ -274,7 +276,10 @@ and functional optimizer step into a single compiled TPU graph.
 
 ### **Profiling (`torch.tpu.profiler`)**
 
-Configure TPU hardware and Python tracing for XProf and TensorBoard.
+Configure TPU hardware and Python tracing for XProf and TensorBoard. See
+[XProf for TorchTPU](./4_debugging_and_performance_analysis_2_xprof_for_torchtpu.md)
+and
+[XProf for TorchTPU reference](./6_reference_3_xprof_for_torchtpu_reference.md).
 
 <!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
 | API | Description |
@@ -368,7 +373,9 @@ output for TorchTPU.
 Setting `TORCH_SHOW_CPP_STACKTRACES=1` before importing `torch` makes it much
 easier to diagnose errors that occur deep within the C++ backend or XLA. Instead
 of a simple Python `RuntimeError`, you receive a detailed `C++
-CapturedTraceback` showing exact execution frames.
+CapturedTraceback` showing exact execution frames. See
+[Getting better error information](./4_debugging_and_performance_analysis_3_getting_better_error_information.md)
+for an interactive walkthrough.
 
 ```python
 import os
@@ -406,8 +413,9 @@ y = torch.take(x, indices).cpu()
 #### **3. Dumping XLA IR / HLO (`XLA_FLAGS`)**
 
 By setting `XLA_FLAGS`, you can force the compiler to dump the High-Level
-Optimizer (HLO) text to a directory. The dump directory (e.g., `/tmp/hlo_dump`)
-will contain:
+Optimizer (HLO) text to a directory (see
+[Viewing compilation artifacts](./4_debugging_and_performance_analysis_4_viewing_compilation_artifacts.md)
+for more details). The dump directory (e.g., `/tmp/hlo_dump`) will contain:
 
 *   **`*.after_optimizations.txt`**: The final HLO graph showing hardware-level
     operations.

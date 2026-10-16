@@ -61,7 +61,7 @@ namespace torch_tpu {
 //
 // ConstTensor holds a reference to the TensorImpl, so it is safe to store or
 // capture. Converting an at::Tensor to a ConstTensor is implicit because it is
-// always safe; converting back requires an explicit UnsafeToTensor() call.
+// always safe; converting back requires an explicit ToTensor() call.
 class ConstTensor {
  public:
   // NOLINTNEXTLINE(google-explicit-constructor): Converting is always safe.
@@ -73,12 +73,11 @@ class ConstTensor {
   ConstTensor(ConstTensor&&) noexcept = default;
   ConstTensor& operator=(ConstTensor&&) noexcept = default;
 
-  // Returns the wrapped tensor. This is "unsafe" because it gives up the
-  // guarantees of ConstTensor.
+  // Returns the wrapped tensor.
   //
   // WARNING: at::Tensor's `const` methods may specialize symbolic shapes or
   // throw on them (see the class comment). Prefer the accessors below.
-  [[nodiscard]] at::Tensor UnsafeToTensor() const { return tensor_; }
+  [[nodiscard]] at::Tensor ToTensor() const { return tensor_; }
 
   // Identity and metadata.
   [[nodiscard]] bool defined() const { return tensor_.defined(); }
@@ -152,14 +151,6 @@ class ConstTensor {
     return tensor_.unsafeGetTensorImpl()->is_python_dispatch();
   }
   [[nodiscard]] bool has_storage() const { return tensor_.has_storage(); }
-  // Returns whether the tensor has a storage with a non-null data pointer.
-  // Unlike reading at::Tensor::storage().data_ptr(), this never throws: it
-  // returns false for undefined tensors and tensors without a storage, and
-  // reads the data pointer without the checks that make data_ptr() throw.
-  // Meta tensors and FakeTensors return false. Note that real tensors without
-  // any bytes, e.g. zero-element CPU tensors, return false too, since the CPU
-  // allocator returns a null pointer for zero bytes.
-  [[nodiscard]] bool has_storage_data() const;
 
   // Autograd. These read fields without creating autograd metadata. Undefined
   // tensors report the defaults of a tensor that never required grad.

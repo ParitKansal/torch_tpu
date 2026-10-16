@@ -30,15 +30,15 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
   mo.md(r"""
-    # TorchTPU API Reference
+    # **TorchTPU API Reference**
 
     This document is the reference guide for TorchTPU's public Python APIs and environment variables. It is designed to help you:
     *   **Migrate from CUDA to TPU**: Map common `torch.cuda` calls to PyTorch's device-agnostic [`torch.accelerator`](https://docs.pytorch.org/docs/stable/accelerator.html) APIs.
     *   **Use TPU-specific features**: Configure execution modes, MXU numerical precision, distributed topology, custom Pallas/TPU operators, traceable optimizers, and XProf profiling via the **`torch.tpu`** module.
     *   **Configure the runtime**: Tune compilation caching, debugging checks, and multi-host launch settings through environment variables.
 
-    !!! note
-        For the exhaustive, automatically generated source-of-truth list of all public Python APIs and environment variables, see [TorchTPU Public APIs (`public_apis.md`)](https://github.com/google-pytorch/torch_tpu/blob/main/docs/markdown/public_apis.md).
+    > [!NOTE]
+    > For the exhaustive, automatically generated source-of-truth list of all public Python APIs and environment variables, see [TorchTPU Public APIs (`public_apis.md`)](https://github.com/google-pytorch/torch_tpu/blob/main/docs/markdown/public_apis.md).
     """)
   return
 
@@ -155,8 +155,8 @@ def _(mo):
 
     The `torch.accelerator` APIs in this table require PyTorch 2.11 or later. In the rare case that you use an older PyTorch version, use `torch.tpu.current_stream()`, `torch.tpu.set_stream()`, or `torch.tpu.synchronize()` instead.
 
-    !!! note
-        Streams are a CUDA concept with no direct analogy in TPU. In TorchTPU's deferred execution model, the XLA compiler and PjRt runtime schedule and overlap operations automatically based on data dependencies, so manual multi-stream management is not needed.
+    > [!NOTE]
+    > Streams are a CUDA concept with no direct analogy in TPU. In TorchTPU's deferred execution model, the XLA compiler and PjRt runtime schedule and overlap operations automatically based on data dependencies, so manual multi-stream management is not needed.
     """)
   return
 

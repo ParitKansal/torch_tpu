@@ -18,19 +18,9 @@
 #define TORCH_TPU_CSRC_OPS_EINSUM_EINSUM_ATEN_KERNELS_H_
 
 #include "ATen/core/ATen_fwd.h"
-#include "absl/status/statusor.h"
-#include "absl/types/span.h"
 #include "c10/util/string_view.h"
-#include "stablehlo/dialect/StablehloOps.h"
-#include "stablehlo/integrations/cpp/builder/MlirBuilder.h"
 
 namespace torch_tpu {
-
-// Lowers an einsum equation over `inputs` directly to StableHLO
-// (`DotGeneral` + minimal `Transpose`), using `precision` for contractions.
-absl::StatusOr<mlir::MlirOp> BuildEinsumShlo(
-    absl::Span<const mlir::MlirOp> inputs, c10::string_view equation,
-    mlir::stablehlo::Precision precision);
 
 // Implements `aten::einsum` (`einsum.default`) on `AutogradPrivateUse1`.
 // Decomposes Python wrapper tensor subclasses (such as `DTensor`), functorch

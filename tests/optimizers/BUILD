@@ -135,7 +135,7 @@ _DISTRIBUTED_SINGLE_TRACE_TRAINER_TEST_DEPS = [
     "//src/torch_tpu/_internal/utils:test_utils",
     "//src/torch_tpu/_internal/distributed:multiprocessing",
     "//tests:seed_test_utils",
-    "//tests/distributed:distributed_utils",
+    "//tests/distributed:continuous_test_utils",
     "//shims/torchtitan/experiments/graph_trainer:simple_fsdp",
 ]
 
@@ -147,8 +147,6 @@ internal_target(
     timeout = "long",
     srcs = ["distributed_single_trace_trainer_test.py"],
     main = "distributed_single_trace_trainer_test.py",
-    # Each case spawns its own 2-process gloo group (about a minute each).
-    shard_count = 5,
     tags = ["requires-mem:28g"],
     # Avoids TOO_MANY_INPUT_FILES from torchtitan's sources.
     use_precompile = False,
@@ -163,7 +161,6 @@ internal_target(
     srcs = ["distributed_single_trace_trainer_test.py"],
     args = ["--device=tpu"],
     main = "distributed_single_trace_trainer_test.py",
-    shard_count = 5,
     tags = [
         "nosan",  # Spawns TPU processes.
         "ok-to-wait-for-v7x-in-presubmit",

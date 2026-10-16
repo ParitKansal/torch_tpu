@@ -56,42 +56,6 @@ torch_tpu_cc_library(
 )
 
 torch_tpu_cc_library(
-    name = "upsample_bicubic2d_aa_aten_kernels",
-    srcs = ["upsample_bicubic2d_aa_aten_kernels.cc"],
-    hdrs = ["upsample_bicubic2d_aa_aten_kernels.h"],
-    deps = [
-        "//csrc/common:cache_key",
-        "//csrc/common:dimension_types",
-        "//csrc/common:dtype",
-        "//csrc/common:error_utils",
-        "//csrc/common:to_string",
-        "//csrc/common:utils",
-        "//csrc/eager:op_dispatcher",
-        "//csrc/ops:binary",
-        "//csrc/ops:op_builder_utils",
-        "//csrc/ops:op_names",
-        "//csrc/ops:precision_context",
-        "//csrc/ops/einsum:einsum_aten_kernels",
-        "//csrc/ops/macros:kernel",
-        "//csrc/ops/reductions",
-        "//csrc/ops/reductions:sum",
-        "//csrc/ops/resize:resize_aten_kernels",
-        "//shims/torch:aten_headers",
-        "//shims/torch:torch_headers",
-        "//shims/torch/c10/core:base_headers",
-        "//shims/torch/c10/util:base_headers",
-        "//shims/torch/torch/headeronly:torch_headeronly",
-        "@com_google_absl//absl/status:statusor",
-        "@llvm-project//llvm:Support",
-        "@llvm-project//mlir:IR",
-        "@stablehlo//:stablehlo_ops",
-        "@stablehlo//stablehlo/integrations/cpp/builder:attr_type_builder_util",
-        "@stablehlo//stablehlo/integrations/cpp/builder:mlir_builder",
-        "@stablehlo//stablehlo/integrations/cpp/builder:stablehlo_builder",
-    ],
-)
-
-torch_tpu_cc_library(
     name = "upsample_bicubic2d_aten_kernels",
     srcs = ["upsample_bicubic2d_aten_kernels.cc"],
     hdrs = ["upsample_bicubic2d_aten_kernels.h"],

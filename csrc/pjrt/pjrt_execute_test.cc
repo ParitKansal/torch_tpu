@@ -22,8 +22,13 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/nullability.h"
+#include "absl/status/status_matchers.h"
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "csrc/common/compilation.h"
+#include "csrc/common/compilation_test_helper.h"
+#include "csrc/common/error_utils.h"
 #include "csrc/common/shape.h"
 #include "csrc/common/status_test_utils.h"
 #include "csrc/pjrt/pjrt_state.h"
@@ -32,6 +37,8 @@
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
 #include "xla/hlo/builder/xla_builder.h"
 #include "xla/hlo/builder/xla_computation.h"
+#include "xla/hlo/ir/hlo_computation.h"
+#include "xla/layout.h"
 #include "xla/layout_util.h"
 #include "xla/literal.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -43,7 +50,10 @@
 namespace torch_tpu {
 namespace {
 
+using absl_testing::StatusIs;
+using testing::Each;
 using testing::ElementsAre;
+using testing::HasSubstr;
 
 class PjrtExecuteTest : public testing::Test {
  protected:
@@ -160,6 +170,99 @@ TEST_F(PjrtExecuteTest,
   // = 15.0f.
   EXPECT_THAT(out_literal->data<float>(),
               ElementsAre(15.0f, 15.0f, 15.0f, 15.0f, 15.0f, 15.0f));
+}
+
+// Returns a f32[128,128] device buffer filled with `value`, in the on-device
+// `layout` if given.
+absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> MakeFilledBuffer(
+    xla::PjRtClient& client, xla::PjRtMemorySpace* memory_space,
+    const float value, const xla::Layout* absl_nullable layout = nullptr) {
+  const std::vector<float> host_data(128 * 128, value);
+  return client.BufferFromHostBuffer(
+      host_data.data(), xla::F32, /*dims=*/{128, 128},
+      /*byte_strides=*/std::nullopt,
+      xla::PjRtClient::HostBufferSemantics::kImmutableOnlyDuringCall,
+      /*on_done_with_host_buffer=*/nullptr, memory_space, layout);
+}
+
+TEST_F(PjrtExecuteTest, Execute_WithTupledArguments_DonatesFirstArgument) {
+  constexpr int kNumArguments = 5;
+  TT_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtLoadedExecutable> loaded_executable,
+      CompileAndLoadMlirModule(
+          *client_, MakeSumOfArgumentsModule(kNumArguments),
+          xla::CompileOptions(),
+          /*tuple_arguments_threshold=*/kNumArguments - 1));
+  TT_ASSERT_OK_AND_ASSIGN(const auto hlo_modules,
+                          loaded_executable->GetHloModules());
+  ASSERT_EQ(hlo_modules.size(), 1);
+  ASSERT_EQ(hlo_modules[0]->entry_computation()->num_parameters(), 1);
+  TT_ASSERT_OK_AND_ASSIGN(
+      SharedLoadedExecutableWithMetadata executable,
+      LoadedExecutableWithMetadata::MakeShared(std::move(loaded_executable)));
+
+  std::vector<std::unique_ptr<xla::PjRtBuffer>> inputs;
+  std::vector<xla::PjRtBuffer*> arguments;
+  for (int i = 0; i < kNumArguments; ++i) {
+    TT_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<xla::PjRtBuffer> input,
+        MakeFilledBuffer(*client_, memory_space_, /*value=*/i + 1));
+    arguments.push_back(input.get());
+    inputs.push_back(std::move(input));
+  }
+  TT_ASSERT_OK_AND_ASSIGN(const std::uintptr_t donated_address,
+                          client_->UnsafeBufferPointer(inputs[0].get()));
+
+  TT_ASSERT_OK_AND_ASSIGN(
+      PjRtBufferPointers outputs,
+      Execute(executable, arguments, /*logical_output_shapes=*/{}));
+
+  ASSERT_EQ(outputs.size(), 1);
+  TT_ASSERT_OK_AND_ASSIGN(std::shared_ptr<xla::Literal> out_literal,
+                          outputs[0]->ToLiteral().Await());
+  EXPECT_THAT(out_literal->data<float>(),
+              Each(1.0f + 2.0f + 3.0f + 4.0f + 5.0f));
+  // The output reuses the donated buffer instead of allocating a new one.
+  EXPECT_TRUE(inputs[0]->IsDeleted());
+  for (int i = 1; i < kNumArguments; ++i) {
+    EXPECT_FALSE(inputs[i]->IsDeleted());
+  }
+  TT_ASSERT_OK_AND_ASSIGN(const std::uintptr_t output_address,
+                          client_->UnsafeBufferPointer(outputs[0].get()));
+  EXPECT_EQ(output_address, donated_address);
+}
+
+TEST_F(PjrtExecuteTest,
+       Execute_WithTupledArguments_RejectsArgumentInAnotherLayout) {
+  constexpr int kNumArguments = 5;
+  TT_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtLoadedExecutable> loaded_executable,
+      CompileAndLoadMlirModule(
+          *client_, MakeSumOfArgumentsModule(kNumArguments),
+          xla::CompileOptions(),
+          /*tuple_arguments_threshold=*/kNumArguments - 1));
+  TT_ASSERT_OK_AND_ASSIGN(
+      SharedLoadedExecutableWithMetadata executable,
+      LoadedExecutableWithMetadata::MakeShared(std::move(loaded_executable)));
+
+  // Column-major takes as many bytes as the default row-major layout, so PJRT
+  // alone would silently misread the argument.
+  const xla::Layout column_major({0, 1}, {xla::Tile({8, 128})});
+  std::vector<std::unique_ptr<xla::PjRtBuffer>> inputs;
+  std::vector<xla::PjRtBuffer*> arguments;
+  for (int i = 0; i < kNumArguments; ++i) {
+    TT_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<xla::PjRtBuffer> input,
+        MakeFilledBuffer(*client_, memory_space_, /*value=*/1.0f,
+                         i == 2 ? &column_major : nullptr));
+    arguments.push_back(input.get());
+    inputs.push_back(std::move(input));
+  }
+
+  EXPECT_THAT(
+      Execute(executable, arguments, /*logical_output_shapes=*/{}),
+      StatusIs(error::kInvalidArgument,
+               HasSubstr("expected argument 2 to have on-device layout")));
 }
 
 }  // namespace

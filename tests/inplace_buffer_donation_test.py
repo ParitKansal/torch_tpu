@@ -2043,6 +2043,45 @@ class InplaceBufferDonationTest(seed_test_utils.RepeatableTest):
       self.assertTrue(torch.equal(t1.cpu(), torch.tensor([-1.0, -2.0])))
       self.assertTrue(torch.equal(t2.cpu(), torch.tensor([-3.0, -4.0])))
 
+  def test_foreach_inplace_with_tupled_arguments_donates_in_defer_never(self):
+    """Verifies foreach ops whose program takes its arguments as a tuple.
+
+    XLA:TPU limits the number of program parameters (about 16K on v7), so
+    programs with more than 2000 arguments take them as a single tuple, which
+    must still donate the in-place outputs.
+    """
+    num_tensors = 1500  # 3000 program arguments.
+    num_elements = 4096
+    with execution_mode.set_eager_mode(EagerMode.DEFER_NEVER):
+      selves = [
+          torch.zeros(num_elements, device=self.device)
+          for _ in range(num_tensors)
+      ]
+      others = [
+          torch.ones(num_elements, device=self.device)
+          for _ in range(num_tensors)
+      ]
+      views = [t.view_as(t) for t in selves]
+
+      # Warmup to compile and initialize runtime buffers.
+      torch._foreach_add_(selves, others)
+      torch.accelerator.synchronize()
+      gc.collect()
+
+      torch.accelerator.reset_peak_memory_stats()
+      base_mem = torch.accelerator.memory_allocated()
+
+      torch._foreach_add_(selves, others)
+      torch.accelerator.synchronize()
+
+      peak_mem = torch.accelerator.max_memory_allocated()
+      extra_mem = peak_mem - base_mem
+      # Without donation, the outputs would take another 24 MB.
+      self.assertLess(extra_mem, 4 * 1024 * 1024)
+      expected = torch.full((num_tensors * num_elements,), 2.0)
+      self.assertTrue(torch.equal(torch.cat(selves).cpu(), expected))
+      self.assertTrue(torch.equal(torch.cat(views).cpu(), expected))
+
   def test_slice_scatter_out_donates_buffer_in_defer_never(self):
     """Verifies that slice_scatter.out donates self buffer when out is self."""
     with execution_mode.set_eager_mode(EagerMode.DEFER_NEVER):

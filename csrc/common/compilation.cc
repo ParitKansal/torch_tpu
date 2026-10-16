@@ -16,6 +16,8 @@
 
 #include "csrc/common/compilation.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -46,6 +48,7 @@
 #include "csrc/mlir/pipeline.h"
 #include "csrc/ops/op_builder_utils.h"
 #include "csrc/pjrt/pjrt_state.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
@@ -54,8 +57,10 @@
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/translate/register.h"
 #include "xla/layout.h"
+#include "xla/pjrt/maybe_owning_mlir_module.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_compiler.h"
+#include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/service/computation_layout.h"
 #include "xla/service/device_assignment.h"
@@ -87,9 +92,9 @@ constexpr std::string_view kOptimizationLevelOption = "xla_optimization_level";
 constexpr std::string_view kMemoryFittingLevelOption =
     "xla_memory_fitting_level";
 
-// Returns the on-device shapes `executable`'s parameters were compiled for, or
-// nullopt for dynamic parameters, which PJRT checks itself. Returns an empty
-// vector if `executable` doesn't report them.
+// For each argument buffer `executable` takes, returns the on-device shape it
+// was compiled for, or nullopt for dynamic parameters, which PJRT checks
+// itself. Returns an empty vector if `executable` doesn't report them.
 std::vector<std::optional<xla::Shape>> GetStaticParameterDeviceShapes(
     const xla::PjRtLoadedExecutable& executable) {
   absl::StatusOr<std::vector<std::shared_ptr<xla::HloModule>>> modules =
@@ -101,12 +106,23 @@ std::vector<std::optional<xla::Shape>> GetStaticParameterDeviceShapes(
   }
   const xla::ComputationLayout& entry =
       (*modules)[0]->entry_computation_layout();
-  if (entry.parameter_count() != static_cast<int>(layouts->size())) {
+  // Make one shape per argument buffer, to match `layouts`.
+  //
+  // A program can take a tuple parameter, e.g. `(a, b, c)` when compiled with
+  // `parameter_is_tupled_arguments`. PJRT still takes a, b and c as 3 separate
+  // buffers and reports 3 layouts. So split tuples into their elements, the
+  // same way PJRT does (see xla::FlattenedParameterLayouts).
+  std::vector<const xla::Shape*> flat_parameter_shapes;
+  for (int i = 0; i < entry.parameter_count(); ++i) {
+    xla::ShapeUtil::FlattenTupleShape(entry.parameter_shape(i),
+                                      flat_parameter_shapes);
+  }
+  if (flat_parameter_shapes.size() != layouts->size()) {
     return {};
   }
   std::vector<std::optional<xla::Shape>> result(layouts->size());
-  for (int i = 0; i < entry.parameter_count(); ++i) {
-    const xla::Shape& shape = entry.parameter_shape(i);
+  for (size_t i = 0; i < flat_parameter_shapes.size(); ++i) {
+    const xla::Shape& shape = *flat_parameter_shapes[i];
     if (shape.IsArray() && shape.is_static() && (*layouts)[i] != nullptr) {
       result[i] = shape;
       *result[i]->mutable_layout() = (*layouts)[i]->xla_layout();
@@ -189,12 +205,51 @@ MlirComputationBuilderToExecutableBuilder(
                       ContextedModule::Make(computation_builder));
   return [contexted_module = std::move(contexted_module)](
              xla::PjRtClient& client, UniqueCompileOptions options) mutable {
-    return AdaptXlaError(
-        client.CompileAndLoad(
-            std::move(contexted_module).ToMaybeOwningMlirModule(),
-            std::move(*options)),
-        /* context= */ "failed to compile MLIR module");
+    return CompileAndLoadMlirModule(
+        client, std::move(contexted_module).ToMaybeOwningMlirModule(),
+        std::move(*options));
   };
+}
+
+int GetTupleArgumentsThreshold() {
+  static constexpr int kDefaultTupleArgumentsThreshold = 2000;
+  return GetIntegerEnvOnce<int,
+                           kTorchTpuInternalTupleArgumentsThresholdEnvVar>()
+      .value_or(kDefaultTupleArgumentsThreshold);
+}
+
+absl::StatusOr<std::unique_ptr<xla::PjRtLoadedExecutable>>
+CompileAndLoadMlirModule(xla::PjRtClient& client,
+                         xla::MaybeOwningMlirModule module,
+                         xla::CompileOptions options,
+                         const int tuple_arguments_threshold) {
+  // XLA:TPU limits the number of parameters of a program (about 16K on v7),
+  // which a training step over thousands of parameters can exceed. Like JAX,
+  // pass the arguments of a TPU program with many of them as a single tuple.
+  // Other platforms have no such small limit.
+  //
+  // PJRT tuples the argument buffers at launch, and donated arguments still
+  // alias the outputs.
+  if (client.platform_id() == xla::TpuId()) {
+    mlir::func::FuncOp main =
+        module.mlir_module().lookupSymbol<mlir::func::FuncOp>("main");
+    if (main && static_cast<int64_t>(main.getNumArguments()) >
+                    tuple_arguments_threshold) {
+      ABSL_VLOG(1) << "Passing the " << main.getNumArguments()
+                   << " arguments of the program as a tuple";
+      options.parameter_is_tupled_arguments = true;
+      // `argument_layouts` must have one shape per program parameter, and the
+      // program now has a single tuple parameter. So wrap the per-argument
+      // shapes into one tuple shape, e.g. [A, B, C] becomes [(A, B, C)].
+      if (options.argument_layouts.has_value()) {
+        options.argument_layouts = std::vector<xla::Shape>{
+            xla::ShapeUtil::MakeTupleShape(*options.argument_layouts)};
+      }
+    }
+  }
+  return AdaptXlaError(
+      client.CompileAndLoad(std::move(module), std::move(options)),
+      /* context= */ "failed to compile MLIR module");
 }
 
 // Updates `map` with the contents of `updates`. If a key appears in both `map`
@@ -470,12 +525,16 @@ absl::Status ApplyCompilerOptionOverrides(
                           Fingerprint(shape.ToString(/*print_layout=*/true)));
     }
   }
+  // Only fingerprint non-default values to keep existing keys stable.
+  if (options.parameter_is_tupled_arguments) {
+    fp = FingerprintCat(fp, options.parameter_is_tupled_arguments);
+  }
   return fp;
 }
 
 [[nodiscard]] CompileOptionsKey MakeCompileOptionsKey(
     const xla::CompileOptions& options) {
-  return CompileOptionsKey(FingerprintCat(
+  FingerprintType fp = FingerprintCat(
       // Fingerprint of XLA_FLAGS and LIBTPU_INIT_ARGS environment variables,
       // effectively fingerprint of flags that might impact the compiled
       // executable.
@@ -490,7 +549,15 @@ absl::Status ApplyCompilerOptionOverrides(
       Fingerprint(GetEnvOnce<kXlaFlagsEnvVar>().value_or("")),
       // LINT.ThenChange()
       Fingerprint(GetEnvOnce<kLibtpuInitArgsEnvVar>().value_or("")),
-      Fingerprint(options)));
+      Fingerprint(options));
+  // The threshold decides whether `CompileAndLoadMlirModule` makes a program
+  // take its arguments as a tuple. Only fingerprint an override to keep
+  // existing keys stable.
+  if (GetEnvOnce<kTorchTpuInternalTupleArgumentsThresholdEnvVar>()
+          .has_value()) {
+    fp = FingerprintCat(fp, GetTupleArgumentsThreshold());
+  }
+  return CompileOptionsKey(fp);
 }
 // LINT.ThenChange()
 

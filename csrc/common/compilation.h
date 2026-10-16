@@ -281,6 +281,22 @@ absl::StatusOr<LoadedExecutableBuilder>
 MlirComputationBuilderToExecutableBuilder(
     const MlirComputationBuilder& computation_builder);
 
+// Returns the number of arguments above which `CompileAndLoadMlirModule` passes
+// a TPU program's arguments as a single tuple. Defaults to 2000, like JAX, and
+// can be overridden with TORCH_TPU_INTERNAL_TUPLE_ARGUMENTS_THRESHOLD.
+[[nodiscard]] int GetTupleArgumentsThreshold();
+
+// Compiles and loads `module` with `options` on `client`.
+//
+// On TPU, if the main function of `module` takes more than
+// `tuple_arguments_threshold` arguments, the program is compiled to take them
+// as a single tuple. Callers still pass one buffer per argument.
+absl::StatusOr<std::unique_ptr<xla::PjRtLoadedExecutable>>
+CompileAndLoadMlirModule(
+    xla::PjRtClient& client, xla::MaybeOwningMlirModule module,
+    xla::CompileOptions options,
+    int tuple_arguments_threshold = GetTupleArgumentsThreshold());
+
 // Creates an MLIR context and registers all required TPU dialects.
 absl_nonnull std::unique_ptr<mlir::MLIRContext> MakeMlirContext();
 

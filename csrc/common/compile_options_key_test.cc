@@ -175,5 +175,36 @@ TEST(CompileOptionsKeyDeathTest, LibtpuInitArgsAffectsFingerprint) {
          "fingerprinted.";
 }
 
+TEST(CompileOptionsKeyDeathTest, TupleArgumentsThresholdAffectsFingerprint) {
+  // The fingerprint of default options, which must not change when the
+  // threshold isn't overridden.
+  constexpr FingerprintType kDefaultOptionsFingerprint =
+      15154592522507906076ULL;
+
+  xla::CompileOptions options;
+  options.executable_build_options.mutable_debug_options();
+
+  EXPECT_EXIT(
+      {
+        setenv(kTorchTpuInternalTupleArgumentsThresholdEnvVar, "4", 1);
+        const CompileOptionsKey key = MakeCompileOptionsKey(options);
+        ABSL_CHECK_NE(key.key(), kDefaultOptionsFingerprint);
+        _exit(0);
+      },
+      ExitedWithCode(0), "");
+
+  EXPECT_EQ(MakeCompileOptionsKey(options).key(), kDefaultOptionsFingerprint);
+}
+
+TEST_F(CompileOptionsKeyTest, TupledArgumentsAffectFingerprint) {
+  xla::CompileOptions options;
+  options.executable_build_options.mutable_debug_options();
+  const CompileOptionsKey flat_key = MakeCompileOptionsKey(options);
+
+  options.parameter_is_tupled_arguments = true;
+
+  EXPECT_NE(MakeCompileOptionsKey(options).key(), flat_key.key());
+}
+
 }  // namespace
 }  // namespace torch_tpu

@@ -172,6 +172,10 @@ inline constexpr char kTorchTpuInternalStorageAwarePlaceholdersEnvVar[] =
 inline constexpr char
     kTorchTpuInternalTier3CompilationCacheLocalBackupTaskEnvVar[] =
         "TORCH_TPU_INTERNAL_TIER3_COMPILATION_CACHE_LOCAL_BACKUP_TASK";
+// TPU programs with more arguments than this take them as a single tuple, as
+// XLA:TPU limits the number of program parameters. If not set, 2000 is used.
+inline constexpr char kTorchTpuInternalTupleArgumentsThresholdEnvVar[] =
+    "TORCH_TPU_INTERNAL_TUPLE_ARGUMENTS_THRESHOLD";
 // TorchTPU-internal XLA compiler option overrides, in the format of
 // "key1=value1 key2=value2 ...". It is used to update `xla::CompileOptions`
 // through `env_option_overrides`, and takes precedence over `debug_options` set
@@ -321,6 +325,8 @@ inline constexpr auto kEnvVarToStage =
         {kTorchTpuInternalStorageAwarePlaceholdersEnvVar,
          SymbolStage::InternalApi()},
         {kTorchTpuInternalTier3CompilationCacheLocalBackupTaskEnvVar,
+         SymbolStage::InternalApi()},
+        {kTorchTpuInternalTupleArgumentsThresholdEnvVar,
          SymbolStage::InternalApi()},
         {kTorchTpuInternalXlaOptionsEnvVar, SymbolStage::InternalApi()},
         {kTorchTpuLaunchBlockingEnvVar, SymbolStage::Experimental()},

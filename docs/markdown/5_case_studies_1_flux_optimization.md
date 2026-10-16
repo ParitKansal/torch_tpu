@@ -2,109 +2,73 @@
 torch_tpu_version: 0.1.1.dev20260922
 ---
 
-# FLUX Optimization
+# FLUX optimization
 
-This case study walks through how we took a reference PyTorch implementation of
-the [FLUX](https://github.com/black-forest-labs/flux) diffusion transformer
-`DoubleStreamBlock` and made a training step **1.48x faster** on Cloud TPU with
-TorchTPU at a sequence length of 32,768.
+This case study walks through how we took a reference PyTorch implementation of the [FLUX](https://github.com/black-forest-labs/flux) diffusion transformer `DoubleStreamBlock` and made a training step **1.48x faster** on Cloud TPU with TorchTPU at a sequence length of 32,768.
 
-This page is a condensed companion to the full tutorial. It highlights the key
-concept behind each optimization with short, self-contained snippets. For the
-complete model code, benchmarks, XProf traces, and tests, see:
+This page is a condensed companion to the full tutorial. It highlights the key concept behind each optimization with short, self-contained snippets. For the complete model code, benchmarks, XProf traces, and tests, see:
 
--   [FLUX Optimization Tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/README.md):
-    full walkthrough of every milestone, including XProf traces and instructions
-    for reproducing every benchmark.
--   [Authoring Custom Pallas Kernels for PyTorch](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/kernels/README.md):
-    step-by-step walkthrough of the Pallas SplashAttention kernel used in
-    Milestone 4.
+* [FLUX Optimization Tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/README.md): full walkthrough of every milestone, including XProf traces and instructions for reproducing every benchmark.
+* [Authoring Custom Pallas Kernels for PyTorch](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/kernels/README.md): step-by-step walkthrough of the Pallas SplashAttention kernel used in Milestone 4.
 
-The implementation is based on the
-[TorchTitan implementation of FLUX](https://github.com/google-pytorch/torchtitan/blob/main/torchtitan/models/flux/model/)
-and the
-[black-forest-labs/flux](https://github.com/black-forest-labs/flux/blob/main/src/flux/)
-repository.
+The implementation is based on the [TorchTitan implementation of FLUX](https://github.com/google-pytorch/torchtitan/blob/main/torchtitan/models/flux/model/) and the [black-forest-labs/flux](https://github.com/black-forest-labs/flux/blob/main/src/flux/) repository.
 
-## Results at a Glance
+If you are new to examples, you may want to familiarize yourself with running examples on GKE [through our other documents](./1_basics_3_get_started_on_gke.md).
+<!---->
+## Results at a glance
 
-Mean training step time (forward + loss + backward + optimizer step) for a
-single `DoubleStreamBlock`:
+Mean training step time (forward + loss + backward + optimizer step) for a single `DoubleStreamBlock`:
 
-<!-- mdformat off(reason: standard GFM table rendering in Critique and Code Search) -->
 | Configuration | Mean Step Time | Speedup vs. Baseline |
 | :--- | ---: | ---: |
-| Baseline reference (eager) | 176.05 ms | 1.00x |
-| Pallas SplashAttention only (eager) | 147.50 ms | 1.19x |
-| Zero-copy views only (eager) | 175.39 ms | 1.00x |
-| `torch.compile` only | 157.33 ms | 1.12x |
-| Zero-copy views + fused RoPE + Pallas SplashAttention (eager) | 153.60 ms | 1.15x |
-| Zero-copy views + `torch.compile` | 156.56 ms | 1.12x |
-| Zero-copy views + fused RoPE + `torch.compile` | 151.27 ms | 1.16x |
-| **Zero-copy views + fused RoPE + Pallas SplashAttention + `torch.compile`** | **119.35 ms** | **1.48x** |
-<!-- mdformat on -->
+| Baseline reference (eager) | 178.61 ms | 1.00x |
+| Pallas SplashAttention only (eager) | 149.81 ms | 1.19x |
+| Zero-copy views only (eager) | 178.30 ms | 1.00x |
+| `torch.compile` only | 159.33 ms | 1.12x |
+| Zero-copy views + fused RoPE + Pallas SplashAttention (eager) | 156.73 ms | 1.14x |
+| Zero-copy views + `torch.compile` | 159.08 ms | 1.12x |
+| Zero-copy views + fused RoPE + `torch.compile` | 153.60 ms | 1.16x |
+| **Zero-copy views + fused RoPE + Pallas SplashAttention + `torch.compile`** | **122.51 ms** | **1.46x** |
 
 **Measurement setup:**
 
--   **Hardware:** a single TPU v6e chip (32 GiB HBM).
--   **Software:** Python 3.14, PyTorch 2.15 (pre-release), JAX 0.12, einops
-    0.8.2, and TorchTPU built from source.
--   **Model shape:** `batch_size=2`, `hidden_size=1024`, `num_heads=8`
-    (`head_dim=128`), `img_seq_len=32256`, `txt_seq_len=512` (total sequence
-    length 32,768).
--   **Precision:** bfloat16 block parameters and inputs.
--   **SplashAttention block sizes:** 2048 for `block_q`, `block_kv`, and the
-    dK/dV backward tiles.
--   **Timing:** 3 warmup steps followed by 10 timed steps. The timed steps are
-    dispatched back to back and `torch.accelerator.synchronize()` runs once
-    after the last one, so the mean step time (total time divided by the number
-    of steps) includes device execution. The profiler is disabled during the
-    timed steps.
+- **Hardware:** a single TPU v6e chip (32 GiB HBM).
+- **Software:** Python 3.14, PyTorch 2.15 (pre-release), JAX 0.12, einops 0.8.2, and TorchTPU built from source.
+- **Model shape:** `batch_size=2`, `hidden_size=1024`, `num_heads=8` (`head_dim=128`), `img_seq_len=32256`, `txt_seq_len=512` (total sequence length 32,768).
+- **Precision:** bfloat16 block parameters and inputs.
+- **SplashAttention block sizes:** 2048 for `block_q`, `block_kv`, and the dK/dV backward tiles.
+- **Timing:** 3 warmup steps followed by 10 timed steps. The timed steps are dispatched back to back and `torch.accelerator.synchronize()` runs once after the last one, so the mean step time (total time divided by the number of steps) includes device execution. The profiler is disabled during the timed steps.
 
-At this sequence length, attention dominates the step, so SplashAttention and
-compilation give the largest gains. At shorter sequence lengths, compilation
-matters more (about 3x at a sequence length of 640) and the attention kernel
-matters less.
+At this sequence length, attention dominates the step, so SplashAttention and compilation give the largest gains. At shorter sequence lengths, compilation matters more (about 3x at a sequence length of 640) and the attention kernel matters less.
 
 The lessons generalize to most transformer models on TPU:
 
-1.  **Avoid hidden layout copies**: Prefer zero-copy views (`.view()`,
-    `torch.unbind()`) over reshuffles that materialize new HBM buffers.
-2.  **Store less, compute more**: Express positional embeddings as compact
-    elementwise math instead of materialized matrices.
-3.  **Compile the whole block**: `torch.compile(backend="tpu")` lets XLA fuse
-    elementwise chains and remove intermediate HBM round-trips.
-4.  **Reach for custom kernels when needed**: Pallas kernels give explicit
-    control over on-chip tiling for memory-bound operations like attention at
-    long sequence lengths.
+1. **Avoid hidden layout copies**: Prefer zero-copy views (`.view()`, `torch.unbind()`) over reshuffles that materialize new HBM buffers.
+2. **Store less, compute more**: Express positional embeddings as compact elementwise math instead of materialized matrices.
+3. **Compile the whole block**: `torch.compile()` lets XLA fuse elementwise chains and remove intermediate HBM round-trips.
+4. **Reach for custom kernels when needed**: Pallas kernels give explicit control over on-chip tiling for memory-bound operations like attention at long sequence lengths.
 
-### How to Read This Page
+### How to read this page
 
 Each milestone is presented as a pair of sections:
 
--   **Before (reference)**: the original implementation and its bottleneck.
--   **After (optimized)**: the optimized implementation, followed by a check
-    that it produces the same result as the reference.
+- **Before (reference)**: the original implementation and its bottleneck.
+- **After (optimized)**: the optimized implementation, followed by a check that it produces the same result as the reference.
 
-Code cells are labeled with a matching `# BEFORE (reference)` or `# AFTER
-(optimized)` comment on their first line.
+Code cells are labeled with a matching `# BEFORE (reference)` or `# AFTER (optimized)` comment on their first line.
 
-**Prerequisites:** The Milestone 1 reference cell uses
-[einops](https://github.com/arogozhnikov/einops) (`pip install einops`).
+**Prerequisites:** The Milestone 1 reference cell uses [einops](https://github.com/arogozhnikov/einops) (`pip install einops`).
 
-```python
+```python {.marimo}
 import torch
 
 device = torch.device("tpu")
 print(f"Running on {device}.")
 ```
 
-## Milestone 1: Zero-Copy Tensor Views
+## Milestone 1: Zero-copy tensor views
 
-In `DoubleStreamBlock`, the image and text streams project hidden states of
-shape `(B, L, 3 * H * D)` into queries, keys, and values. How that projection is
-split into Q, K, and V determines whether TPU has to copy data in HBM during
-training.
+In `DoubleStreamBlock`, the image and text streams project hidden states of shape `(B, L, 3 * H * D)` into queries, keys, and values. How that projection is split into Q, K, and V determines whether TPU has to copy data in HBM during training.
 
 ### Before (reference): `einops.rearrange`
 
@@ -116,13 +80,9 @@ img_q, img_k, img_v = einops.rearrange(
 )
 ```
 
-In the forward pass, `einops.rearrange` returns strided views of the projection,
-so no data moves yet. The cost shows up in the **backward pass**: to route
-gradients back through the axis reordering, autograd materializes the gradient
-in a new buffer, which runs on TPU as an extra HBM-to-HBM copy in every
-attention block (visible as a `copy` op in XProf).
+In the forward pass, `einops.rearrange` returns strided views of the projection, so no data moves yet. The cost shows up in the **backward pass**: to route gradients back through the axis reordering, autograd materializes the gradient in a new buffer, which runs on TPU as an extra HBM-to-HBM copy in every attention block (visible as a `copy` op in XProf).
 
-```python
+```python {.marimo}
 # BEFORE (reference): einops.rearrange moves the Q/K/V axis to the front.
 import einops
 
@@ -137,22 +97,12 @@ print(f"q shape: {tuple(q_before.shape)}")
 
 ### After (optimized): `.view()` + `torch.unbind()`
 
-The optimized implementation keeps the `3` axis adjacent to `(H, D)` and splits
-it with `torch.unbind`. The backward pass then stacks the Q, K, and V gradients
-directly into the original layout, so no extra copy is needed. In the results
-table, the effect on step time is small (**176.05 ms to 175.39 ms** in eager
-mode, **157.33 ms to 156.56 ms** compiled) because the copy is a small fraction
-of the step, but it is removed at no cost.
+The optimized implementation keeps the `3` axis adjacent to `(H, D)` and splits it with `torch.unbind`. The backward pass then stacks the Q, K, and V gradients directly into the original layout, so no extra copy is needed. In the results table, the effect on step time is small (**178.61 ms to 178.30 ms** in eager mode, **159.33 ms to 159.08 ms** compiled) because the copy is a small fraction of the step, but it is removed at no cost.
 
-> [!NOTE] The cells in this milestone only show that the two approaches produce
-> the same Q, K, and V. In the forward pass, both return the same strided views,
-> so their outputs look identical. The extra HBM copy from `einops.rearrange`
-> only occurs in the backward pass, and is visible in an XProf trace of a full
-> training step rather than in the cell output. See
-> [Milestone 1 of the FLUX Optimization Tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/README.md#milestone-1)
-> for the traces.
+!!! note
+    The cells in this milestone only show that the two approaches produce the same Q, K, and V. In the forward pass, both return the same strided views, so their outputs look identical. The extra HBM copy from `einops.rearrange` only occurs in the backward pass, and is visible in an XProf trace of a full training step rather than in the cell output. See [Milestone 1 of the FLUX Optimization Tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/README.md#milestone-1) for the traces.
 
-```python
+```python {.marimo}
 # AFTER (optimized): keep Q/K/V adjacent to (H, D) and unbind.
 _b, _l, _ = qkv.shape
 q_after, _k, _v = torch.unbind(
@@ -164,17 +114,13 @@ print(f"Matches reference: {torch.equal(q_after.cpu(), q_before.cpu())}")
 
 ## Milestone 2: Fused Algebraic RoPE
 
-FLUX applies multi-axis Rotary Position Embeddings (RoPE) to queries and keys.
-The cells below implement both versions for a single RoPE axis.
+FLUX applies multi-axis Rotary Position Embeddings (RoPE) to queries and keys. The cells below implement both versions for a single RoPE axis.
 
 ### Before (reference): 2x2 rotation matrices
 
-The reference implementation materializes a full `2x2` rotation matrix `[[cos,
--sin], [sin, cos]]` for every frequency pair, and applies it as a matrix-vector
-product on reshaped 6D query/key tensors. This stores `cos` and `sin` twice, and
-the extra stacking and reshaping show up as large copy blocks in XProf.
+The reference implementation materializes a full `2x2` rotation matrix `[[cos, -sin], [sin, cos]]` for every frequency pair, and applies it as a matrix-vector product on reshaped 6D query/key tensors. This stores `cos` and `sin` twice, and the extra stacking and reshaping show up as large copy blocks in XProf.
 
-```python
+```python {.marimo}
 # BEFORE (reference): materialize 2x2 rotation matrices, then contract.
 def rope_ref(pos, dim, theta=10000):
   """Returns rotation matrices of shape (B, S, D/2, 2, 2)."""
@@ -216,8 +162,7 @@ print(f"Rotation matrix freqs shape: {tuple(_freqs_ref.shape)}")
 
 ### After (optimized): compact `[cos, sin]` pairs + elementwise rotation
 
-The optimized implementation stores only compact `[cos, sin]` pairs and applies
-the rotation directly with elementwise math:
+The optimized implementation stores only compact `[cos, sin]` pairs and applies the rotation directly with elementwise math:
 
 ```python
 # (x0 * cos - x1 * sin, x0 * sin + x1 * cos)
@@ -225,23 +170,14 @@ xq_out_0 = xq_0 * cos - xq_1 * sin
 xq_out_1 = xq_0 * sin + xq_1 * cos
 ```
 
-This halves the positional embedding footprint, maps to fused multiply-add
-instructions, and fuses with the surrounding projection and attention ops under
-compilation. On top of zero-copy views and `torch.compile`, it reduces the step
-time from **156.56 ms to 151.27 ms (3.4%)**.
+This halves the positional embedding footprint, maps to fused multiply-add instructions, and fuses with the surrounding projection and attention ops under compilation. On top of zero-copy views and `torch.compile`, it reduces the step time from **159.08 ms to 153.60 ms (3.4%)**.
 
-Because both versions perform the same multiplications and additions on the same
-operands, they produce identical results. The cell below runs the optimized
-version on the same inputs and compares it against the reference:
+Because both versions perform the same multiplications and additions on the same operands, they produce identical results. The cell below runs the optimized version on the same inputs and compares it against the reference:
 
-> [!NOTE] These cells show the smaller frequency tensor and that both versions
-> produce identical results. The speedup only appears when RoPE runs inside the
-> compiled `DoubleStreamBlock`, where the elementwise rotation fuses with the
-> surrounding ops. See
-> [Milestone 2 of the FLUX Optimization Tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/README.md#milestone-2)
-> for the XProf traces.
+!!! note
+    These cells show the smaller frequency tensor and that both versions produce identical results. The speedup only appears when RoPE runs inside the compiled `DoubleStreamBlock`, where the elementwise rotation fuses with the surrounding ops. See [Milestone 2 of the FLUX Optimization Tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/README.md#milestone-2) for the XProf traces.
 
-```python
+```python {.marimo}
 # AFTER (optimized): store compact [cos, sin] pairs, rotate elementwise.
 def rope(pos, dim, theta=10000):
   """Returns compact [cos, sin] pairs of shape (B, S, D/2, 2)."""
@@ -288,28 +224,23 @@ torch.testing.assert_close(
 )  # TORCH_ASSERT_CLOSE_OK=<Using standard PyTorch assert for user facing documentation only.>
 ```
 
-## Milestone 3: Whole-Block XLA Compilation
+## Milestone 3: Whole-block XLA compilation
 
 ### Before (reference): eager execution
 
-In eager mode, every PyTorch operation launches an independent TPU program, so
-intermediate activations round-trip through HBM and the host frequently stalls
-on dispatch. In the results table, the baseline `DoubleStreamBlock` takes
-**176.05 ms** per step in eager mode.
+In eager mode, every PyTorch operation launches an independent TPU program, so intermediate activations round-trip through HBM and the host frequently stalls on dispatch. In the results table, the baseline `DoubleStreamBlock` takes **178.61 ms** per step in eager mode.
 
 The cell below runs the fused RoPE from Milestone 2 eagerly, op by op:
 
-```python
+```python {.marimo}
 # BEFORE (reference): eager execution, one TPU program per op.
 q_eager, k_eager = apply_rope(rope_xq, rope_xk, freqs)
 print("Ran fused RoPE eagerly.")
 ```
 
-### After (optimized): `torch.compile(backend="tpu")`
+### After (optimized): `torch.compile()`
 
-Compiling the entire `DoubleStreamBlock` with `torch.compile(backend="tpu")`
-lowers it to a single XLA graph, letting the compiler fuse elementwise ops,
-normalizations, and residual additions:
+Compiling the entire `DoubleStreamBlock` with `torch.compile()` lowers it to a single XLA graph, letting the compiler fuse elementwise ops, normalizations, and residual additions:
 
 ```python
 block = DoubleStreamBlock(
@@ -322,23 +253,17 @@ block = DoubleStreamBlock(
         compile=True,
     ),
 )
-compiled_block = block.maybe_compile()  # Wraps the block in torch.compile(backend="tpu").
+compiled_block = block.maybe_compile()  # Wraps the block in torch.compile().
 ```
 
-Compilation brings the step time from **176.05 ms to 157.33 ms (1.12x)**. The
-gain is modest at a sequence length of 32,768 because attention dominates the
-step. At a sequence length of 640, compilation is about 3x faster.
+Compilation brings the step time from **178.61 ms to 159.33 ms (1.12x)**. The gain is modest at a sequence length of 32,768 because attention dominates the step. At a sequence length of 640, compilation is about 3x faster.
 
-The same pattern applies to any function. The cell below compiles the fused RoPE
-and checks that it matches eager execution:
+The same pattern applies to any function. The cell below compiles the fused RoPE and checks that it matches eager execution:
 
-> [!NOTE] These cells only check that compiling doesn't change the result. The
-> fusion and the speedup show up in XProf and step-time measurements of the full
-> `DoubleStreamBlock`, not in the cell output. See
-> [Milestone 3 of the FLUX Optimization Tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/README.md#milestone-3)
-> for eager vs. compiled traces.
+!!! note
+    These cells only check that compiling doesn't change the result. The fusion and the speedup show up in XProf and step-time measurements of the full `DoubleStreamBlock`, not in the cell output. See [Milestone 3 of the FLUX Optimization Tutorial](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/README.md#milestone-3) for eager vs. compiled traces.
 
-```python
+```python {.marimo}
 # AFTER (optimized): compile into a single fused XLA graph.
 compiled_apply_rope = torch.compile(apply_rope, backend="tpu")
 _q_compiled, _k_compiled = compiled_apply_rope(rope_xq, rope_xk, freqs)
@@ -352,13 +277,9 @@ torch.testing.assert_close(
 print("Compiled fused RoPE matches eager execution.")
 ```
 
-## Milestone 4: Custom Pallas SplashAttention Kernel
+## Milestone 4: Custom Pallas SplashAttention kernel
 
-At long sequence lengths (for example, `S = 2048` or `S = 4096`), full joint
-attention becomes memory-bound. This milestone is shown as snippets only; see
-the
-[Pallas kernel walkthrough](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/kernels/README.md)
-for the full, runnable implementation.
+At long sequence lengths (for example, `S = 2048` or `S = 4096`), full joint attention becomes memory-bound. This milestone is shown as snippets only; see the [Pallas kernel walkthrough](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/kernels/README.md) for the full, runnable implementation.
 
 ### Before (reference): standard PyTorch SDPA
 
@@ -374,16 +295,9 @@ Un-tiled attention materializes an `O(S^2)` score matrix in HBM.
 attn = splash_sdpa(q, k, v, is_causal=False)  # Drop-in replacement.
 ```
 
-`splash_sdpa` is a custom
-[Pallas](https://docs.jax.dev/en/latest/pallas/index.html) SplashAttention
-kernel that computes attention in on-chip tiles, based on the
-[TorchTitan implementation of SplashAttention](https://github.com/google-pytorch/torchtitan/blob/main/torchtitan/experiments/tpu/kernels/splash_attention.py).
+`splash_sdpa` is a custom [Pallas](https://docs.jax.dev/en/latest/pallas/index.html) SplashAttention kernel that computes attention in on-chip tiles, based on the [TorchTitan implementation of SplashAttention](https://github.com/google-pytorch/torchtitan/blob/main/torchtitan/experiments/tpu/kernels/splash_attention.py).
 
-The kernel is exposed to PyTorch with `torch.tpu.pallas.jax_op`. Its forward and
-backward functions are annotated with `jax.Array` types, from which `jax_op`
-infers the PyTorch custom operator schema. The forward pass saves the softmax
-`logsumexp` residual so the backward kernel does not need to re-run the forward
-computation:
+The kernel is exposed to PyTorch with `torch.tpu.pallas.jax_op`. Its forward and backward functions are annotated with `jax.Array` types, from which `jax_op` infers the PyTorch custom operator schema. The forward pass saves the softmax `logsumexp` residual so the backward kernel does not need to re-run the forward computation:
 
 ```python
 torch_fwd_fn = torch.tpu.pallas.jax_op(f"pallas::{op_fwd_name}", splash_fn)
@@ -405,34 +319,14 @@ def backward(ctx, grad_out, grad_lse):
 torch_fwd_fn.register_autograd(backward, setup_context=setup_context)
 ```
 
-> [!IMPORTANT] **JAX is not executed at runtime.** Pallas is distributed inside
-> the `jax` package, so the kernel is written with `jax` syntax. However,
-> `torch.tpu.pallas.jax_op` only uses JAX once, at trace time, with abstract
-> shape/dtype placeholders to export the kernel as an MLIR module. During
-> training and inference, both in eager mode and under `torch.compile`, the
-> kernel runs directly on `torch.Tensor` TPU buffers.
+!!! important
+    **JAX is not executed at runtime.** Pallas is distributed inside the `jax` package, so the kernel is written with `jax` syntax. However, `torch.tpu.pallas.jax_op` only uses JAX once, at trace time, with abstract shape/dtype placeholders to export the kernel as an MLIR module. During training and inference, both in eager mode and under `torch.compile`, the kernel runs directly on `torch.Tensor` TPU buffers.
 
-**Results**: In the results table, SplashAttention alone is **1.19x** faster
-than the eager baseline (176.05 ms to 147.50 ms). With zero-copy views and fused
-RoPE enabled, it is faster than standard SDPA in both eager (**181.67 ms to
-153.60 ms, 1.18x**) and compiled (**151.27 ms to 119.35 ms, 1.27x**) modes.
+**Results**: In the results table, SplashAttention alone is **1.19x** faster than the eager baseline (178.61 ms to 149.81 ms). With zero-copy views and fused RoPE enabled, it is faster than standard SDPA in both eager (**182.61 ms to 156.73 ms, 1.17x**) and compiled (**153.60 ms to 122.51 ms, 1.25x**) modes.
 
-These results depend on configuring the kernel for the workload. With the
-default 512-token blocks, SplashAttention was about 10% slower than standard
-SDPA under compilation at the same sequence length, and float32 inputs were
-slower still. Benchmark a few block sizes for your sequence length, run the
-kernel in bfloat16, and profile before reaching for a custom kernel.
+These results depend on configuring the kernel for the workload. With the default 512-token blocks, SplashAttention was about 10% slower than standard SDPA under compilation at the same sequence length, and float32 inputs were slower still. Benchmark a few block sizes for your sequence length, run the kernel in bfloat16, and profile before reaching for a custom kernel.
 
 **Learn more:**
 
--   **Pallas SplashAttention example (used in this case study)**:
-    [`splash_attention.py`](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/kernels/splash_attention.py)
-    contains the full kernel integration, and
-    [`splash_attention_test.py`](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/kernels/splash_attention_test.py)
-    verifies forward and gradient parity against PyTorch SDPA. The
-    [kernel walkthrough](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/kernels/README.md)
-    explains block sizes, masks, autograd registration, and testing step by
-    step.
--   **Pallas basics**:
-    [Custom Kernels with Pallas](https://github.com/google-pytorch/torch_tpu/blob/main/docs/markdown/3_practical_examples_4_adding_custom_kernels_using_pallas.md)
-    introduces writing Pallas kernels with TorchTPU.
+* **Pallas SplashAttention example (used in this case study)**: [`splash_attention.py`](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/kernels/splash_attention.py) contains the full kernel integration, and [`splash_attention_test.py`](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/kernels/splash_attention_test.py) verifies forward and gradient parity against PyTorch SDPA. The [kernel walkthrough](https://github.com/google-pytorch/torch_tpu/blob/main/examples/FLUX_optimization/kernels/README.md) explains block sizes, masks, autograd registration, and testing step by step.
+* **Pallas basics**: [Custom Kernels with Pallas](https://github.com/google-pytorch/torch_tpu/blob/main/docs/markdown/3_practical_examples_4_adding_custom_kernels_using_pallas.md) introduces writing Pallas kernels with TorchTPU.

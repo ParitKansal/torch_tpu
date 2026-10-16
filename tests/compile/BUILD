@@ -23,7 +23,6 @@
 
 load(
     "//build_files:build_defs.bzl",
-    "REQUIRES_V5_MULTI_DEVICE",
     "if_oss",
     "torch_tpu_package_end",
     "torch_tpu_py_library",
@@ -141,7 +140,6 @@ torch_tpu_py_test(
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/compile",
         "//src/torch_tpu/_internal/compile:compiler",
-        "//src/torch_tpu/_internal/compile:nested_compile_region",
         "//src/torch_tpu/_internal/compile:torch_tpu_compiled_executable",
         "//src/torch_tpu/_internal/compile:tpu_backend",
         "//src/torch_tpu/_internal/utils:test_utils",
@@ -320,16 +318,16 @@ torch_tpu_py_test(
     size = "large",
     timeout = "long",
     srcs = ["compile_with_distributed_test.py"],
-    shard_count = 6,
-    # Run test shards exclusively to prevent device contention on /dev/vfio/* when acquiring the
-    # multi-chip TPU slice concurrently.
+    shard_count = 2,
     tags = if_oss(
+        # Run test shards exclusively to prevent device contention on /dev/vfio/* when acquiring the
+        # 8-chip TPU slice concurrently.
         ["exclusive"],
         [],
     ) + [
-        REQUIRES_V5_MULTI_DEVICE,
         "noasan",  # TODO(b/555762239): fix the test in asan mode.
         "requires-accel-hbm",
+        "requires-tpu-v5lite:8",
     ],
     deps = [
         "//shims/absl_py/testing:absltest",
@@ -338,8 +336,7 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/compile",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:seed_test_utils",
-        "//tests/distributed:distributed_utils",
+        "//tests/distributed:continuous_test_utils",
     ],
 )
 
@@ -716,36 +713,6 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu:_loader",
-        "//tests:seed_test_utils",
-    ],
-)
-
-torch_tpu_py_test(
-    name = "nested_compile_region_benchmark_test",
-    timeout = "long",
-    srcs = ["nested_compile_region_benchmark_test.py"],
-    # Run on single-chip TPU v7 for faster TorchDynamo/Inductor compilation
-    # and to utilize idle single-chip v7 runner capacity in OSS presubmit.
-    oss_presubmit_tpu_generation = tpu_gen(
-        "v7",
-        reason = "Faster TorchDynamo/Inductor compilation on single-chip TPU v7",
-    ),
-    tags = [
-        "nofastbuild",
-        "requires-net:external",
-        "requires-tpu-v5lite",
-    ],
-    deps = [
-        "//shims/absl_py/flags",
-        "//shims/absl_py/logging",
-        "//shims/absl_py/testing:absltest",
-        "//shims/torch:pytorch",
-        "//src/torch_tpu",
-        "//src/torch_tpu/_internal:testing",
-        "//src/torch_tpu/_internal/compile",
-        "//src/torch_tpu/_internal/compile:nested_compile_region",
-        "//src/torch_tpu/_internal/compile:tpu_backend",
-        "//src/torch_tpu/_internal/utils:test_utils",
         "//tests:seed_test_utils",
     ],
 )

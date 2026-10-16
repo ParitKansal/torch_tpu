@@ -16,6 +16,7 @@
 
 #include "csrc/common/compilation.h"
 
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <optional>
@@ -87,9 +88,9 @@ constexpr std::string_view kOptimizationLevelOption = "xla_optimization_level";
 constexpr std::string_view kMemoryFittingLevelOption =
     "xla_memory_fitting_level";
 
-// Returns the on-device shapes `executable`'s parameters were compiled for, or
-// nullopt for dynamic parameters, which PJRT checks itself. Returns an empty
-// vector if `executable` doesn't report them.
+// For each argument buffer `executable` takes, returns the on-device shape it
+// was compiled for, or nullopt for dynamic parameters, which PJRT checks
+// itself. Returns an empty vector if `executable` doesn't report them.
 std::vector<std::optional<xla::Shape>> GetStaticParameterDeviceShapes(
     const xla::PjRtLoadedExecutable& executable) {
   absl::StatusOr<std::vector<std::shared_ptr<xla::HloModule>>> modules =
@@ -101,12 +102,23 @@ std::vector<std::optional<xla::Shape>> GetStaticParameterDeviceShapes(
   }
   const xla::ComputationLayout& entry =
       (*modules)[0]->entry_computation_layout();
-  if (entry.parameter_count() != static_cast<int>(layouts->size())) {
+  // Make one shape per argument buffer, to match `layouts`.
+  //
+  // A program can take a tuple parameter, e.g. `(a, b, c)` when compiled with
+  // `parameter_is_tupled_arguments`. PJRT still takes a, b and c as 3 separate
+  // buffers and reports 3 layouts. So split tuples into their elements, the
+  // same way PJRT does (see xla::FlattenedParameterLayouts).
+  std::vector<const xla::Shape*> flat_parameter_shapes;
+  for (int i = 0; i < entry.parameter_count(); ++i) {
+    xla::ShapeUtil::FlattenTupleShape(entry.parameter_shape(i),
+                                      flat_parameter_shapes);
+  }
+  if (flat_parameter_shapes.size() != layouts->size()) {
     return {};
   }
   std::vector<std::optional<xla::Shape>> result(layouts->size());
-  for (int i = 0; i < entry.parameter_count(); ++i) {
-    const xla::Shape& shape = entry.parameter_shape(i);
+  for (size_t i = 0; i < flat_parameter_shapes.size(); ++i) {
+    const xla::Shape& shape = *flat_parameter_shapes[i];
     if (shape.IsArray() && shape.is_static() && (*layouts)[i] != nullptr) {
       result[i] = shape;
       *result[i]->mutable_layout() = (*layouts)[i]->xla_layout();

@@ -1362,6 +1362,10 @@ torch_tpu_cc_library(
         ":compilation",
         ":compilation_spec",
         "@com_google_absl//absl/log:absl_check",
+        "@com_google_absl//absl/strings",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Parser",
+        "@xla//xla/pjrt:maybe_owning_mlir_module",
     ],
 )
 
@@ -1422,11 +1426,15 @@ torch_tpu_cc_test(
         ":compilation_test_helper",
         ":error_utils",
         ":excess_precision",
+        ":status_test_utils",
         "//csrc/common:oss_test_main",
         "//csrc/pjrt:pjrt_state",
         "//shims/torch:torch_headers",
         "@com_google_absl//absl/log:absl_check",
+        "@xla//xla:shape_util",
         "@xla//xla:xla_proto_cc",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt:pjrt_executable",
         "@xla//xla/pjrt/plugin/xla_tpu:xla_tpu_pjrt_client",  # buildcleaner: keep
     ],
 )

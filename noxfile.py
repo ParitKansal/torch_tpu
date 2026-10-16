@@ -34,6 +34,8 @@ import nox
 
 nox.options.default_venv_backend = "uv"
 nox.options.sessions = ["lint"]
+os.environ.setdefault("UV_HTTP_RETRIES", "10")
+os.environ.setdefault("UV_HTTP_TIMEOUT", "120")
 
 # The indexes that may satisfy the `torch` dependency for each variant. The
 # `cpu` and `cuda` variants include PyTorch's RC test channels so release
@@ -148,7 +150,7 @@ def actionlint(session: nox.Session) -> None:
 @nox.session
 def test_ci_tools(session: nox.Session) -> None:
   """Run unit tests for CI scripts and test generation tools."""
-  session.install("pyyaml")
+  session.install("nox", "pyyaml")
   session.run(
       "python",
       "-m",
@@ -156,6 +158,7 @@ def test_ci_tools(session: nox.Session) -> None:
       "ci/tools/resolve_base_sha_test.py",
       "ci/tools/check_directory_layout_test.py",
       "ci/tools/list_ci_tests_test.py",
+      "ci/tools/noxfile_test.py",
       "ci/tools/run_bazel_diff_test.py",
       "ci/tools/gen_torch_tests_test.py",
   )
@@ -330,11 +333,11 @@ def wheel_test(session: nox.Session) -> None:
       f"torch=={_newest_supported_torch()}+cpu",
       *_torch_index_args("cpu"),
   )
+  repo_root = pathlib.Path(__file__).parent.resolve()
   env = {
+      "PYTHONPATH": str(repo_root),
       "WHEEL_PATH": str(wheel.resolve()),
-      "PYPROJECT_PATH": str(
-          (pathlib.Path(__file__).parent / "pyproject.toml").resolve()
-      ),
+      "PYPROJECT_PATH": str(repo_root / "pyproject.toml"),
   }
   session.run(
       "pytest",

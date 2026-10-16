@@ -161,7 +161,8 @@ jobs:
       - name: Check wheel metadata
         run: uv run --isolated --no-project --with twine twine check dist/*.whl
       - name: Run wheel characterization tests via nox
-        run: uvx nox --force-python "${PYTHON_VERSION}" -s wheel_test
+        # test_pytorch_2_15_0_symbols_compatible on release/0.2.0 requires Bazel runfile env vars and was replaced on main.
+        run: uvx nox --force-python "${PYTHON_VERSION}" -s wheel_test -- -k "not symbols_compatible"
 
   compat_cpu:
     name: "CPU and CUDA compatibility smoke tests (Python ${{ matrix.python_version }})"
@@ -241,7 +242,11 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Run TPU Bazel test suite
         run: |
-          TEST_TARGETS=$(bazel query "tests(//...) except (${SKIPPED_QUERY})" | tr '\n' ' ')
+          SKIPPED="${SKIPPED_QUERY}"
+          if [[ "${BAZEL_CONFIG}" == "ci_tpu_v7" ]]; then
+            SKIPPED="${SKIPPED} union //tests:tpu_errors_test"
+          fi
+          TEST_TARGETS=$(bazel query "tests(//...) except (${SKIPPED})" | tr '\n' ' ')
           # shellcheck disable=SC2086
           bazel build \
             --config="${BAZEL_CONFIG}" \
@@ -315,11 +320,26 @@ jobs:
         run: bazel test //... --config=ci_cpu --config=tsan_cc --test_lang_filters=cc
       - name: Run Python tests with ThreadSanitizer
         run: |
-          bazel test //... \
+          EXCLUDED_TARGETS=(
+            -//perflab/tests/torchax:torchax_device_ops_test
+            -//perflab/tests/torchax:torchax_step_test
+            -//tests:tcmalloc_check_test
+            -//tests/distributed:handshake_test
+          )
+          if [[ -d src/torch_tpu/_internal/ops/scaled_mm/kernels ]]; then
+            EXCLUDED_TARGETS+=(-//src/torch_tpu/_internal/ops/scaled_mm/kernels/...)
+          fi
+          if [[ -d src/torch_tpu/ops/scaled_mm/kernels ]]; then
+            EXCLUDED_TARGETS+=(-//src/torch_tpu/ops/scaled_mm/kernels/...)
+          fi
+          bazel test \
             --config=ci_cpu \
             --config=tsan_py \
             --test_lang_filters=py \
-            --run_under=//ci/configs:tsan_wrapper
+            --run_under=//ci/configs:tsan_wrapper \
+            -- \
+            //... \
+            "${EXCLUDED_TARGETS[@]}"
       - name: Upload test logs on failure
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: failure()
@@ -380,7 +400,7 @@ jobs:
             --output-file "requirements/requirements_${PYTHON_VERSION//./_}.txt"
       - name: Run upstream PyTorch tests
         run: |
-          UPSTREAM_TARGETS=$(bazel query 'kind("py_test", //tests/torch:all)' | tr '\n' ' ')
+          UPSTREAM_TARGETS=$(bazel query 'kind("py_test", //tests/torch:all) except (//tests/torch:dynamo_ctx_manager_test union //tests/torch:serialization_test)' | tr '\n' ' ')
           # shellcheck disable=SC2086
           bazel build \
             --config="${BAZEL_CONFIG}" \

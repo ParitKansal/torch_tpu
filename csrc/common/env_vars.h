@@ -130,6 +130,11 @@ inline constexpr char kTorchTpuInternalDisableInplaceBufferDonationEnvVar[] =
 // directory path).
 inline constexpr char kTorchTpuInternalDumpMlirPassesToEnvVar[] =
     "TORCH_TPU_INTERNAL_DUMP_MLIR_PASSES_TO";
+// If set to "1" or "true", runs the CSE pass in the TorchTPU MLIR optimization
+// pass pipeline. Default is "false" until b/574869112 is fixed: CSE regresses
+// vLLM prefill performance on TPU.
+inline constexpr char kTorchTpuInternalEnableMlirCseEnvVar[] =
+    "TORCH_TPU_INTERNAL_ENABLE_MLIR_CSE";
 // If set to "0" or "false", disables reassociating normalization weights.
 // Default is "true".
 inline constexpr char kTorchTpuInternalEnableReassociateNormWeightsEnvVar[] =
@@ -307,6 +312,7 @@ inline constexpr auto kEnvVarToStage =
         {kTorchTpuInternalDisableInplaceBufferDonationEnvVar,
          SymbolStage::InternalApi()},
         {kTorchTpuInternalDumpMlirPassesToEnvVar, SymbolStage::InternalApi()},
+        {kTorchTpuInternalEnableMlirCseEnvVar, SymbolStage::InternalApi()},
         {kTorchTpuInternalEnableReassociateNormWeightsEnvVar,
          SymbolStage::InternalApi()},
         {kTorchTpuInternalHandshakeTimeoutSEnvVar, SymbolStage::InternalApi()},

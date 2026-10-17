@@ -507,6 +507,21 @@ build:wheel_release --config=wheel_common
 build:wheel_release --extra_execution_platforms="//bazel/platforms:rbe_wheel_release_platform"
 build:wheel_release --//:include_nightly_glue=False
 
+# Kokoro wheel builds run as torch-tpu-release-sa@ml-oss-release.iam.gserviceaccount.com,
+# which has RBE access on ml-oss-rbe-general (Pool=linux-x86-cpu-pool) rather
+# than tensorflow-testing. Pin DOCKER_CACHEBUSTER and DOCKER_HOST_CACHEBUSTER
+# so ml-build:latest client container rebuilds (which bake random values into
+# /etc/bazel.bazelrc) do not bust the remote cache across builds.
+build:kokoro_wheel_rbe_base --remote_instance_name=projects/ml-oss-rbe-general/instances/default_instance
+build:kokoro_wheel_rbe_base --action_env=DOCKER_CACHEBUSTER=0
+build:kokoro_wheel_rbe_base --host_action_env=DOCKER_HOST_CACHEBUSTER=0
+
+build:kokoro_wheel_nightly_rbe --config=kokoro_wheel_rbe_base
+build:kokoro_wheel_nightly_rbe --extra_execution_platforms="//bazel/platforms:rbe_kokoro_wheel_nightly_platform"
+
+build:kokoro_wheel_release_rbe --config=kokoro_wheel_rbe_base
+build:kokoro_wheel_release_rbe --extra_execution_platforms="//bazel/platforms:rbe_kokoro_wheel_release_platform"
+
 # Build against a locally provided PyTorch instead of the pip hubs. This is
 # the only supported spelling of local-torch mode; typical use:
 #

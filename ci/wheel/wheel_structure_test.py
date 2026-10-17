@@ -45,11 +45,7 @@ from typing import Final
 import zipfile
 
 from absl.testing import absltest
-
-try:
-  from ci.wheel import pytorch_abi_symbols
-except ModuleNotFoundError:
-  import pytorch_abi_symbols  # type: ignore[no-redef]
+import pytorch_abi_symbols
 
 # The single shared, version-independent XLA/MLIR base library.
 _XLA_BASE: Final[str] = "torch_tpu/csrc/common/libxla_base.so"
@@ -96,16 +92,10 @@ def _wheel_path() -> pathlib.Path:
 
 
 def _pytorch_2_15_0_symbols_path() -> pathlib.Path:
-  if path := os.environ.get("PYTORCH_2_15_0_SYMBOLS_PATH"):
-    return pathlib.Path(path)
   return pathlib.Path(__file__).with_name("pytorch_symbols_2_15_0.txt")
 
 
 def _pytorch_2_15_0_defined_symbols() -> Set[str]:
-  if path := os.environ.get("PYTORCH_2_15_0_WHEEL_PATH"):
-    return pytorch_abi_symbols.extract_pytorch_wheel_defined_symbols(
-        pathlib.Path(path)
-    )
   import torch  # pylint: disable=g-import-not-at-top
 
   return pytorch_abi_symbols.extract_pytorch_lib_dir_defined_symbols(

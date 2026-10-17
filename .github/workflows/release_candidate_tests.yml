@@ -394,7 +394,7 @@ jobs:
             --output-file "requirements/requirements_${PYTHON_VERSION//./_}.txt"
       - name: Run upstream PyTorch tests
         run: |
-          # TODO(b/481320755): Exclude upstream PyTorch 2.14.0 tests whose skip lists were updated after release/0.2.0 branched.
+          # TODO(b/481320755): release/0.2.0 branched while upstream_tests.yaml was still pinned to PyTorch 2.13.0, before a224c37c and 2d00100d upgraded the upstream test runner and target list for PyTorch 2.14.0.
           UPSTREAM_TARGETS=$(bazel query 'kind("py_test", //tests/torch:all) except (//tests/torch:dynamo_ctx_manager_test union //tests/torch:serialization_test)' | tr '\n' ' ')
           # shellcheck disable=SC2086
           bazel build \

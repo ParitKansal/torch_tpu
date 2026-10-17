@@ -287,14 +287,12 @@ torch_tpu_py_test(
     srcs = ["wheel_structure_test.py"],
     data = [
         "pytorch_symbols_2_15_0.txt",
-        "@pypi_torch_2_15_0_314//:whl",
     ],
     env = {
-        "PYTORCH_2_15_0_SYMBOLS_PATH": "$(rootpath pytorch_symbols_2_15_0.txt)",
-        "PYTORCH_2_15_0_WHEEL_PATH": "$(rootpath @pypi_torch_2_15_0_314//:whl)",
         "WHEEL_PATH": "$(rootpath :torch_tpu_wheel)",
     },
     is_wheel_test = True,
+    tags = ["wheel_test_excluded"],
     # Only meaningful against the wheel we actually ship, so it is skipped as
     # incompatible outside a wheel build rather than dragging the wheel (and
     # its build guard) into every job that happens to touch these files.
@@ -305,6 +303,7 @@ torch_tpu_py_test(
     deps = [
         ":pytorch_abi_symbols",
         "//shims/absl_py/testing:absltest",
+        "@pypi_torch_2_15_0_314//:pkg",
     ],
 )
 

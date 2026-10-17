@@ -131,9 +131,9 @@ nightlies, or install the CPU build separately.
 Some pointers to get you started:
 
 *   [PyTorch: Official PyTorch documentation](https://github.com/pytorch/pytorch)
-*   [Tutorials: easy to understand PyTorch code using TorchTPU](./examples/tutorials)
+*   [Tutorials: easy to understand PyTorch code using TorchTPU](./examples/simple_pytorch/README.md)
 *   [Examples: get you started with sample PyTorch models on TPU](./examples/README.md)
-*   [Public APIs: the TorchTPU APIs that you can use](./docs/markdown/public_apis.md)
+*   [Public APIs: the TorchTPU APIs that you can use](./docs/public_apis.md)
 
 ## Dependencies
 

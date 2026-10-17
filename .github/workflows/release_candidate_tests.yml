@@ -241,7 +241,12 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Run TPU Bazel test suite
         run: |
-          TEST_TARGETS=$(bazel query "tests(//...) except (${SKIPPED_QUERY})" | tr '\n' ' ')
+          SKIPPED="${SKIPPED_QUERY}"
+          # TODO(b/481320755): Exclude tpu_errors_test on 4-chip TPU v7x runners because release/0.2.0 lacks the single-chip runner topology guard.
+          if [[ "${BAZEL_CONFIG}" == "ci_tpu_v7" ]]; then
+            SKIPPED="${SKIPPED} union //tests:tpu_errors_test"
+          fi
+          TEST_TARGETS=$(bazel query "tests(//...) except (${SKIPPED})" | tr '\n' ' ')
           # shellcheck disable=SC2086
           bazel build \
             --config="${BAZEL_CONFIG}" \
@@ -315,11 +320,20 @@ jobs:
         run: bazel test //... --config=ci_cpu --config=tsan_cc --test_lang_filters=cc
       - name: Run Python tests with ThreadSanitizer
         run: |
-          bazel test //... \
+          # TODO(b/481320755): Exclude JAX/XLA and tcmalloc tests that trigger false-positive TSan races on release/0.2.0.
+          bazel test \
             --config=ci_cpu \
             --config=tsan_py \
             --test_lang_filters=py \
-            --run_under=//ci/configs:tsan_wrapper
+            --run_under=//ci/configs:tsan_wrapper \
+            -- \
+            //... \
+            -//perflab/tests/torchax:torchax_device_ops_test \
+            -//perflab/tests/torchax:torchax_step_test \
+            -//src/torch_tpu/_internal/ops/scaled_mm/kernels:blockwise128_scaled_mm_kernel_host_test \
+            -//src/torch_tpu/_internal/ops/scaled_mm/kernels:blockwise_scaled_mm_kernel_host_test \
+            -//tests:tcmalloc_check_test \
+            -//tests/distributed:handshake_test
       - name: Upload test logs on failure
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: failure()
@@ -380,7 +394,8 @@ jobs:
             --output-file "requirements/requirements_${PYTHON_VERSION//./_}.txt"
       - name: Run upstream PyTorch tests
         run: |
-          UPSTREAM_TARGETS=$(bazel query 'kind("py_test", //tests/torch:all)' | tr '\n' ' ')
+          # TODO(b/481320755): release/0.2.0 branched while upstream_tests.yaml was still pinned to PyTorch 2.13.0, before a224c37c and 2d00100d upgraded the upstream test runner and target list for PyTorch 2.14.0.
+          UPSTREAM_TARGETS=$(bazel query 'kind("py_test", //tests/torch:all) except (//tests/torch:dynamo_ctx_manager_test union //tests/torch:serialization_test)' | tr '\n' ' ')
           # shellcheck disable=SC2086
           bazel build \
             --config="${BAZEL_CONFIG}" \

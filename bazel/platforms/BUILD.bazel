@@ -62,6 +62,30 @@ platform(
     visibility = ["//visibility:public"],
 )
 
+# Sends Kokoro nightly wheel build actions to the Linux x86 CPU pool in
+# ml-oss-rbe-general while isolating the nightly wheel cache silo.
+platform(
+    name = "rbe_kokoro_wheel_nightly_platform",
+    exec_properties = {
+        "Pool": "linux-x86-cpu-pool",
+        "cache-silo-key": "wheel-nightly",
+    },
+    parents = ["@ml_build_config_platform//:platform"],
+    visibility = ["//visibility:public"],
+)
+
+# Sends Kokoro release wheel build actions to the Linux x86 CPU pool in
+# ml-oss-rbe-general while isolating the release wheel cache silo.
+platform(
+    name = "rbe_kokoro_wheel_release_platform",
+    exec_properties = {
+        "Pool": "linux-x86-cpu-pool",
+        "cache-silo-key": "wheel-release",
+    },
+    parents = ["@ml_build_config_platform//:platform"],
+    visibility = ["//visibility:public"],
+)
+
 # Sends build actions and CPU tests to the CPU worker pool of the rbe-tpu-oss
 # RBE instance. TPU tests set their own `test.Pool` per target (see
 # build_files/build_defs.bzl).

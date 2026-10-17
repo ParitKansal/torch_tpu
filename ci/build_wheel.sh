@@ -36,9 +36,11 @@ WHEEL_CONFIG="${WHEEL_CONFIG:---config=wheel_nightly}"
 if [[ "${WHEEL_CONFIG}" == "--config=wheel_release" ]]; then
   WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS-}"
   release_args=(--release)
+  kokoro_rbe_config="--config=kokoro_wheel_release_rbe"
 else
   WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS:-.dev$(date +%Y%m%d%H%M%S)}"
   release_args=()
+  kokoro_rbe_config="--config=kokoro_wheel_nightly_rbe"
 fi
 export WHEEL_VERSION_EXTRAS
 echo "WHEEL_VERSION_EXTRAS: ${WHEEL_VERSION_EXTRAS}"
@@ -58,7 +60,6 @@ docker pull "${CONTAINER_IMAGE}"
 echo "===> Compiling wheel via Bazel inside ml-build container..."
 # We map the checked out directory into /workspace and run the shared build
 # script for every supported Python version.
-# RBE is disabled because Kokoro doesn't yet have permissions to run RBE.
 
 mkdir -p dist
 docker run --rm \
@@ -67,7 +68,7 @@ docker run --rm \
   -w "/workspace" \
   "${CONTAINER_IMAGE}" \
   ci/build_wheels.sh "${release_args[@]}" \
-    --output-dir /workspace/dist 3.11 3.12 3.13 3.14 3.14t -- "${WHEEL_CONFIG}" --config=no_rbe
+    --output-dir /workspace/dist 3.11 3.12 3.13 3.14 3.14t -- "${WHEEL_CONFIG}" "${kokoro_rbe_config}"
 
 # Move the built wheels from local dist back to Kokoro artifacts directory
 if [[ -d dist && -n "$(ls -A dist/*.whl 2>/dev/null)" ]]; then

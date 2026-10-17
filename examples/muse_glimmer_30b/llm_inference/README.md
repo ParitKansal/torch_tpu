@@ -33,13 +33,27 @@ Docker container using `launch.sh`:
 ```bash
 # Run both dynamic and static benchmarks:
 bash ./launch.sh
+```
 
-# Run only the dynamic inference benchmark:
+Run only the dynamic inference benchmark:
+
+<!-- doc-test: single_tpu_inference_dynamic_doc_test -->
+
+```bash
 bash ./launch.sh dynamic
+```
 
-# Run only the static inference benchmark:
+Run only the static inference benchmark:
+
+<!-- doc-test: single_tpu_inference_static_doc_test -->
+
+```bash
 bash ./launch.sh static
+```
 
+Other options:
+
+```bash
 # Run benchmarks using random weights (skips checkpoint download):
 bash ./launch.sh --random-weights
 
@@ -50,6 +64,23 @@ bash ./launch.sh static \
 
 `launch.sh` automatically configures performance flags in `LIBTPU_INIT_ARGS`
 (`--xla_tpu_dvfs_p_state=7`) and selects the appropriate test filter.
+
+The KV cache unit tests need neither a TPU nor the checkpoint. Run the tests for
+the KV caches and `mark_dynamic`:
+
+<!-- doc-test: kv_cache_doc_test -->
+
+```bash
+python3 ./kv_cache_test.py
+```
+
+Run the sliding window attention cache tests:
+
+<!-- doc-test: swa_cache_doc_test -->
+
+```bash
+python3 ./swa_cache_test.py
+```
 
 ### Run on GKE
 

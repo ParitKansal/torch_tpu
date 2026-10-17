@@ -22,7 +22,10 @@ load("@rules_python//python:py_test.bzl", "py_test")
 load("//build_files:build_defs.bzl", "torch_tpu_py_library")
 
 exports_files(
-    ["run_cc_tpu_test.sh"],
+    [
+        "run_cc_tpu_test.sh",
+        "run_doc_commands.py",
+    ],
     visibility = ["//visibility:public"],
 )
 

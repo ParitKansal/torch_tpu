@@ -102,7 +102,6 @@ absl::StatusOr<ContextedModule> ContextedModule::Make(
     const MlirComputationBuilder& computation_builder) {
   auto context = MakeMlirContext();
   TT_ASSIGN_OR_RETURN(auto module, computation_builder(*context));
-  TT_RETURN_IF_ERROR(RunTorchTpuOptimizationPasses(*module, context.get()));
   return ContextedModule(std::move(context), std::move(module));
 }
 

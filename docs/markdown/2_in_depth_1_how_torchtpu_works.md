@@ -27,7 +27,7 @@ between generations, but broadly defined, a TPU Chip contains:
   which are logical subgroups of a
   [TPU Pod](https://cloud.google.com/tpu/docs/system-architecture-tpu-vm#tpu-pod),
   comprising of a preconfigured number of TPU chips connected in a 3D torus (for
-  TPU 7, TPUv 8t) or Boardfly (TPU 8i and TPU v8tx) configuration.
+  TPU 7, TPUv 8t) or Boardfly (TPU 8i) configuration.
 * Bidirectional Data-Center-Network (DCN) - 400 GBps in
   [TPU 8t](https://blog.google/innovation-and-ai/infrastructure-and-cloud/google-cloud/eighth-generation-tpu-agentic-era/),
   allowing communication between TPU chips across Slices.

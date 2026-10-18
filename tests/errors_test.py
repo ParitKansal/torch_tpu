@@ -13917,7 +13917,7 @@ Device-side assertion tracking was not enabled by user.""",
   def test_current_stream_device_index_above_max_devices(self):
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""Device index 8 is out of bounds of the maximum device count 8""",
+        tpu="""device index 8 is out of bounds of the maximum device count 8""",
         gpu="""Device index value 8 is out of index range [0, 1)""",
     ):
       torch.accelerator.current_stream(f"{et.device().type}:8")
@@ -13932,7 +13932,7 @@ Device-side assertion tracking was not enabled by user.""",
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu=f"""Device index {actual_device_count} is out of bounds of the number of addressable devices {actual_device_count}""",
+        tpu=f"""device index {actual_device_count} is out of bounds of the number of addressable devices {actual_device_count}""",
         gpu=f"""Device index value {actual_device_count} is out of index range [0, {actual_device_count})""",
     ):
       torch.accelerator.current_stream(
@@ -13949,7 +13949,7 @@ Device-side assertion tracking was not enabled by user.""",
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu=f"""Device index {actual_device_count} is out of bounds of the maximum device count 8""",
+        tpu=f"""device index {actual_device_count} is out of bounds of the maximum device count 8""",
         gpu=f"""Device index value {actual_device_count} is out of index range [0, {actual_device_count})""",
     ):
       torch.accelerator.current_stream(

@@ -249,6 +249,14 @@ absl::Status InitializeSingleDeviceEnvironment() {
                                      : "0";
   SetEnv<kTpuVisibleDevicesEnvVar>(target_dev);
   SetEnv<kTpuVisibleChipsEnvVar>(target_dev);
+
+  constexpr char kSingleDeviceTopology[] = "1,1,1";
+  SetEnv<kTorchTpuTopologyEnvVar>(kSingleDeviceTopology);
+  SetEnv<kTpuHostBoundsEnvVar>(kSingleDeviceTopology);
+  SetEnv<kTpuChipsPerHostBoundsEnvVar>(kSingleDeviceTopology);
+  SetEnv<kTpuProcessBoundsEnvVar>(kSingleDeviceTopology);
+  SetEnv<kTpuChipsPerProcessBoundsEnvVar>(kSingleDeviceTopology);
+  SetEnv<kAllowMultipleLibtpuLoadEnvVar>("1");
   return absl::OkStatus();
 }
 

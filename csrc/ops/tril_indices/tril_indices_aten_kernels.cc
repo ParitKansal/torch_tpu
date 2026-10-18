@@ -61,6 +61,7 @@ at::Tensor AtenTrilIndices(int64_t row, int64_t col, int64_t offset,
   TT_KERNEL(
       OpName::kTrilIndices, param_keys,
       (row, col, offset, dtype_opt, layout_opt, device_opt, pin_memory_opt), {
+        CheckDeviceIsTpu(device_opt, "tril_indices");
         const at::ScalarType dtype = dtype_opt.value_or(at::ScalarType::Long);
 
         at::native::check_args(row, col, layout_opt);

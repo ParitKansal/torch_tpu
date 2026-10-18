@@ -71,11 +71,11 @@ void ValidateDeviceIndex(c10::DeviceIndex device_index) {
   // construct a torch.device with a negative device index, which will fail
   // before this point.
   TT_CHECK_THROW(device_index >= 0, error::kInvalidArgument)
-      << "Device index must be non-negative, got "
+      << "device index must be non-negative, got "
       << static_cast<int>(device_index);
 
   TT_CHECK_THROW(device_index < kMaxDevices, error::kInvalidArgument)
-      << "Device index " << static_cast<int>(device_index)
+      << "device index " << static_cast<int>(device_index)
       << " is out of bounds of the maximum device count " << kMaxDevices;
 
   const absl::StatusOr<xla::PjRtClient* absl_nonnull> pjrt_client_or =
@@ -93,7 +93,7 @@ void ValidateDeviceIndex(c10::DeviceIndex device_index) {
   TT_CHECK_THROW(
       device_index < static_cast<c10::DeviceIndex>(addressable_device_count),
       error::kInvalidArgument)
-      << "Device index " << static_cast<int>(device_index)
+      << "device index " << static_cast<int>(device_index)
       << " is out of bounds of the number of addressable devices "
       << addressable_device_count;
 }

@@ -51,6 +51,8 @@
 #include "c10/core/StorageImpl.h"
 #include "c10/core/Stream.h"
 #include "c10/core/TensorImpl.h"
+#include "c10/core/impl/DeviceGuardImplInterface.h"
+#include "c10/core/impl/VirtualGuardImpl.h"
 #include "c10/util/Optional.h"
 #include "c10/util/UniqueVoidPtr.h"
 #include "c10/util/intrusive_ptr.h"
@@ -513,6 +515,7 @@ class TpuAllocator final : public c10::DeviceAllocator {
 
   c10::CachingDeviceAllocator::DeviceStats getDeviceStats(
       c10::DeviceIndex device) override {
+    ValidateDevice(device);
     c10::CachingDeviceAllocator::DeviceStats stats;
     auto pjrt_stats_or = PjrtBackend::GetInstance().GetAllocatorStats();
     if (!pjrt_stats_or.ok()) {
@@ -549,6 +552,7 @@ class TpuAllocator final : public c10::DeviceAllocator {
   }
 
   void resetAccumulatedStats(c10::DeviceIndex device) override {
+    ValidateDevice(device);
     TT_WARN_ONCE(
         WarningCategory::kTorchTpu,
         "torch.accelerator.memory.reset_accumulated_memory_stats is not "
@@ -556,6 +560,7 @@ class TpuAllocator final : public c10::DeviceAllocator {
   }
 
   void resetPeakStats(c10::DeviceIndex device) override {
+    ValidateDevice(device);
     auto status = PjrtBackend::GetInstance().ClearAllocatorStats();
     if (!status.ok()) {
       TT_WARN(WarningCategory::kPerformance,
@@ -565,6 +570,7 @@ class TpuAllocator final : public c10::DeviceAllocator {
 
   std::pair<size_t, size_t>  // STD_PAIR_OK=dictated by PyTorch.
   getMemoryInfo(c10::DeviceIndex device) override {
+    ValidateDevice(device);
     auto pjrt_stats_or = PjrtBackend::GetInstance().GetAllocatorStats();
     if (!pjrt_stats_or.ok()) {
       TT_WARN(WarningCategory::kPerformance,
@@ -575,6 +581,15 @@ class TpuAllocator final : public c10::DeviceAllocator {
     size_t limit = pjrt_stats.bytes_limit.value_or(0);
     size_t used = pjrt_stats.bytes_in_use;
     return {limit - used, limit};
+  }
+
+ private:
+  static void ValidateDevice(c10::DeviceIndex device) {
+    if (c10::impl::hasDeviceGuardImpl(GetPrivateUse1DeviceType())) {
+      c10::impl::VirtualGuardImpl guard_impl(GetPrivateUse1DeviceType());
+      guard_impl.getDefaultStream(
+          c10::Device(GetPrivateUse1DeviceType(), device));
+    }
   }
 };
 

@@ -24,6 +24,7 @@ from absl import logging
 from absl.testing import absltest
 import torch
 from torch_tpu._internal.utils import annotations
+from torch_tpu._internal.utils import hardware
 from tests import accelerator_test_utils
 from tests import seed_test_utils
 
@@ -128,9 +129,9 @@ class SingleProcessMultiDeviceTest(_BaseRngTest):
     )
 
   def _get_num_devices(self) -> int:
-    """Returns the number of devices to test, capped at 4 on TPU in OSS."""
+    """Returns the number of physical devices on the host."""
     if self.backend == "tpu":
-      return accelerator_test_utils.get_tpu_device_count()
+      return hardware.get_tpu_device_count()
     return torch.accelerator.device_count()
 
   @_fails_on_tpu(
@@ -259,6 +260,10 @@ class SingleProcessMultiDeviceTest(_BaseRngTest):
     for exp, act in zip(expected_outs, actual_outs):
       self.assertTrue(torch.equal(exp, act))
 
+  @_fails_on_tpu(
+      "TODO(b/555281188): Single-process multi-device execution is not yet"
+      " supported on TPU."
+  )
   def test_multithread_eager_cross_device_isolation(self):
     """Verifies threads on distinct devices produce deterministic outputs.
 

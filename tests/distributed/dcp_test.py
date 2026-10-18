@@ -19,8 +19,6 @@ PyTorch's upstream Distributed Checkpointing library. They are designed to
 catch regressions early on by ensuring the happy path is functional.
 """
 
-import os
-
 from absl.testing import absltest
 import torch
 from torch import distributed as dist
@@ -59,13 +57,12 @@ def _create_sharded_model(device_mesh, seed):
 
 
 def _init_test_env(seed: int, enable_cpu_backend: bool = False):
-  rank = int(os.environ["RANK"])
   backend = "cpu:gloo,tpu:tpu_dist" if enable_cpu_backend else "tpu_dist"
   dist.init_process_group(backend=backend)
   world_size = dist.get_world_size()
   device_mesh = dt.init_device_mesh("tpu", (world_size,))
   model = _create_sharded_model(device_mesh, seed)
-  device = torch.device("tpu", rank)
+  device = torch.device("tpu", torch.accelerator.current_device_index())
   return model, device, device_mesh
 
 

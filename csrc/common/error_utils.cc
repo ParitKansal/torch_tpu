@@ -58,7 +58,9 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "c10/core/Device.h"
+#include "c10/core/DeviceGuard.h"
 #include "c10/core/WrapDimMinimal.h"
+#include "c10/core/impl/DeviceGuardImplInterface.h"
 #include "c10/util/ArrayRef.h"  // IWYU pragma: keep for IntArrayRef
 #include "c10/util/Exception.h"
 #include "c10/util/Optional.h"
@@ -906,6 +908,10 @@ void CheckDeviceIsTpu(const c10::optional<at::Device> device_opt,
   ABSL_CHECK(device_opt.has_value());       // CRASH_OK
   ABSL_CHECK_EQ(device_opt.value().type(),  // CRASH_OK
                 GetPrivateUse1DeviceType());
+  if (device_opt->has_index() &&
+      c10::impl::hasDeviceGuardImpl(GetPrivateUse1DeviceType())) {
+    c10::DeviceGuard device_guard(*device_opt);
+  }
 }
 
 bool IsXlaOomError(const absl::Status& status) {

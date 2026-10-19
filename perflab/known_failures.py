@@ -284,6 +284,13 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
         # reason="LLVM cannot select v2i16 [su]mul_lohi in a Triton kernel",
     # ),
     # KnownFailure(
+        # benchmark="deit_tiny_forward",
+        # framework=mode_lib.Framework.TORCH,
+        # device_kind=target_lib.DeviceKind.CUDA,
+        # run_modes=frozenset({common.RunMode.COMPILED}),
+        # reason="LLVM cannot select v2i16 [su]mul_lohi in a Triton kernel",
+    # ),
+    # KnownFailure(
         # benchmark="dinov2_small_forward_gen",
         # framework=mode_lib.Framework.TORCH,
         # device_kind=target_lib.DeviceKind.CUDA,
@@ -355,6 +362,13 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
     # ),
     # KnownFailure(
         # benchmark="sam3_litetext_s0_forward_gen",
+        # framework=mode_lib.Framework.TORCH,
+        # device_kind=target_lib.DeviceKind.CUDA,
+        # run_modes=frozenset({common.RunMode.COMPILED}),
+        # reason="LLVM cannot select v2i16 [su]mul_lohi in a Triton kernel",
+    # ),
+    # KnownFailure(
+        # benchmark="siglip_base_forward",
         # framework=mode_lib.Framework.TORCH,
         # device_kind=target_lib.DeviceKind.CUDA,
         # run_modes=frozenset({common.RunMode.COMPILED}),

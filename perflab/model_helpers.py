@@ -109,6 +109,7 @@ def load_hf_llm(
     seq_len: int = 2048,
     batch_size: int = 1,
     modify_config_hook: Callable[[Any], Any] | None = None,
+    keep_vision_inputs: bool = False,
 ) -> tuple[torch.nn.Module, dict[str, Any]]:
   """Loads a HuggingFace LLM and prepares inputs for benchmarking.
 
@@ -120,6 +121,9 @@ def load_hf_llm(
     seq_len: Sequence length for benchmark runs.
     batch_size: Batch size for benchmark runs.
     modify_config_hook: Optional hook to modify model configuration.
+    keep_vision_inputs: Whether to keep the `pixel_values` and
+      `image_position_ids` sample inputs. Vision and vision-language models need
+      them; they are dropped by default.
 
   Returns:
     A tuple of (model, inputs dictionary).
@@ -151,8 +155,9 @@ def load_hf_llm(
 
   # These inputs are only used for multimodal models. Enable these after
   # verifying that they work on TPU.
-  inputs.pop("pixel_values", None)
-  inputs.pop("image_position_ids", None)
+  if not keep_vision_inputs:
+    inputs.pop("pixel_values", None)
+    inputs.pop("image_position_ids", None)
 
   for k, v in list(inputs.items()):
     if isinstance(v, torch.Tensor) and torch.is_floating_point(v):

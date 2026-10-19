@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/status/statusor.h"
 #include "csrc/common/dimension_types.h"
@@ -26,6 +27,7 @@
 #include "csrc/common/error_utils.h"
 #include "csrc/common/utils.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
+#include "xla/layout.h"
 #include "xla/shape.h"
 
 namespace torch_tpu {
@@ -46,6 +48,15 @@ absl::StatusOr<Shape> MakeShape(const xla::Shape& xla_shape) {
     shape.set_layout(std::move(layout));
   }
   return shape;
+}
+
+xla::Layout ToXlaLayout(const CustomLayout& layout) {
+  std::vector<xla::Tile> tiles;
+  tiles.reserve(layout.tiles.size());
+  for (const Indices& tile_indices : layout.tiles) {
+    tiles.push_back(xla::Tile(tile_indices));
+  }
+  return xla::Layout(layout.minor_to_major, tiles, layout.element_size_in_bits);
 }
 
 std::string ToString(const Shape& s) {

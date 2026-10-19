@@ -17,12 +17,17 @@
 #ifndef TORCH_TPU_CSRC_PJRT_PJRT_UTILS_H_
 #define TORCH_TPU_CSRC_PJRT_PJRT_UTILS_H_
 
+#include <cstdint>
 #include <string>
 
 // clang-format off
 #include "absl/base/nullability.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
+#include "csrc/common/dimension_types.h"
+#include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
+#include "xla/layout.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/xla_data.pb.h"
 // clang-format on
@@ -40,6 +45,18 @@ std::string ToString(const xla::PjRtBuffer& buffer);
 // supports SparseCore offloading. Returns false on architectures without
 // SparseCore (e.g., TPU v2, v3, v4, v5e).
 bool TpuDeviceSupportsSparseCore();
+
+// Returns whether `layout` has the dimension order and tiles of the default
+// layout for `element_type` and `dimensions`. Returns false if the default
+// layout is unknown.
+bool IsDefaultDeviceLayout(const CustomLayout& layout,
+                           mlir::ElementType element_type,
+                           absl::Span<const int64_t> dimensions);
+
+// Returns the layout that PjRt gives a buffer of `element_type` and
+// `dimensions` by default.
+absl::StatusOr<xla::Layout> GetDefaultDeviceLayout(
+    mlir::ElementType element_type, absl::Span<const int64_t> dimensions);
 
 }  // namespace torch_tpu
 

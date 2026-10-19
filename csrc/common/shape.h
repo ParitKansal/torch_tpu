@@ -26,6 +26,7 @@
 #include "absl/status/statusor.h"
 #include "csrc/common/dimension_types.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
+#include "xla/layout.h"
 #include "xla/shape.h"
 
 namespace torch_tpu {
@@ -105,6 +106,9 @@ static_assert(sizeof(Shape) == 232);
 
 // Converts an XLA shape to a torch_tpu shape.
 absl::StatusOr<Shape> MakeShape(const xla::Shape& xla_shape);
+
+// Converts a torch_tpu layout to an XLA layout.
+xla::Layout ToXlaLayout(const CustomLayout& layout);
 
 std::string ToString(const Shape& s);
 

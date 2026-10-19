@@ -67,6 +67,14 @@ TEST(LayoutUtilsTest, MakeShapePreservesTiles) {
   EXPECT_EQ(shape.layout()->tiles[0], Indices({8}));
 }
 
+TEST(LayoutUtilsTest, ToXlaLayoutKeepsAllFields) {
+  CustomLayout layout;
+  layout.minor_to_major = {1, 0};
+  layout.tiles.push_back(Indices({8}));
+  layout.element_size_in_bits = 32;
+  EXPECT_EQ(ToXlaLayout(layout), xla::Layout({1, 0}, {xla::Tile({8})}, 32));
+}
+
 TEST(LayoutUtilsTest, ResolveTpuLayout_StandardTensor_Success) {
   auto tensor = at::empty({2, 3}, at::TensorOptions().dtype(at::kFloat));
   TT_ASSERT_OK_AND_ASSIGN(auto layout, ResolveTpuLayout(tensor));

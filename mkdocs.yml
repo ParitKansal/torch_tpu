@@ -137,7 +137,7 @@ extra_javascript:
 
 use_directory_urls: true
 
-# extra:
-#  analytics:
-#    provider: google
-#    property: G-???
+extra:
+ analytics:
+   provider: google
+   property: G-GLVPZ2PKWX

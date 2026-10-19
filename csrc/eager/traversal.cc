@@ -852,15 +852,8 @@ void AnnotateArgumentLayouts(mlir::ModuleOp module,
           << "minor_to_major size (" << layout.minor_to_major.size()
           << ") is smaller than argument " << i << " rank (" << dims.size()
           << ")";
-      std::vector<xla::Tile> tiles;
-      tiles.reserve(layout.tiles.size());
-      for (const Indices& tile_indices : layout.tiles) {
-        tiles.push_back(xla::Tile(tile_indices));
-      }
-      const xla::Layout xla_layout(layout.minor_to_major, tiles,
-                                   layout.element_size_in_bits);
       main.setArgAttr(i, "mhlo.layout_mode",
-                      builder.getStringAttr(xla_layout.ToString()));
+                      builder.getStringAttr(ToXlaLayout(layout).ToString()));
     }
   }
 }
@@ -880,15 +873,8 @@ void AnnotateOutputLayouts(mlir::ModuleOp module,
     const CustomLayout& layout = *outputs[i].shape().layout();
     if (!layout.minor_to_major.empty() &&
         !IsDefaultDeviceLayout(outputs[i], layout)) {
-      std::vector<xla::Tile> tiles;
-      tiles.reserve(layout.tiles.size());
-      for (const Indices& tile_indices : layout.tiles) {
-        tiles.push_back(xla::Tile(tile_indices));
-      }
-      const xla::Layout xla_layout(layout.minor_to_major, tiles,
-                                   layout.element_size_in_bits);
       main.setResultAttr(i, "mhlo.layout_mode",
-                         builder.getStringAttr(xla_layout.ToString()));
+                         builder.getStringAttr(ToXlaLayout(layout).ToString()));
     }
   }
 }

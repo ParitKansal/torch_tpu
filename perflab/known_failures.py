@@ -222,6 +222,14 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
         reason="torch.arange(predicted_lengths.max()) in modeling_vits.py",
     ),
     KnownFailure(
+        benchmark="llava_1_5_7b_forward",
+        framework=mode_lib.Framework.TORCHAX,
+        reason=(
+            "aten::_is_all_true in torch_compilable_check on a traced image"
+            " token count in modeling_llava.py"
+        ),
+    ),
+    KnownFailure(
         benchmark="llava_1_5_7b_hf_forward_gen",
         framework=mode_lib.Framework.TORCHAX,
         reason=(
@@ -278,6 +286,13 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
     # ),
     # KnownFailure(
         # benchmark="conformer_training",
+        # framework=mode_lib.Framework.TORCH,
+        # device_kind=target_lib.DeviceKind.CUDA,
+        # run_modes=frozenset({common.RunMode.COMPILED}),
+        # reason="LLVM cannot select v2i16 [su]mul_lohi in a Triton kernel",
+    # ),
+    # KnownFailure(
+        # benchmark="deit_tiny_forward",
         # framework=mode_lib.Framework.TORCH,
         # device_kind=target_lib.DeviceKind.CUDA,
         # run_modes=frozenset({common.RunMode.COMPILED}),
@@ -347,6 +362,13 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
         # reason="LLVM cannot select v2i16 [su]mul_lohi in a Triton kernel",
     # ),
     # KnownFailure(
+        # benchmark="mllama_11b_forward",
+        # framework=mode_lib.Framework.TORCH,
+        # device_kind=target_lib.DeviceKind.CUDA,
+        # run_modes=frozenset({common.RunMode.COMPILED}),
+        # reason="LLVM cannot select v2i16 [su]mul_lohi in a Triton kernel",
+    # ),
+    # KnownFailure(
         # benchmark="qwen3_8_27b_4_layers_simple_fsdp_training",
         # framework=mode_lib.Framework.TORCH,
         # device_kind=target_lib.DeviceKind.CUDA,
@@ -355,6 +377,13 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
     # ),
     # KnownFailure(
         # benchmark="sam3_litetext_s0_forward_gen",
+        # framework=mode_lib.Framework.TORCH,
+        # device_kind=target_lib.DeviceKind.CUDA,
+        # run_modes=frozenset({common.RunMode.COMPILED}),
+        # reason="LLVM cannot select v2i16 [su]mul_lohi in a Triton kernel",
+    # ),
+    # KnownFailure(
+        # benchmark="siglip_base_forward",
         # framework=mode_lib.Framework.TORCH,
         # device_kind=target_lib.DeviceKind.CUDA,
         # run_modes=frozenset({common.RunMode.COMPILED}),

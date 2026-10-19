@@ -37,6 +37,8 @@ torch_tpu_py_library(
         "gemma.py",
         "gen_benchmarks.py",
         "gpt.py",
+        "hf_text.py",
+        "hf_vision.py",
         "llama.py",
         "nemotron.py",
         "qwen.py",

@@ -61,18 +61,12 @@ source .venv/bin/activate
 
 ### Install via pip
 
-Authenticate first (for `uv` prepend `uv` to all `pip` commands):
+Install the latest public release
+([0.2.0 on PyPI](https://pypi.org/project/torch-tpu/0.2.0/)) (for `uv` prepend
+`uv` to all `pip` commands):
 
 ```bash
-pip install keyrings.google-artifactregistry-auth
-gcloud auth login
-gcloud auth application-default login
-```
-
-Install from latest nightly:
-
-```bash
-pip install --pre --index-url "https://oauth2accesstoken:$(gcloud auth print-access-token)@us-python.pkg.dev/ml-oss-artifacts-transient/torch-tpu-virtual-registry/simple/" torch_tpu
+pip install torch_tpu==0.2.0 --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
 ### Build from source
@@ -118,13 +112,13 @@ Install wheel via:
 ```bash
 cd <path_to_repo>
 python -m venv .venv; source .venv/bin/activate
-# The index-url includes the CPU version of torch at higher priority than the CUDA version.
-pip install ../bazel-bin/ci/wheel/*.whl --index-url "https://oauth2accesstoken:$(gcloud auth print-access-token)@us-python.pkg.dev/ml-oss-artifacts-transient/torch-tpu-virtual-registry/simple/"
+# The extra-index-url provides the CPU version of torch rather than the default CUDA build.
+pip install ../bazel-bin/ci/wheel/*.whl --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-Note that this command will install the CUDA version of `torch`; to get the
-CPU-only build, use the `--index-url` parameter from the section on installing
-nightlies, or install the CPU build separately.
+Note that installing without `--extra-index-url
+https://download.pytorch.org/whl/cpu` will install the CUDA version of `torch`;
+pass `--extra-index-url` as shown above or install the CPU build separately.
 
 ## Getting Started
 

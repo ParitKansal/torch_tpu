@@ -427,6 +427,7 @@ def sparse_dense_matmul(
     device_batch_size: int,
     max_ids_per_partition: int,
     max_unique_ids_per_partition: int,
+    enable_minibatching: bool = False,
 ) -> torch.Tensor:
   """Looks up and combines embeddings on TPU SparseCore.
 
@@ -444,6 +445,7 @@ def sparse_dense_matmul(
     max_ids_per_partition: The maximum number of IDs per partition.
     max_unique_ids_per_partition: The maximum number of unique IDs per
       partition.
+    enable_minibatching: Whether to enable SparseCore minibatching.
 
   Returns:
     The activations, with one combined embedding per sample.
@@ -457,6 +459,7 @@ def sparse_dense_matmul(
       device_batch_size,
       max_ids_per_partition,
       max_unique_ids_per_partition,
+      enable_minibatching,
   )
 
 
@@ -476,6 +479,7 @@ def sparse_dense_matmul_grad_with_sgd(
     max_ids_per_partition: int,
     max_unique_ids_per_partition: int,
     computation_name: str,
+    enable_minibatching: bool = False,
 ) -> torch.Tensor:
   """Backpropagates through `sparse_dense_matmul` and applies an SGD update.
 
@@ -492,6 +496,7 @@ def sparse_dense_matmul_grad_with_sgd(
     max_unique_ids_per_partition: The maximum number of unique IDs per
       partition.
     computation_name: A name for the computation.
+    enable_minibatching: Whether to enable SparseCore minibatching.
 
   Returns:
     The updated embedding table.
@@ -508,6 +513,7 @@ def sparse_dense_matmul_grad_with_sgd(
       max_ids_per_partition,
       max_unique_ids_per_partition,
       computation_name,
+      enable_minibatching,
   )
 
 
@@ -529,6 +535,7 @@ def sparse_dense_matmul_grad_with_adagrad(
     max_ids_per_partition: int,
     max_unique_ids_per_partition: int,
     computation_name: str,
+    enable_minibatching: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """Backpropagates through `sparse_dense_matmul` and applies an Adagrad update.
 
@@ -548,6 +555,7 @@ def sparse_dense_matmul_grad_with_adagrad(
     max_unique_ids_per_partition: The maximum number of unique IDs per
       partition.
     computation_name: A name for the computation.
+    enable_minibatching: Whether to enable SparseCore minibatching.
 
   Returns:
     A tuple of the updated embedding table and the updated accumulator.
@@ -566,6 +574,7 @@ def sparse_dense_matmul_grad_with_adagrad(
       max_ids_per_partition,
       max_unique_ids_per_partition,
       computation_name,
+      enable_minibatching,
   )
 
 
@@ -590,6 +599,7 @@ def sparse_dense_matmul_grad_with_adam(
     max_ids_per_partition: int,
     max_unique_ids_per_partition: int,
     computation_name: str,
+    enable_minibatching: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
   """Backpropagates through `sparse_dense_matmul` and applies an Adam update.
 
@@ -611,6 +621,7 @@ def sparse_dense_matmul_grad_with_adam(
     max_unique_ids_per_partition: The maximum number of unique IDs per
       partition.
     computation_name: A name for the computation.
+    enable_minibatching: Whether to enable SparseCore minibatching.
 
   Returns:
     A tuple of the updated embedding table, momentum and velocity.
@@ -632,6 +643,7 @@ def sparse_dense_matmul_grad_with_adam(
       max_ids_per_partition,
       max_unique_ids_per_partition,
       computation_name,
+      enable_minibatching,
   )
 
 

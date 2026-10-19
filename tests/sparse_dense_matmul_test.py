@@ -87,6 +87,7 @@ def preprocess_sparse_dense_matmul_input(
       options.get("hbm_word_size_in_4b", _get_hbm_word_size_in_4b()),
       options.get("allow_id_dropping", True),
       table_name,
+      options.get("enable_minibatching", False),
   )
 
 
@@ -408,7 +409,7 @@ class SparseDenseMatmulTest(op_testing.TorchTpuTestBase):
     with self.assertRaises(RuntimeError):
       torch.ops.tpu.compute_sparse_dense_matmul_stats(val_float, off, 1, 2)
 
-  def _get_inputs(self, device):
+  def _get_inputs(self, device, enable_minibatching: bool = False):
     num_sc = torch.tpu.get_device_properties().sparse_cores_per_device
     input_indices = torch.tensor([2, 1, 4, 0, 3, 6, 0, 2], dtype=torch.int32)
     input_offsets = torch.tensor(
@@ -431,6 +432,7 @@ class SparseDenseMatmulTest(op_testing.TorchTpuTestBase):
                 torch.tpu.get_device_properties().sparse_core_simd_width
             ),
             "allow_id_dropping": False,
+            "enable_minibatching": enable_minibatching,
         },
     )
     row_pointers = preprocessed["row_pointers"].to(device)
@@ -1662,6 +1664,285 @@ class SparseDenseMatmulTest(op_testing.TorchTpuTestBase):
         RuntimeError, "compiled for"
     ):
       sgd(table).cpu()
+
+  def test_input_preprocessing_minibatching(self):
+    val_f0 = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+    off_f0 = torch.tensor([0, 1, 2, 3, 4], dtype=torch.int32)
+    base_options = {
+        "local_device_count": 1,
+        "global_device_count": 1,
+        "num_sc_per_device": 2,
+        "allow_id_dropping": True,
+    }
+    outputs_disabled = preprocess_sparse_dense_matmul_input(
+        val_f0,
+        off_f0,
+        max_ids_per_partition=8,
+        max_unique_ids_per_partition=8,
+        suggested_coo_buffer_size=16,
+        batch_size=4,
+        combiner="sum",
+        options={**base_options, "enable_minibatching": False},
+    )
+    outputs_enabled = preprocess_sparse_dense_matmul_input(
+        val_f0,
+        off_f0,
+        max_ids_per_partition=8,
+        max_unique_ids_per_partition=8,
+        suggested_coo_buffer_size=16,
+        batch_size=4,
+        combiner="sum",
+        options={**base_options, "enable_minibatching": True},
+    )
+    # Device minibatching allocates 64 buckets per SparseCore partition.
+    self.assertGreater(
+        outputs_enabled["row_pointers"].numel(),
+        outputs_disabled["row_pointers"].numel(),
+    )
+    self.assertEqual(outputs_enabled["row_pointers"].dtype, torch.int32)
+    self.assertEqual(outputs_enabled["embedding_ids"].dtype, torch.int32)
+    self.assertEqual(outputs_enabled["sample_ids"].dtype, torch.int32)
+    self.assertEqual(outputs_enabled["gains"].dtype, torch.float32)
+
+  @parameterized.parameters(False, True)
+  def test_sparse_dense_matmul_with_minibatching_on_tpu(self, compile_op):
+    device = torch.device("tpu")
+    rp_no_mb, e_ids_no_mb, s_ids_no_mb, gains_no_mb, embedding_table = (
+        self._get_inputs(device, enable_minibatching=False)
+    )
+    rp_mb, e_ids_mb, s_ids_mb, gains_mb, _ = self._get_inputs(
+        device, enable_minibatching=True
+    )
+
+    def fwd_fn(rp, e_ids, s_ids, g, et):
+      return torch.tpu.ops.sparse_dense_matmul(
+          rp,
+          e_ids,
+          s_ids,
+          g,
+          et,
+          device_batch_size=16,
+          max_ids_per_partition=16,
+          max_unique_ids_per_partition=16,
+          enable_minibatching=True,
+      )
+
+    if compile_op:
+      fwd_fn = torch.compile(fwd_fn, fullgraph=True)
+
+    out_mb = fwd_fn(rp_mb, e_ids_mb, s_ids_mb, gains_mb, embedding_table)
+    self.assert_close(
+        golden_result=self._get_expected_forward_output(),
+        torch_tpu_result=out_mb.cpu(),
+    )
+
+    num_sc_per_device = (
+        torch.tpu.get_device_properties().sparse_cores_per_device
+    )
+    vocab_size, embedding_dim = embedding_table.shape
+    sharded_tables = [
+        embedding_table[core_id::num_sc_per_device]
+        for core_id in range(num_sc_per_device)
+    ]
+    table_init_cpu = torch.cat(sharded_tables, dim=0).detach().cpu()
+    batch_size = 16
+    activations_grad = (
+        torch.ones(
+            batch_size, embedding_dim, dtype=torch.float32, device=device
+        )
+        * 0.01
+    )
+    lr = torch.tensor(0.01, dtype=torch.float32, device=device)
+
+    # 1. SGD backward parity between enable_minibatching=True and False
+    sgd_ref_cpu = torch.tpu.ops.sparse_dense_matmul_grad_with_sgd(
+        rp_no_mb,
+        e_ids_no_mb,
+        s_ids_no_mb,
+        gains_no_mb,
+        table_init_cpu.to(device),
+        activations_grad,
+        lr,
+        device_batch_size=batch_size,
+        max_ids_per_partition=16,
+        max_unique_ids_per_partition=16,
+        computation_name="test_mb_sgd_ref",
+        enable_minibatching=False,
+    ).cpu()
+
+    def sgd_mb_fn(rp, e_ids, s_ids, g, et, ag, learning_rate):
+      return torch.tpu.ops.sparse_dense_matmul_grad_with_sgd(
+          rp,
+          e_ids,
+          s_ids,
+          g,
+          et,
+          ag,
+          learning_rate,
+          device_batch_size=batch_size,
+          max_ids_per_partition=16,
+          max_unique_ids_per_partition=16,
+          computation_name="test_mb_sgd",
+          enable_minibatching=True,
+      )
+
+    if compile_op:
+      sgd_mb_fn = torch.compile(sgd_mb_fn, fullgraph=True)
+
+    sgd_mb_cpu = sgd_mb_fn(
+        rp_mb,
+        e_ids_mb,
+        s_ids_mb,
+        gains_mb,
+        table_init_cpu.to(device),
+        activations_grad,
+        lr,
+    ).cpu()
+    self.assert_close(golden_result=sgd_ref_cpu, torch_tpu_result=sgd_mb_cpu)
+
+    # 2. Adagrad backward parity between enable_minibatching=True and False
+    acc_init_cpu = torch.ones_like(table_init_cpu) * 0.1
+    adagrad_table_ref, adagrad_acc_ref = (
+        torch.tpu.ops.sparse_dense_matmul_grad_with_adagrad(
+            rp_no_mb,
+            e_ids_no_mb,
+            s_ids_no_mb,
+            gains_no_mb,
+            table_init_cpu.to(device),
+            acc_init_cpu.to(device),
+            activations_grad,
+            lr,
+            1e-8,
+            device_batch_size=batch_size,
+            max_ids_per_partition=16,
+            max_unique_ids_per_partition=16,
+            computation_name="test_mb_adagrad_ref",
+            enable_minibatching=False,
+        )
+    )
+    adagrad_table_ref_cpu = adagrad_table_ref.cpu()
+    adagrad_acc_ref_cpu = adagrad_acc_ref.cpu()
+
+    def adagrad_mb_fn(rp, e_ids, s_ids, g, et, acc, ag, learning_rate):
+      return torch.tpu.ops.sparse_dense_matmul_grad_with_adagrad(
+          rp,
+          e_ids,
+          s_ids,
+          g,
+          et,
+          acc,
+          ag,
+          learning_rate,
+          1e-8,
+          device_batch_size=batch_size,
+          max_ids_per_partition=16,
+          max_unique_ids_per_partition=16,
+          computation_name="test_mb_adagrad",
+          enable_minibatching=True,
+      )
+
+    if compile_op:
+      adagrad_mb_fn = torch.compile(adagrad_mb_fn, fullgraph=True)
+
+    adagrad_table_mb, adagrad_acc_mb = adagrad_mb_fn(
+        rp_mb,
+        e_ids_mb,
+        s_ids_mb,
+        gains_mb,
+        table_init_cpu.to(device),
+        acc_init_cpu.to(device),
+        activations_grad,
+        lr,
+    )
+    adagrad_table_mb_cpu = adagrad_table_mb.cpu()
+    adagrad_acc_mb_cpu = adagrad_acc_mb.cpu()
+    self.assert_close(
+        golden_result=adagrad_table_ref_cpu,
+        torch_tpu_result=adagrad_table_mb_cpu,
+    )
+    self.assert_close(
+        golden_result=adagrad_acc_ref_cpu,
+        torch_tpu_result=adagrad_acc_mb_cpu,
+    )
+
+    # 3. Adam backward parity between enable_minibatching=True and False
+    mom_init_cpu = torch.ones_like(table_init_cpu) * 0.2
+    vel_init_cpu = torch.ones_like(table_init_cpu) * 0.1
+    adam_table_ref, adam_mom_ref, adam_vel_ref = (
+        torch.tpu.ops.sparse_dense_matmul_grad_with_adam(
+            rp_no_mb,
+            e_ids_no_mb,
+            s_ids_no_mb,
+            gains_no_mb,
+            table_init_cpu.to(device),
+            mom_init_cpu.to(device),
+            vel_init_cpu.to(device),
+            activations_grad,
+            lr,
+            0.9,
+            0.999,
+            1e-8,
+            device_batch_size=batch_size,
+            max_ids_per_partition=16,
+            max_unique_ids_per_partition=16,
+            computation_name="test_mb_adam_ref",
+            enable_minibatching=False,
+        )
+    )
+    adam_table_ref_cpu = adam_table_ref.cpu()
+    adam_mom_ref_cpu = adam_mom_ref.cpu()
+    adam_vel_ref_cpu = adam_vel_ref.cpu()
+
+    def adam_mb_fn(rp, e_ids, s_ids, g, et, mom, vel, ag, learning_rate):
+      return torch.tpu.ops.sparse_dense_matmul_grad_with_adam(
+          rp,
+          e_ids,
+          s_ids,
+          g,
+          et,
+          mom,
+          vel,
+          ag,
+          learning_rate,
+          0.9,
+          0.999,
+          1e-8,
+          device_batch_size=batch_size,
+          max_ids_per_partition=16,
+          max_unique_ids_per_partition=16,
+          computation_name="test_mb_adam",
+          enable_minibatching=True,
+      )
+
+    if compile_op:
+      adam_mb_fn = torch.compile(adam_mb_fn, fullgraph=True)
+
+    adam_table_mb, adam_mom_mb, adam_vel_mb = adam_mb_fn(
+        rp_mb,
+        e_ids_mb,
+        s_ids_mb,
+        gains_mb,
+        table_init_cpu.to(device),
+        mom_init_cpu.to(device),
+        vel_init_cpu.to(device),
+        activations_grad,
+        lr,
+    )
+    adam_table_mb_cpu = adam_table_mb.cpu()
+    adam_mom_mb_cpu = adam_mom_mb.cpu()
+    adam_vel_mb_cpu = adam_vel_mb.cpu()
+    self.assert_close(
+        golden_result=adam_table_ref_cpu,
+        torch_tpu_result=adam_table_mb_cpu,
+    )
+    self.assert_close(
+        golden_result=adam_mom_ref_cpu,
+        torch_tpu_result=adam_mom_mb_cpu,
+    )
+    self.assert_close(
+        golden_result=adam_vel_ref_cpu,
+        torch_tpu_result=adam_vel_mb_cpu,
+    )
 
 
 if __name__ == "__main__":

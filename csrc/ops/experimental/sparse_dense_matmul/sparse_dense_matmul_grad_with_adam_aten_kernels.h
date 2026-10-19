@@ -74,7 +74,8 @@ AtenSparseDenseMatmulGradWithAdam(
     const at::Tensor& velocity, const at::Tensor& activations_grad,
     const at::Tensor& alpha_t, double beta_1, double beta_2, double epsilon,
     int64_t device_batch_size, int64_t max_ids_per_partition,
-    int64_t max_unique_ids_per_partition, std::string_view computation_name);
+    int64_t max_unique_ids_per_partition, std::string_view computation_name,
+    bool enable_minibatching = false);
 
 }  // namespace torch_tpu
 

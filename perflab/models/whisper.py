@@ -111,3 +111,26 @@ def whisper_large_v3_forward(ctx: context_lib.Context):
       num_layers=num_layers,
   )
   return model, (), inputs
+
+
+@registry_lib.register_benchmark(
+    stepper=step_lib.StepperType.FORWARD,
+    presubmit=registry_lib.PresubmitPolicy.RUN,
+)
+def whisper_base_forward(ctx: context_lib.Context):
+  """Benchmark factory for Whisper-Base forward."""
+  if ctx.run_scope == context_lib.RunScope.PRESUBMIT:
+    batch_size = 1
+    seq_len = 64
+  else:
+    batch_size = 16
+    seq_len = 448
+
+  model, inputs = _load_hf_whisper(
+      ctx,
+      "openai/whisper-base",
+      is_training=False,
+      batch_size=batch_size,
+      seq_len=seq_len,
+  )
+  return model, (), inputs

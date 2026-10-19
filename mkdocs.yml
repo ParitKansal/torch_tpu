@@ -14,7 +14,7 @@
 
 site_name: TorchTPU Documentation
 # Only uncomment when ready to publish
-# repo_url: https://github.com/google-pytorch/torch_tpu
+repo_url: https://github.com/google-pytorch/torch_tpu
 docs_dir: docs
 strict: true  # Fail the build if there are any warnings
 

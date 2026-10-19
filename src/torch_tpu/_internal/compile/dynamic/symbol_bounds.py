@@ -141,14 +141,19 @@ def find_violated_guard(
     ):
       continue
 
-    # A `!=` guard excludes a single runtime value, for which Dynamo recompiles
-    # anyway. An upper bound is a padded capacity rather than a runtime size,
-    # so it may coincide with the excluded value, e.g. the stride-contiguity
-    # guard Ne(s, 16) of a `(4, s)` view of a contiguous `(4, 16)` base whose
-    # range is already refined to s <= 16. Torch folds every other relational
-    # guard into var_to_range, so only `Ne` can clash with a range-derived
-    # bound; equalities and modular guards must hold for the padded shape.
-    if isinstance(guard_expr, sympy.Ne):
+    # Relational guards refine the range of the runtime size (slice clamps
+    # such as `s + 1 <= 2054` of a static buffer sliced by the dynamic length,
+    # Dynamo branch specialization) or exclude a single value (`Ne`), and
+    # Dynamo recompiles when the runtime size leaves that range. An upper
+    # bound is a padded capacity rather than a runtime size, so it may exceed
+    # the range (e.g. the `128k - c` aligned capacity of a bucket above a
+    # slice clamp) or coincide with the excluded value, e.g. the
+    # stride-contiguity guard Ne(s, 16) of a `(4, s)` view of a contiguous
+    # `(4, 16)` base whose range is already refined to s <= 16. Only
+    # equalities (including modular ones) must hold for the padded shape.
+    if isinstance(
+        guard_expr, (sympy.Ne, sympy.Lt, sympy.Le, sympy.Gt, sympy.Ge)
+    ):
       continue
 
     substitutions = {

@@ -90,6 +90,23 @@ class SingleTpuInferenceDynamicTest(absltest.TestCase):
         bucket_size=128,
     )
 
+  def test_muse_glimmer_random_weights_multi_bucket_bounded_dynamism_swa_crossing(
+      self,
+  ):
+    # The sliding window (2048) fills up during the decode steps while the
+    # bounded KV cache lengths step from the first 128-aligned bucket
+    # ([2, 2047]) into the second one ([2048, 2175]); the layer whose length
+    # slices the rope/mask buffers (max_len = 2054) has its range capped at
+    # 2053 and must keep the aligned capacity across the bucket switch.
+    runner_dynamic.run_worker(
+        device="tpu",
+        use_random_weights=True,
+        enable_bounded_dynamism=True,
+        prefill_seq_len=2044,
+        num_dynamic_buckets=2,
+        bucket_size=128,
+    )
+
   def test_muse_glimmer_random_weights_no_bounded_dynamism(self):
     runner_dynamic.run_worker(
         device="tpu",

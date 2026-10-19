@@ -41,7 +41,6 @@ torch_tpu_cc_library(
         "//csrc/ops/reductions",
         "//csrc/ops/reductions:reduction_utils",
         "//shims/torch:aten_headers",
-        "//shims/torch:torch_headers",
         "//shims/torch/c10/core:base_headers",
         "//shims/torch/c10/util:base_headers",
         "//shims/torch/torch/headeronly:torch_headeronly",

@@ -33,7 +33,6 @@
 #include "csrc/common/error_utils.h"
 #include "csrc/common/fixed_size_span.h"
 #include "csrc/common/to_string.h"
-#include "csrc/common/utils.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/tensor_to_buffer.h"
@@ -136,14 +135,14 @@ ReturnType DispatchLogit(const at::Tensor& self, PromotedScalar& promoted_eps,
 
   auto op_builder = [out_dtype](FixedSizeSpan<mlir::MlirOp, 2> inputs)
       -> absl::StatusOr<mlir::MlirOp> {
-    const auto [self_op, eps_op] = inputs;
+    auto& [self_op, eps_op] = inputs;
     return BuildLogitShlo(self_op, eps_op, out_dtype);
   };
 
   return dispatch_fn(
       std::move(op_builder), OpInputs<2>{self, eps_tensor},
       DispatchOpOptions<1>{.out_dtype = out_dtype,
-                           .out_dims = CopyIntVector(self.sizes()),
+                           .out_dims = self.sizes(),
                            .op_param_cache_keys = std::move(param_keys)});
 }
 
@@ -312,7 +311,7 @@ at::Tensor& AtenLogitBackwardGradInput(const at::Tensor& grad_output,
 
         auto op_builder = [out_dtype](FixedSizeSpan<mlir::MlirOp, 3> inputs)
             -> absl::StatusOr<mlir::MlirOp> {
-          const auto [grad_output_op, self_op, eps_op] = inputs;
+          auto& [grad_output_op, self_op, eps_op] = inputs;
           return BuildLogitBackwardShlo(grad_output_op, self_op, eps_op,
                                         out_dtype);
         };
@@ -320,7 +319,7 @@ at::Tensor& AtenLogitBackwardGradInput(const at::Tensor& grad_output,
         TT_THROW_IF_ERROR(DispatchOpOut<3>(
             std::move(op_builder), {grad_output, self, eps_tensor}, grad_input,
             {.out_dtype = out_dtype,
-             .out_dims = CopyIntVector(self.sizes()),
+             .out_dims = self.sizes(),
              .op_param_cache_keys = std::move(param_keys)}));
         return grad_input;
       });

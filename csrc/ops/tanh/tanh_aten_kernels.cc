@@ -24,7 +24,6 @@
 #include "csrc/common/dtype.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/fixed_size_span.h"
-#include "csrc/common/utils.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/ops/macros/kernel.h"
 #include "csrc/ops/op_builder_utils.h"
@@ -68,7 +67,6 @@ at::Tensor& AtenTanhBackwardGradInput(const at::Tensor& grad_output,
       (grad_output, output, grad_input), {
         TT_ASSIGN_OR_THROW(const auto out_dtype,
                            ConvertTo<mlir::ElementType>(output.scalar_type()));
-        auto output_shape = CopyIntVector(output.sizes());
 
         auto op_builder = [](FixedSizeSpan<mlir::MlirOp, 2> inputs)
             -> absl::StatusOr<mlir::MlirOp> {
@@ -80,7 +78,7 @@ at::Tensor& AtenTanhBackwardGradInput(const at::Tensor& grad_output,
             std::move(op_builder), {grad_output, output}, grad_input,
             /*options=*/
             {.out_dtype = out_dtype,
-             .out_dims = output_shape,
+             .out_dims = output.sizes(),
              .op_param_cache_keys = std::move(param_keys)}));
         return grad_input;
       });

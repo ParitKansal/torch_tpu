@@ -146,7 +146,7 @@ absl::StatusOr<MlirOpResults<2>> BuildComplexL2PivotedLuShlo(
   for (int64_t k = 0; k < n; ++k) {
     Dimensions col_starts(rank, 0);
     col_starts[col_dim] = k;
-    Dimensions col_limits(a_shape.begin(), a_shape.end());
+    Dimensions col_limits = CopyIntVector(a_shape);
     col_limits[col_dim] = k + 1;
     mlir::MlirOp col_k_2d =
         mlir::stablehlo::Slice(a, col_starts, col_limits, slice_strides);
@@ -201,7 +201,7 @@ absl::StatusOr<MlirOpResults<2>> BuildComplexL2PivotedLuShlo(
     // Swap row k and row pivot_k.
     Dimensions row_starts(rank, 0);
     row_starts[row_dim] = k;
-    Dimensions row_limits(a_shape.begin(), a_shape.end());
+    Dimensions row_limits = CopyIntVector(a_shape);
     row_limits[row_dim] = k + 1;
     mlir::MlirOp row_k_slice =
         mlir::stablehlo::Slice(a, row_starts, row_limits, slice_strides);
@@ -237,7 +237,7 @@ absl::StatusOr<MlirOpResults<2>> BuildComplexL2PivotedLuShlo(
       Dimensions akk_starts(rank, 0);
       akk_starts[row_dim] = k;
       akk_starts[col_dim] = k;
-      Dimensions akk_limits(a_shape.begin(), a_shape.end());
+      Dimensions akk_limits = CopyIntVector(a_shape);
       akk_limits[row_dim] = k + 1;
       akk_limits[col_dim] = k + 1;
       mlir::MlirOp a_kk =
@@ -255,7 +255,7 @@ absl::StatusOr<MlirOpResults<2>> BuildComplexL2PivotedLuShlo(
       Dimensions l_starts(rank, 0);
       l_starts[row_dim] = k + 1;
       l_starts[col_dim] = k;
-      Dimensions l_limits(a_shape.begin(), a_shape.end());
+      Dimensions l_limits = CopyIntVector(a_shape);
       l_limits[row_dim] = n;
       l_limits[col_dim] = k + 1;
       mlir::MlirOp sub_col =
@@ -270,7 +270,7 @@ absl::StatusOr<MlirOpResults<2>> BuildComplexL2PivotedLuShlo(
       Dimensions u_starts(rank, 0);
       u_starts[row_dim] = k;
       u_starts[col_dim] = k + 1;
-      Dimensions u_limits(a_shape.begin(), a_shape.end());
+      Dimensions u_limits = CopyIntVector(a_shape);
       u_limits[row_dim] = k + 1;
       u_limits[col_dim] = n;
       mlir::MlirOp u_row =
@@ -279,7 +279,7 @@ absl::StatusOr<MlirOpResults<2>> BuildComplexL2PivotedLuShlo(
       Dimensions trail_starts(rank, 0);
       trail_starts[row_dim] = k + 1;
       trail_starts[col_dim] = k + 1;
-      Dimensions trail_limits(a_shape.begin(), a_shape.end());
+      Dimensions trail_limits = CopyIntVector(a_shape);
       trail_limits[row_dim] = n;
       trail_limits[col_dim] = n;
       mlir::MlirOp trail_sub =
@@ -304,7 +304,7 @@ absl::StatusOr<MlirOpResults<2>> BuildComplexL2PivotedLuShlo(
       } else {
         Dimensions left_starts(rank, 0);
         left_starts[row_dim] = k + 1;
-        Dimensions left_limits(a_shape.begin(), a_shape.end());
+        Dimensions left_limits = CopyIntVector(a_shape);
         left_limits[row_dim] = n;
         left_limits[col_dim] = k;
         mlir::MlirOp bottom_left =
@@ -314,7 +314,7 @@ absl::StatusOr<MlirOpResults<2>> BuildComplexL2PivotedLuShlo(
       }
 
       Dimensions top_starts(rank, 0);
-      Dimensions top_limits(a_shape.begin(), a_shape.end());
+      Dimensions top_limits = CopyIntVector(a_shape);
       top_limits[row_dim] = k + 1;
       mlir::MlirOp top_rows =
           mlir::stablehlo::Slice(a, top_starts, top_limits, slice_strides);
@@ -674,7 +674,7 @@ at::Tensor& AtenLinalgLuSolveOut(const at::Tensor& lu, const at::Tensor& pivots,
                                             .adjoint = adjoint}),
               {lu, t}, t,
               {.out_dtype = out_dtype,
-               .out_dims = CopyIntVector(t.sizes()),
+               .out_dims = t.sizes(),
                .op_param_cache_keys = std::move(step_keys)});
         };
 

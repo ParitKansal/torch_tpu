@@ -20,7 +20,7 @@ To support **dynamic shapes** without constant recompilations, TorchTPU uses
 are fixed while the actual runtime dimension sizes are tracked dynamically by
 XLA.
 
-\## How dynamic shapes are handled by TorchTPU
+## How dynamic shapes are handled by TorchTPU
 
 When you compile a model or function with default dynamism, that is
 `torch.compile(model, dynamic=None)` (as input shapes vary across calls) or
@@ -29,7 +29,7 @@ traces the computation and produces an FX graph where changing dimensions are
 represented as symbolic integer variables (`torch.SymInt`) instead of fixed
 constants. TorchTPU handles these symbolic dimensions as follows:
 
-\### Compilation
+### Compilation
 
 *   TorchTPU intercepts the traced FX graph, determines an overall
     `[lower_bound, upper_bound]` range for each symbolic dimension (from
@@ -52,7 +52,7 @@ constants. TorchTPU handles these symbolic dimensions as follows:
 *   The resulting module is compiled by XLA for each configured bucket upper
     bound `U`.
 
-    ### Execution
+### Execution
 
 *   At runtime, based on the actual size of the dynamic dimension, TorchTPU
     selects the corresponding compiled bucket executable.

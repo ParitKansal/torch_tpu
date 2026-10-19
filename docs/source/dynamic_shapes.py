@@ -33,9 +33,8 @@ def _(mo):
   mo.md(r"""
     # Dynamic shapes
     
-   <!-- Link to colab and to generated notebook -->
-   [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-pytorch/torch_tpu/blob/main/docs/notebooks/dynamic_shapes.ipynb)
-    
+    <!-- Link to colab and to generated notebook -->
+    [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-pytorch/torch_tpu/blob/main/docs/notebooks/dynamic_shapes.ipynb)
 
     When you compile a model with `torch.compile(model)`, TorchTPU lowers the computation to StableHLO and compiles it with the XLA compiler (see [How TorchTPU works](how_torchtpu_works.py)). The XLA compiler is traditionally designed around **statically known tensor shapes** so that High Bandwidth Memory (HBM) buffers can be laid out ahead of time, operator pipelines can be fused, and matrix multiplications can be tiled for the TPU's systolic arrays (MXUs). When input tensor dimensions vary across calls in a `torch.compile` workload, compiling for each exact shape would invalidate Dynamo's shape guards and trigger a costly full XLA recompilation on every new shape.
 

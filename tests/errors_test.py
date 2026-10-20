@@ -7548,6 +7548,21 @@ Supported combinations for non-constant padding:
           torch.tensor([0, 1], dtype=torch.int64, device=et.device()),
       )
 
+  def test_embedding_bag_include_last_offset_empty_offsets(self):
+    weight = torch.randn(5, 3, dtype=torch.float32, device=et.device())
+    indices = torch.tensor([], dtype=torch.int64, device=et.device())
+    offsets = torch.tensor([], dtype=torch.int64, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""embedding_bag(): expected offsets to have at least 1 element when include_last_offset is true, got 0""",
+        gpu="""include_last_offset: numBags should be at least 1""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._embedding_bag(
+          weight, indices, offsets, False, 0, False, None, True, -1
+      )
+
   def test_embedding_sparse_scale_grad_by_freq_error(self):
     weight = torch.randn(4, 3, device=et.device(), requires_grad=True)
     indices = torch.tensor([0, 1, 0], dtype=torch.long, device=et.device())

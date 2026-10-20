@@ -332,7 +332,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> AtenEmbeddingBag(
                            ConvertTo<mlir::ElementType>(at::kLong));
 
         int64_t batch_size = offsets.numel();
-        if (include_last_offset) batch_size -= 1;
+        if (include_last_offset) {
+          TT_CHECK_THROW(offsets.numel() >= 1, error::kInvalidArgument)
+              << "expected offsets to have at least 1 element when "
+                 "include_last_offset is true, got "
+              << offsets.numel();
+          batch_size -= 1;
+        }
         int64_t emb_dim = weight.size(1);
 
         bool has_psw =

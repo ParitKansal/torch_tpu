@@ -20,649 +20,253 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
-#include <string>
 
-#include "absl/base/casts.h"
 #include "absl/log/absl_check.h"
-#include "absl/log/log.h"
-#include "csrc/internal/mosaic/op_builders.h"
+#include "absl/status/status.h"
+#include "csrc/common/error_utils.h"
+#include "csrc/internal/mosaic/kiln/kiln.h"
 #include "csrc/ops/scaled_dot_product_attention/flash_attention_config.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/Casting.h"
-#include "llvm/Support/raw_ostream.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Arith/IR/ArithAttributes.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/Math/IR/Math.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Dialect/Vector/IR/VectorOps.h"
-#include "mlir/IR/AffineMap.h"
-#include "mlir/IR/Attributes.h"
-#include "mlir/IR/Builders.h"
-#include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/BuiltinTypeInterfaces.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/OpImplementation.h"
-#include "mlir/IR/OwningOpRef.h"
-#include "mlir/IR/TypeUtilities.h"
-#include "mlir/IR/Types.h"
-#include "mlir/IR/Value.h"
-#include "mlir/IR/ValueRange.h"
-#include "mlir/Support/LLVM.h"
+#include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
+#include "xla/mosaic/dialect/tpu/tpu_dialect.h"
 
-namespace mlir::torch_tpu {  // NON_TORCH_TPU_OK=TODO(willfroom): migrate this.
+namespace torch_tpu {
 
 namespace {
 
-Value CreateReductionInitValue(ImplicitLocOpBuilder& b, FloatType element_type,
-                               ArrayRef<int64_t> shape,
-                               vector::CombiningKind kind) {
-  VectorType type = VectorType::get(shape, element_type);
-
-  if (kind == vector::CombiningKind::ADD) {
-    return SplatConstant(b, type, 0.0f);
-  }
-
-  if (kind == vector::CombiningKind::MAXIMUMF) {
-    auto ninf = b.getFloatAttr(element_type,
-                               APFloat::getInf(element_type.getFloatSemantics(),
-                                               /*Negative=*/true));
-    return SplatConstant(b, type, ninf);
-  }
-
-  ABSL_CHECK(false)  // CRASH_OK
-      << "Unsupported combining kind: "
-      << mlir::vector::stringifyCombiningKind(kind).str();
-}
-
-// Returns the indices for a load / store of the trailing 2D tile of `arg`
-// starting at (row_offset, col_offset).
-SmallVector<Value> TileIndices(ImplicitLocOpBuilder& b, MemRefType arg_type,
-                               int64_t row_offset, int64_t col_offset) {
-  // The batch and head dimensions are simply 1 in the current implementation.
-  ABSL_CHECK(  // CRASH_OK
-      llvm::all_of(arg_type.getShape().drop_back(2),
-                   [](int64_t dim) { return dim == 1; }));
-  const int64_t rank = arg_type.getRank();
-  Value i0 = arith::ConstantOp::create(b, b.getIndexAttr(0));
-  SmallVector<Value> indices(rank, i0);
-  if (row_offset != 0) {
-    indices[rank - 2] =
-        arith::ConstantOp::create(b, b.getIndexAttr(row_offset));
-  }
-  if (col_offset != 0) {
-    indices[rank - 1] =
-        arith::ConstantOp::create(b, b.getIndexAttr(col_offset));
-  }
-  return indices;
-}
-
-// Global index of the last element in `block_idx`:
-// `(block_idx + 1) * block_size - 1`.
-Value BlockEndIndex(ImplicitLocOpBuilder& b, Value block_idx, Value block_size,
-                    Value c1) {
-  return arith::SubIOp::create(
-      b,
-      arith::MulIOp::create(b, arith::AddIOp::create(b, block_idx, c1),
-                            block_size),
-      c1);
-}
-
-// Compares `row - col` against `sliding_window_size` using `pred`.
-Value CmpWindowDistance(ImplicitLocOpBuilder& b, arith::CmpIPredicate pred,
-                        Value row, Value col, int64_t sliding_window_size) {
-  const Value window_size =
-      arith::ConstantOp::create(b, b.getI32IntegerAttr(sliding_window_size));
-  return arith::CmpIOp::create(b, pred, arith::SubIOp::create(b, row, col),
-                               window_size);
+// MurmurHash3's fmix32 avalanche; see https://en.wikipedia.org/wiki/MurmurHash.
+// It is a bijection on uint32, so the packed dropout key cannot collide. The
+// Kiln operators are shape-polymorphic, so this runs unchanged on the scalar
+// (stream) and tile (per-element) paths.
+template <typename T>
+T Fmix32(T h) {
+  h = h.AsType(kiln::u32);
+  h = h ^ (h >> 16);
+  h = h * 0x85EBCA6Bu;
+  h = h ^ (h >> 13);
+  h = h * 0xC2B2AE35u;
+  h = h ^ (h >> 16);
+  return h.AsType(kiln::i32);
 }
 
 }  // namespace
 
-std::string GetOpString(Operation* op) {
-  ABSL_CHECK(op != nullptr) << "Input op is null.";  // CRASH_OK
-  std::string op_string;
-  llvm::raw_string_ostream os(op_string);
-  op->print(os, OpPrintingFlags().useLocalScope());
-  return op_string;
-}
-
-Value SplatConstant(ImplicitLocOpBuilder& b, ShapedType type,
-                    Attribute value_attr) {
-  return arith::ConstantOp::create(b, DenseElementsAttr::get(type, value_attr));
-}
-
-Value SplatConstant(ImplicitLocOpBuilder& b, Type type, float value) {
-  ShapedType shaped_type = cast<ShapedType>(type);
-  Attribute value_attr = b.getFloatAttr(shaped_type.getElementType(), value);
-  return SplatConstant(b, shaped_type, value_attr);
-}
-
-Value SplatNegInf(ImplicitLocOpBuilder& b, Type type) {
-  ShapedType shaped_type = cast<ShapedType>(type);
-  FloatType element_type = cast<FloatType>(shaped_type.getElementType());
-  Attribute value_attr = b.getFloatAttr(
-      element_type,
-      APFloat::getInf(element_type.getFloatSemantics(), /*Negative=*/true));
-  return SplatConstant(b, shaped_type, value_attr);
-}
-
-TypedValue<VectorType> LoadTileSlice(ImplicitLocOpBuilder& b, Value arg,
-                                     int64_t row_offset, int64_t num_rows,
-                                     int64_t col_offset, int64_t num_cols) {
-  MemRefType arg_type = cast<MemRefType>(arg.getType());
-  SmallVector<Value> indices = TileIndices(b, arg_type, row_offset, col_offset);
-
-  SmallVector<int64_t> full_shape(arg_type.getRank(), 1);
-  full_shape[full_shape.size() - 2] = num_rows;
-  full_shape[full_shape.size() - 1] = num_cols;
-  VectorType full_tile_type =
-      VectorType::get(full_shape, arg_type.getElementType());
-  Value full_tile = vector::LoadOp::create(b, full_tile_type, arg, indices);
-
-  VectorType tile_type =
-      VectorType::get({num_rows, num_cols}, arg_type.getElementType());
-  return vector::ShapeCastOp::create(b, tile_type, full_tile);
-}
-
-TypedValue<VectorType> LoadTile(ImplicitLocOpBuilder& b, Value arg) {
-  ArrayRef<int64_t> shape = cast<MemRefType>(arg.getType()).getShape();
-  return LoadTileSlice(b, arg, /*row_offset=*/0, shape[shape.size() - 2],
-                       /*col_offset=*/0, shape[shape.size() - 1]);
-}
-
-void StoreTileSlice(ImplicitLocOpBuilder& b, Value value, Value arg,
-                    int64_t row_offset, int64_t col_offset) {
-  MemRefType arg_type = cast<MemRefType>(arg.getType());
-  SmallVector<Value> indices = TileIndices(b, arg_type, row_offset, col_offset);
-
-  Value converted_value =
-      ConvertElementType(b, arg_type.getElementType(), value);
-  ArrayRef<int64_t> value_shape =
-      cast<VectorType>(converted_value.getType()).getShape();
-
-  SmallVector<int64_t> full_shape(arg_type.getRank(), 1);
-  full_shape[full_shape.size() - 2] = value_shape[0];
-  full_shape[full_shape.size() - 1] = value_shape[1];
-  VectorType full_tile_type =
-      VectorType::get(full_shape, arg_type.getElementType());
-  Value full_tile =
-      vector::ShapeCastOp::create(b, full_tile_type, converted_value);
-
-  vector::StoreOp::create(b, full_tile, arg, indices);
-}
-
-void StoreTile(ImplicitLocOpBuilder& b, Value value, Value arg) {
-  StoreTileSlice(b, value, arg, /*row_offset=*/0, /*col_offset=*/0);
-}
-
-void ZeroTile(ImplicitLocOpBuilder& b, Value arg) {
-  MemRefType arg_type = cast<MemRefType>(arg.getType());
-  VectorType tile_type = VectorType::get(arg_type.getShape().take_back(2),
-                                         arg_type.getElementType());
-  Value zero_vector = arith::ConstantOp::create(b, b.getZeroAttr(tile_type));
-  StoreTile(b, zero_vector, arg);
-}
-
-void NInfTile(ImplicitLocOpBuilder& b, Value arg) {
-  MemRefType arg_type = cast<MemRefType>(arg.getType());
-  FloatType element_type = cast<FloatType>(arg_type.getElementType());
-  VectorType tile_type =
-      VectorType::get(arg_type.getShape().take_back(2), element_type);
-  auto ninf = b.getFloatAttr(element_type,
-                             APFloat::getInf(element_type.getFloatSemantics(),
-                                             /*Negative=*/true));
-  Value ninf_vector = SplatConstant(b, tile_type, ninf);
-  StoreTile(b, ninf_vector, arg);
-}
-
-bool NeedsPadMask(int64_t qt, int64_t kt, int64_t q_seq_len,
-                  int64_t kv_seq_len) {
-  return (q_seq_len % qt) != 0 || (kv_seq_len % kt) != 0;
-}
-
-Value ApplyStructuredMask(ImplicitLocOpBuilder& b, Value sij,
-                          Value row_block_idx, Value col_block_idx, int64_t qt,
-                          int64_t kt, int64_t q_seq_len, int64_t kv_seq_len,
-                          bool is_causal, int64_t row_offset,
-                          int64_t col_offset,
-                          std::optional<int64_t> sliding_window_size) {
-  bool mask_q_seq_len = (q_seq_len % qt) != 0;
-  bool mask_kv_seq_len = (kv_seq_len % kt) != 0;
-
-  if (!is_causal && !mask_q_seq_len && !mask_kv_seq_len) {
-    return sij;
+absl::Status ValidateFlashAttnConfig(const FlashAttnConfig& config,
+                                     const Tiling& tiling) {
+  if (config.padded_q_sequence_length % tiling.qt != 0 ||
+      config.padded_kv_sequence_length % tiling.kt != 0) {
+    return TT_ERROR(error::kInvalidArgument)
+           << "Padded sequence lengths must be divisible by tile sizes.";
   }
-
-  Type i32 = b.getI32Type();
-  VectorType mask_shape_i32 = cast<VectorType>(sij.getType()).clone(i32);
-
-  Value row_iota = CreateIotaOp(b, mask_shape_i32, 0);
-  Value col_iota = CreateIotaOp(b, mask_shape_i32, 1);
-
-  // Global index of the first row / column of this sub-block:
-  //   block_idx * block_size + static offset within the block.
-  auto qt_const = arith::ConstantOp::create(b, b.getI32IntegerAttr(qt));
-  Value row_start = arith::MulIOp::create(b, row_block_idx, qt_const);
-  if (row_offset != 0) {
-    row_start = arith::AddIOp::create(
-        b, row_start,
-        arith::ConstantOp::create(b, b.getI32IntegerAttr(row_offset)));
+  if (config.num_heads % config.kv_num_heads != 0) {
+    return TT_ERROR(error::kInvalidArgument)
+           << "num_heads must be divisible by kv_num_heads.";
   }
-  Value row_start_vec =
-      vector::BroadcastOp::create(b, mask_shape_i32, row_start);
-
-  auto kt_const = arith::ConstantOp::create(b, b.getI32IntegerAttr(kt));
-  Value col_start = arith::MulIOp::create(b, col_block_idx, kt_const);
-  if (col_offset != 0) {
-    col_start = arith::AddIOp::create(
-        b, col_start,
-        arith::ConstantOp::create(b, b.getI32IntegerAttr(col_offset)));
+  if (config.dropout_rate < 0.0f || config.dropout_rate >= 1.0f) {
+    return TT_ERROR(error::kInvalidArgument)
+           << "dropout_rate must be in [0.0, 1.0), got " << config.dropout_rate;
   }
-  Value col_start_vec =
-      vector::BroadcastOp::create(b, mask_shape_i32, col_start);
-
-  Value row_indices = arith::AddIOp::create(b, row_iota, row_start_vec);
-  Value col_indices = arith::AddIOp::create(b, col_iota, col_start_vec);
-
-  Value valid_mask = nullptr;
-  if (is_causal) {
-    valid_mask = arith::CmpIOp::create(b, arith::CmpIPredicate::sge,
-                                       row_indices, col_indices);
-  }
-  // Restrict causal attention to keys within `sliding_window_size` of each
-  // query (`row - col < sliding_window_size`).
-  if (is_causal && sliding_window_size.has_value()) {
-    const Value window_size_vector = vector::BroadcastOp::create(
-        b, mask_shape_i32,
-        arith::ConstantOp::create(b,
-                                  b.getI32IntegerAttr(*sliding_window_size)));
-    const Value row_col_distance =
-        arith::SubIOp::create(b, row_indices, col_indices);
-    valid_mask = arith::AndIOp::create(
-        b, valid_mask,
-        arith::CmpIOp::create(b, arith::CmpIPredicate::slt, row_col_distance,
-                              window_size_vector));
-  }
-
-  if (mask_q_seq_len) {
-    auto q_seq_len_const =
-        arith::ConstantOp::create(b, b.getI32IntegerAttr(q_seq_len));
-    Value q_seq_len_vec =
-        vector::BroadcastOp::create(b, mask_shape_i32, q_seq_len_const);
-    Value row_valid = arith::CmpIOp::create(b, arith::CmpIPredicate::slt,
-                                            row_indices, q_seq_len_vec);
-    valid_mask = valid_mask ? arith::AndIOp::create(b, valid_mask, row_valid)
-                            : row_valid;
-  }
-
-  if (mask_kv_seq_len) {
-    auto kv_seq_len_const =
-        arith::ConstantOp::create(b, b.getI32IntegerAttr(kv_seq_len));
-    Value kv_seq_len_vec =
-        vector::BroadcastOp::create(b, mask_shape_i32, kv_seq_len_const);
-    Value col_valid = arith::CmpIOp::create(b, arith::CmpIPredicate::slt,
-                                            col_indices, kv_seq_len_vec);
-    valid_mask = valid_mask ? arith::AndIOp::create(b, valid_mask, col_valid)
-                            : col_valid;
-  }
-
-  Value masking_vector = SplatNegInf(b, sij.getType());
-  return arith::SelectOp::create(b, valid_mask, sij, masking_vector);
+  return absl::OkStatus();
 }
 
-Value CreateIntersectsDiagCondition(
-    ImplicitLocOpBuilder& b, Value row_idx, Value col_idx,
-    int64_t row_block_size, int64_t col_block_size,
-    std::optional<int64_t> sliding_window_size) {
-  // The tile contains a masked element iff its last column index is greater
-  // than its first row index:
-  //   (col_idx + 1) * col_block_size - 1 > row_idx * row_block_size.
-  auto row_size_value =
-      arith::ConstantOp::create(b, b.getI32IntegerAttr(row_block_size));
-  auto col_size_value =
-      arith::ConstantOp::create(b, b.getI32IntegerAttr(col_block_size));
-  auto c1 = arith::ConstantOp::create(b, b.getI32IntegerAttr(1));
-
-  Value col_idx_plus_1 = arith::AddIOp::create(b, col_idx, c1);
-  Value last_col = arith::SubIOp::create(
-      b, arith::MulIOp::create(b, col_idx_plus_1, col_size_value), c1);
-  Value first_row = arith::MulIOp::create(b, row_idx, row_size_value);
-  const Value cond =
-      arith::CmpIOp::create(b, arith::CmpIPredicate::sgt, last_col, first_row);
-  if (!sliding_window_size.has_value()) {
-    return cond;
+kiln::DType ToKilnDType(mlir::ElementType element_type) {
+  switch (element_type) {
+    case mlir::ElementType::PRED:
+      return kiln::bool_;
+    case mlir::ElementType::I8:
+      return kiln::i8;
+    case mlir::ElementType::I16:
+      return kiln::i16;
+    case mlir::ElementType::I32:
+      return kiln::i32;
+    case mlir::ElementType::I64:
+      return kiln::i64;
+    case mlir::ElementType::F16:
+      return kiln::f16;
+    case mlir::ElementType::BF16:
+      return kiln::bf16;
+    case mlir::ElementType::F32:
+      return kiln::f32;
+    default:
+      ABSL_CHECK(false) << "Unsupported element type for Kiln";  // CRASH_OK
   }
-
-  // Also apply element-wise masking when the tile straddles the lower boundary
-  // of the sliding window (its bottom-left corner `(last_row, first_col)` has
-  // `last_row - first_col >= sliding_window_size`).
-  const Value last_row = BlockEndIndex(b, row_idx, row_size_value, c1);
-  const Value first_col = arith::MulIOp::create(b, col_idx, col_size_value);
-  return arith::OrIOp::create(
-      b, cond,
-      CmpWindowDistance(b, arith::CmpIPredicate::sge, last_row, first_col,
-                        *sliding_window_size));
 }
 
-Value ReduceBroadcastLane(ImplicitLocOpBuilder& b, Value input,
-                          vector::CombiningKind kind,
-                          int64_t broadcast_lane_size) {
-  VectorType input_type = cast<VectorType>(input.getType());
-  FloatType element_type = cast<FloatType>(input_type.getElementType());
-  ArrayRef<int64_t> input_shape = input_type.getShape();
-  int64_t sublane_dim = input_shape[0];
-  SmallVector<bool> reduction_mask = {false, true};
-
-  Value init_value =
-      CreateReductionInitValue(b, element_type, {sublane_dim}, kind);
-
-  auto reduction_op = vector::MultiDimReductionOp::create(b, input, init_value,
-                                                          reduction_mask, kind);
-
-  auto cast_type = VectorType::get({sublane_dim, 1}, element_type);
-  auto cast_op = vector::ShapeCastOp::create(b, cast_type, reduction_op);
-
-  auto broadcast_type =
-      VectorType::get({sublane_dim, broadcast_lane_size}, element_type);
-  return vector::BroadcastOp::create(b, broadcast_type, cast_op);
-}
-
-Value ClampMinFinite(ImplicitLocOpBuilder& b, Value input) {
-  VectorType input_type = cast<VectorType>(input.getType());
-  FloatType element_type = cast<FloatType>(input_type.getElementType());
-  auto min_value_attr = b.getFloatAttr(
-      element_type,
-      APFloat::getLargest(element_type.getFloatSemantics(), /*Negative=*/true));
-  auto min_finite_op = arith::ConstantOp::create(b, min_value_attr);
-  auto min_value_broadcast =
-      vector::BroadcastOp::create(b, input_type, min_finite_op);
-  return arith::MaximumFOp::create(b, input, min_value_broadcast);
-}
-
-Value CreateBelowOrOnDiagCondition(ImplicitLocOpBuilder& b, Value row_idx,
-                                   Value col_idx, int64_t row_block_size,
-                                   int64_t col_block_size,
-                                   std::optional<int64_t> sliding_window_size) {
-  auto row_size_value =
-      arith::ConstantOp::create(b, b.getI32IntegerAttr(row_block_size));
-  auto col_size_value =
-      arith::ConstantOp::create(b, b.getI32IntegerAttr(col_block_size));
-  auto c1 = arith::ConstantOp::create(b, b.getI32IntegerAttr(1));
-
-  Value row_idx_plus_1 = arith::AddIOp::create(b, row_idx, c1);
-  Value lhs = arith::MulIOp::create(b, row_idx_plus_1, row_size_value);
-  Value lhs_minus_1 = arith::SubIOp::create(b, lhs, c1);
-
-  Value rhs = arith::MulIOp::create(b, col_idx, col_size_value);
-
-  const Value cond =
-      arith::CmpIOp::create(b, arith::CmpIPredicate::sge, lhs_minus_1, rhs);
-  if (!sliding_window_size.has_value()) {
-    return cond;
+std::optional<kiln::ContractPrecision> ToKilnPrecision(
+    std::optional<mlir::tpu::ContractPrecision> precision) {
+  if (!precision.has_value()) return std::nullopt;
+  switch (*precision) {
+    case mlir::tpu::ContractPrecision::kBF16:
+      return kiln::ContractPrecision::kBF16;
+    case mlir::tpu::ContractPrecision::kFP32:
+      return kiln::ContractPrecision::kFP32;
+    case mlir::tpu::ContractPrecision::kBF16x3:
+      return kiln::ContractPrecision::kBF16x3;
   }
-
-  // Keep only tiles whose top-right corner `(first_row, last_col)` is within
-  // the sliding window (`first_row - last_col < sliding_window_size`).
-  const Value first_row = arith::MulIOp::create(b, row_idx, row_size_value);
-  const Value last_col = BlockEndIndex(b, col_idx, col_size_value, c1);
-  return arith::AndIOp::create(
-      b, cond,
-      CmpWindowDistance(b, arith::CmpIPredicate::slt, first_row, last_col,
-                        *sliding_window_size));
+  ABSL_CHECK(false) << "Unsupported contract precision for Kiln";  // CRASH_OK
 }
 
-scf::IfOp CreateCausalIfOp(ImplicitLocOpBuilder& b, Value row_idx,
-                           Value col_idx, int64_t row_block_size,
-                           int64_t col_block_size,
-                           std::optional<int64_t> sliding_window_size) {
-  Value cond = CreateBelowOrOnDiagCondition(
-      b, row_idx, col_idx, row_block_size, col_block_size, sliding_window_size);
-  return scf::IfOp::create(b, cond, /*withElse=*/false);
+std::optional<kiln::ScalarPrefetchSpec> DropoutSeedSpec(
+    const FlashAttnConfig& config) {
+  if (config.dropout_rate <= 0.0f) return std::nullopt;
+  return kiln::ScalarPrefetchSpec{kiln::i32(4)};
 }
 
-Value ScaleValue(ImplicitLocOpBuilder& b, Value input, float scale) {
-  Value scale_value = SplatConstant(b, input.getType(), scale);
-  return arith::MulFOp::create(b, input, scale_value);
-}
-
-Value ConvertElementType(ImplicitLocOpBuilder& b, Type target_element_type,
-                         Value input) {
-  VectorType input_type = cast<VectorType>(input.getType());
-  Type input_element_type = input_type.getElementType();
-  VectorType target_type = input_type.clone(target_element_type);
-
-  int64_t input_bit_width = input_element_type.getIntOrFloatBitWidth();
-  int64_t target_bit_width = target_element_type.getIntOrFloatBitWidth();
-
-  if (input_bit_width < target_bit_width) {
-    return arith::ExtFOp::create(b, target_type, input);
-  }
-
-  if (input_bit_width > target_bit_width) {
-    return arith::TruncFOp::create(b, target_type, input);
-  }
-
-  ABSL_CHECK_EQ(input_element_type, target_element_type)  // CRASH_OK
-      << "Input element type is not the same as target element type.";
-  return input;
-}
-
-Value NormalizeLaneDim(ImplicitLocOpBuilder& builder, Value input,
-                       int64_t target_lane_size) {
-  auto input_vector = mlir::dyn_cast<mlir::TypedValue<mlir::VectorType>>(input);
-  ABSL_CHECK(input_vector) << "Input must be a vector type.";  // CRASH_OK
-  VectorType type = input_vector.getType();
-  int64_t input_lane_size = type.getShape().back();
-  if (input_lane_size == target_lane_size) {
-    return input;
-  }
-
-  int64_t rank = type.getRank();
-  SmallVector<int64_t> target_shape(type.getShape());
-  target_shape.back() = target_lane_size;
-
-  if (target_lane_size < input_lane_size) {
-    return vector::ExtractStridedSliceOp::create(
-        builder, input, SmallVector<int64_t>(rank, 0), target_shape,
-        SmallVector<int64_t>(rank, 1));
-  }
-
-  return CreateRepeatOp(builder, input, rank - 1, target_lane_size);
-}
-
-DictionaryAttr CreateSymbolTransformIndicesAttr(
-    Builder& builder, llvm::StringRef function_name,
-    llvm::ArrayRef<int64_t> window_bounds) {
-  return builder.getDictionaryAttr({
-      builder.getNamedAttr(
-          "transform_indices",
-          mlir::FlatSymbolRefAttr::get(builder.getContext(), function_name)),
-      builder.getNamedAttr("window_bounds",
-                           builder.getDenseI64ArrayAttr(window_bounds)),
+kiln::IndexMap KvBlockIndexMap(const FlashAttnConfig& config,
+                               const Tiling& tiling) {
+  const int64_t head_group = config.num_heads / config.kv_num_heads;
+  return kiln::IndexMap([head_group, config, tiling]() -> kiln::IndexIndices {
+    kiln::Scalar kv_head = kiln::ProgramId(1) / head_group;
+    kiln::Scalar kv_block = kiln::ProgramId(3);
+    if (config.is_causal) {
+      kv_block = Select(
+          BelowOrOnDiagonal(kiln::ProgramId(2), kv_block, config, tiling),
+          kv_block, 0);
+    }
+    return {kiln::ProgramId(0), kv_head, kv_block, 0};
   });
 }
 
-void AppendScalarPrefetchTypes(MLIRContext* context,
-                               const FlashAttnConfig& config,
-                               SmallVectorImpl<Type>& types) {
-  if (config.dropout_rate <= 0.0f) {
-    return;
-  }
-  types.push_back(
-      GetSmemMemRefType(context, {4}, IntegerType::get(context, 32)));
+std::optional<kiln::InSpec> AttnBiasSpec(const FlashAttnConfig& config,
+                                         const Tiling& tiling,
+                                         kiln::DType dtype) {
+  if (!config.has_attn_bias) return std::nullopt;
+  kiln::IndexMap bias_map = kiln::IndexMap(
+      [dims = config.mask_broadcast_dims]() -> kiln::IndexIndices {
+        kiln::IndexIndices idx{kiln::ProgramId(0), kiln::ProgramId(1),
+                               kiln::ProgramId(2), kiln::ProgramId(3)};
+        for (int64_t d : dims) idx[d] = 0;
+        return idx;
+      });
+  return kiln::InSpec{dtype(1, 1, tiling.qt, tiling.kt), bias_map};
 }
 
-void SetScalarPrefetchAttr(const FlashAttnConfig& config, func::FuncOp fn,
-                           OpBuilder& builder) {
-  if (config.dropout_rate <= 0.0f) {
-    return;
-  }
-  fn->setAttr("scalar_prefetch", builder.getI64IntegerAttr(1));
+bool NeedsPadMask(const FlashAttnConfig& config, const Tiling& tiling) {
+  return (config.q_sequence_length % tiling.qt) != 0 ||
+         (config.kv_sequence_length % tiling.kt) != 0;
 }
 
-KVWindowMaps CreateKVWindowMaps(OpBuilder& builder, func::FuncOp fn,
+kiln::Scalar BelowOrOnDiagonal(kiln::Scalar row_block, kiln::Scalar col_block,
+                               const FlashAttnConfig& config, const Tiling& t) {
+  kiln::Scalar cond = (row_block + 1) * t.qt - 1 >= col_block * t.kt;
+  if (!config.sliding_window_size.has_value()) {
+    return cond;
+  }
+  // Keep only tiles whose top-right corner `(first_row, last_col)` is within
+  // the sliding window (`first_row - last_col < sliding_window_size`).
+  kiln::Scalar first_row = row_block * t.qt;
+  kiln::Scalar last_col = (col_block + 1) * t.kt - 1;
+  return cond & ((first_row - last_col) < *config.sliding_window_size);
+}
+
+kiln::Scalar IntersectsDiagonal(kiln::Scalar row_block, kiln::Scalar col_block,
                                 const FlashAttnConfig& config,
-                                const Tiling& tiling) {
-  ABSL_DCHECK_GT(config.num_heads, 0);
-  ABSL_DCHECK_GT(config.kv_num_heads, 0);
-  ABSL_DCHECK_EQ(config.num_heads % config.kv_num_heads, 0);
-
-  // GQA: Mosaic's AffineMap doesn't support FloorDiv, so we use a transform
-  // function.
-  ModuleOp module = fn->getParentOfType<ModuleOp>();
-  auto kv_transform_fn =
-      module ? module.lookupSymbol<func::FuncOp>("kv_transform_indices")
-             : nullptr;
-  if (!kv_transform_fn) {
-    OpBuilder::InsertionGuard guard(builder);
-    builder.setInsertionPoint(fn);
-    Location loc = fn.getLoc();
-    Type i32 = builder.getI32Type();
-    SmallVector<Type> input_types(4, i32);
-    AppendScalarPrefetchTypes(builder.getContext(), config, input_types);
-    SmallVector<Type> output_types(4, i32);
-    FunctionType fn_type = builder.getFunctionType(input_types, output_types);
-    kv_transform_fn =
-        func::FuncOp::create(builder, loc, "kv_transform_indices", fn_type);
-    kv_transform_fn.setPrivate();
-    Block* entry = kv_transform_fn.addEntryBlock();
-    ImplicitLocOpBuilder fn_b = ImplicitLocOpBuilder::atBlockBegin(loc, entry);
-
-    Value batch = entry->getArgument(0);
-    Value head = entry->getArgument(1);
-    Value q_tile = entry->getArgument(2);
-    Value kv_tile = entry->getArgument(3);
-    int64_t head_group_size = config.num_heads / config.kv_num_heads;
-    Value group_size = arith::ConstantOp::create(
-        fn_b, fn_b.getI32IntegerAttr(head_group_size));
-    Value kv_head = arith::DivSIOp::create(fn_b, head, group_size);
-    Value c0 = arith::ConstantOp::create(fn_b, fn_b.getI32IntegerAttr(0));
-
-    Value next_kv_tile = kv_tile;
-    if (config.is_causal) {
-      // If the kv block is skipped, prefetch the next valid kv block, i.e. the
-      // 0th one to be used for the next block_q rows.
-      Value cond =
-          CreateBelowOrOnDiagCondition(fn_b, q_tile, kv_tile, tiling.qt,
-                                       tiling.kt, config.sliding_window_size);
-      next_kv_tile = arith::SelectOp::create(fn_b, cond, kv_tile, c0);
-    }
-
-    func::ReturnOp::create(fn_b, ValueRange{batch, kv_head, next_kv_tile, c0});
+                                const Tiling& t) {
+  kiln::Scalar cond = (col_block + 1) * t.kt - 1 > row_block * t.qt;
+  if (!config.sliding_window_size.has_value()) {
+    return cond;
   }
-
-  DictionaryAttr k_map = CreateSymbolTransformIndicesAttr(
-      builder, "kv_transform_indices", {1, 1, tiling.kt, config.qk_head_dim});
-
-  DictionaryAttr v_map = CreateSymbolTransformIndicesAttr(
-      builder, "kv_transform_indices", {1, 1, tiling.kt, config.vo_head_dim});
-
-  return {k_map, v_map};
+  // Also apply element-wise masking when the tile straddles the lower boundary
+  // of the sliding window (its bottom-left corner `(last_row, first_col)` has
+  // `last_row - first_col >= sliding_window_size`).
+  kiln::Scalar last_row = (row_block + 1) * t.qt - 1;
+  kiln::Scalar first_col = col_block * t.kt;
+  return cond | ((last_row - first_col) >= *config.sliding_window_size);
 }
 
-Value CreateLog2(ImplicitLocOpBuilder& b, Value input) {
-  return math::Log2Op::create(b, input);
-}
+kiln::Tile ApplyStructuredMask(kiln::Tile s, kiln::Scalar row_block,
+                               kiln::Scalar col_block,
+                               const FlashAttnConfig& config, const Tiling& t,
+                               int64_t row_offset, int64_t col_offset) {
+  const bool ragged_q = config.q_sequence_length % t.qt != 0;
+  const bool ragged_kv = config.kv_sequence_length % t.kt != 0;
+  if (!config.is_causal && !ragged_q && !ragged_kv) return s;
 
-Value BuildDropoutKeepMask(ImplicitLocOpBuilder& b,
-                           const FlashAttnConfig& config, int64_t qt,
-                           int64_t kt, Value batch_idx, Value head_idx,
-                           Value row_block_idx, Value col_block_idx,
-                           Value seed_smem, int64_t row_offset,
-                           int64_t col_offset, int64_t rows, int64_t cols) {
-  const int64_t mask_rows = rows > 0 ? rows : qt;
-  const int64_t mask_cols = cols > 0 ? cols : kt;
-  Type i32 = b.getI32Type();
-  VectorType vec_i32 = VectorType::get({mask_rows, mask_cols}, i32);
+  const kiln::Shape i32_shape(s.dims(), kiln::i32);
+  kiln::Scalar row_start = row_block * t.qt;
+  if (row_offset != 0) row_start = row_start + row_offset;
+  kiln::Scalar col_start = col_block * t.kt;
+  if (col_offset != 0) col_start = col_start + col_offset;
 
-  // Builds an i32 constant shaped like `type`. `fmix32` below runs on both a
-  // scalar and a tile, and `arith` requires operands to match, so the constants
-  // have to follow whichever it was handed. `SplatConstant` only accepts shaped
-  // types, hence the scalar fallback.
-  auto constant_like = [&](Type type, int64_t value) -> Value {
-    IntegerAttr attr = b.getI32IntegerAttr(
-        absl::bit_cast<int32_t>(static_cast<uint32_t>(value)));
-    if (auto shaped_type = llvm::dyn_cast<ShapedType>(type)) {
-      return SplatConstant(b, shaped_type, attr);
+  kiln::Tile row = kiln::Iota(i32_shape, 0) + row_start;
+  kiln::Tile col = kiln::Iota(i32_shape, 1) + col_start;
+
+  std::optional<kiln::Tile> valid;
+  auto also = [&](kiln::Tile m) { valid = valid ? (*valid & m) : m; };
+  if (config.is_causal) {
+    also(row >= col);
+    if (config.sliding_window_size.has_value()) {
+      also((row - col) < *config.sliding_window_size);
     }
-    return arith::ConstantOp::create(b, type, attr);
-  };
+  }
+  if (ragged_q) also(row < config.q_sequence_length);
+  if (ragged_kv) also(col < config.kv_sequence_length);
+  return Select(*valid, s, kiln::NInf(s.shape()));
+}
 
-  // MurmurHash3's fmix32 avalanche; see
-  // https://en.wikipedia.org/wiki/MurmurHash. It is a bijection on uint32, so
-  // the packed key below cannot collide. The `arith` ops are type-polymorphic,
-  // so this runs unchanged on the scalar and vector paths.
-  auto fmix32 = [&](Value h) -> Value {
-    Type type = h.getType();
-    auto k = [&](uint32_t c) { return constant_like(type, c); };
-    h = arith::XOrIOp::create(b, h, arith::ShRUIOp::create(b, h, k(16)));
-    h = arith::MulIOp::create(b, h, k(0x85EBCA6Bu));
-    h = arith::XOrIOp::create(b, h, arith::ShRUIOp::create(b, h, k(13)));
-    h = arith::MulIOp::create(b, h, k(0xC2B2AE35u));
-    h = arith::XOrIOp::create(b, h, arith::ShRUIOp::create(b, h, k(16)));
-    return h;
-  };
+kiln::Tile ComputeLogits(kiln::Tile q, kiln::Tile k,
+                         std::optional<kiln::Ref> bias_ref,
+                         kiln::Scalar row_block, kiln::Scalar col_block,
+                         const FlashAttnConfig& config, const Tiling& tiling) {
+  kiln::Tile s = kiln::Dot(q, k,
+                           {.transpose_rhs = true,
+                            .precision = ToKilnPrecision(config.precision)}) *
+                 (config.scale * kLog2e);
+  if (bias_ref) {
+    kiln::Tile bias((*bias_ref)(0, 0));
+    s = s + bias.AsType(kiln::f32) * kLog2e;
+  }
+  return ApplyStructuredMask(s, row_block, col_block, config, tiling);
+}
 
-  auto c_idx = [&](int64_t idx) -> Value {
-    return arith::ConstantOp::create(b, b.getIndexType(), b.getIndexAttr(idx));
-  };
+kiln::Tile DropoutKeepMask(const FlashAttnConfig& config, const Tiling& tiling,
+                           kiln::Scalar batch, kiln::Scalar q_head,
+                           kiln::Scalar row_block, kiln::Scalar col_block,
+                           kiln::Ref seed_ref, int64_t row_offset,
+                           int64_t col_offset, int64_t rows, int64_t cols) {
+  const int64_t mask_rows = rows > 0 ? rows : tiling.qt;
+  const int64_t mask_cols = cols > 0 ? cols : tiling.kt;
+  const kiln::Shape i32_shape = kiln::i32(mask_rows, mask_cols);
 
-  // 1. Load the Philox {seed_lo, seed_hi, offset_lo, offset_hi} from the
-  // scalar_prefetch SMEM buffer.
-  Value seed_lo = memref::LoadOp::create(b, seed_smem, ValueRange{c_idx(0)});
-  Value seed_hi = memref::LoadOp::create(b, seed_smem, ValueRange{c_idx(1)});
-  Value offset_lo = memref::LoadOp::create(b, seed_smem, ValueRange{c_idx(2)});
-  Value offset_hi = memref::LoadOp::create(b, seed_smem, ValueRange{c_idx(3)});
+  // 1. The Philox {seed_lo, seed_hi, offset_lo, offset_hi} words.
+  kiln::Scalar seed_lo(seed_ref(0));
+  kiln::Scalar seed_hi(seed_ref(1));
+  kiln::Scalar offset_lo(seed_ref(2));
+  kiln::Scalar offset_hi(seed_ref(3));
 
   // 2. Fold the stream identity into one word. This is scalar work, so it costs
   // once per tile rather than once per element, and we can afford to avalanche
   // after every term.
-  Value stream = seed_lo;
-  for (Value part : {seed_hi, offset_lo, offset_hi, batch_idx, head_idx}) {
-    stream = fmix32(arith::XOrIOp::create(b, stream, part));
+  kiln::Scalar stream = seed_lo;
+  for (kiln::Scalar part : {seed_hi, offset_lo, offset_hi, batch, q_head}) {
+    stream = Fmix32(stream ^ part);
   }
-  Value stream_vec = vector::BroadcastOp::create(b, vec_i32, stream);
 
-  // 3. Absolute (q, kv) coordinates: grid block index * tile size + static
+  // 3. Absolute (q, kv) coordinates: block index * tile size + static
   // sub-block offset, plus the within-tile iota.
-  Value q_start =
-      arith::MulIOp::create(b, row_block_idx, constant_like(i32, qt));
-  if (row_offset != 0) {
-    q_start = arith::AddIOp::create(b, q_start, constant_like(i32, row_offset));
-  }
-  Value q_off = vector::BroadcastOp::create(b, vec_i32, q_start);
-  Value kv_start =
-      arith::MulIOp::create(b, col_block_idx, constant_like(i32, kt));
-  if (col_offset != 0) {
-    kv_start =
-        arith::AddIOp::create(b, kv_start, constant_like(i32, col_offset));
-  }
-  Value kv_off = vector::BroadcastOp::create(b, vec_i32, kv_start);
-  Value q_abs = arith::AddIOp::create(b, CreateIotaOp(b, vec_i32, 0), q_off);
-  Value kv_abs = arith::AddIOp::create(b, CreateIotaOp(b, vec_i32, 1), kv_off);
+  kiln::Scalar q_start = row_block * tiling.qt;
+  if (row_offset != 0) q_start = q_start + row_offset;
+  kiln::Scalar kv_start = col_block * tiling.kt;
+  if (col_offset != 0) kv_start = kv_start + col_offset;
+  kiln::Tile q_abs = kiln::Iota(i32_shape, 0) + q_start;
+  kiln::Tile kv_abs = kiln::Iota(i32_shape, 1) + kv_start;
 
   // 4. Pack the coordinates into a single word, then avalanche. The pack is
-  // exactly injective while padded_q * padded_kv <= 2^32, so within a stream no
-  // two positions can share a hash.
-  Value key = arith::AddIOp::create(
-      b,
-      arith::MulIOp::create(
-          b, q_abs, constant_like(vec_i32, config.padded_kv_sequence_length)),
-      kv_abs);
-  Value hash = fmix32(arith::XOrIOp::create(b, key, stream_vec));
+  // exactly injective while padded_q * padded_kv <= 2^32, so within a stream
+  // no two positions can share a hash.
+  kiln::Tile key = q_abs * config.padded_kv_sequence_length + kv_abs;
+  kiln::Tile hash = Fmix32(key ^ stream);
 
   // 5. Keep iff uint32(hash) >= round(dropout_rate * 2^32). Only a signed
   // compare is available, so flip the sign bit on both sides.
   const uint32_t threshold = static_cast<uint32_t>(std::min<double>(
       std::floor(static_cast<double>(config.dropout_rate) * 4294967296.0),
       4294967295.0));
-  Value hash_signed =
-      arith::XOrIOp::create(b, hash, constant_like(vec_i32, 0x80000000u));
-  return arith::CmpIOp::create(b, arith::CmpIPredicate::sge, hash_signed,
-                               constant_like(vec_i32, threshold ^ 0x80000000u));
+  return (hash ^ 0x80000000u) >= (threshold ^ 0x80000000u);
 }
 
-}  // namespace mlir::torch_tpu
+kiln::Tile ApplyDropout(kiln::Tile t, kiln::Tile keep,
+                        const FlashAttnConfig& config) {
+  return Select(keep, t * (1.0f / (1.0f - config.dropout_rate)), 0.0);
+}
+
+}  // namespace torch_tpu

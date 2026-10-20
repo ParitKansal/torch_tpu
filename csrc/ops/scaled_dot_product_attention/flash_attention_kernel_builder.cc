@@ -50,7 +50,7 @@
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/tensor_to_buffer.h"
-#include "csrc/internal/mosaic/op_builders.h"
+#include "csrc/internal/mosaic/kiln/kiln.h"
 #include "csrc/ops/binary.h"
 #include "csrc/ops/op_builder_utils.h"
 #include "csrc/ops/precision_context.h"
@@ -60,20 +60,16 @@
 #include "csrc/ops/scaled_dot_product_attention/flash_attention_config.h"
 #include "csrc/ops/scaled_dot_product_attention/flash_attention_kernel.h"
 #include "csrc/ops/scaled_dot_product_attention/helpers.h"
-#include "csrc/ops/scaled_dot_product_attention/util.h"
 #include "csrc/ops/view_decomposition/contiguous_to_view.h"
 #include "csrc/pjrt/pjrt_state.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
-#include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/MathExtras.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/TypeRange.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/ValueRange.h"
@@ -169,10 +165,10 @@ int64_t GetKvComputeTileSize(int64_t kt) {
   return kMinHardwareTileSize;
 }
 
-mlir::torch_tpu::Tiling CreateTiling(
-    int64_t q_seq_len, int64_t k_seq_len, int64_t head_dim, bool is_f32,
-    bool has_mask, bool is_backward, bool has_dropout = false,
-    std::optional<int64_t> vmem_limit_override = std::nullopt) {
+Tiling CreateTiling(int64_t q_seq_len, int64_t k_seq_len, int64_t head_dim,
+                    bool is_f32, bool has_mask, bool is_backward,
+                    bool has_dropout = false,
+                    std::optional<int64_t> vmem_limit_override = std::nullopt) {
   const int64_t vmem_limit =
       vmem_limit_override.value_or(GetDeviceVmemLimitBytes());
 
@@ -202,13 +198,10 @@ mlir::torch_tpu::Tiling CreateTiling(
 }
 
 absl::StatusOr<mlir::stablehlo::CustomCallOp> CreateCustomCallOp(
-    mlir::OpBuilder& builder, mlir::Location loc,
-    mlir::OwningOpRef<mlir::ModuleOp> module, mlir::ValueRange inputs,
-    mlir::TypeRange output_types) {
-  if (failed(mlir::torch_tpu::SerializeMosaicKernel(module.get()))) {
-    return TT_ERROR(::torch_tpu::error::kInternal)
-           << "failed to serialize mosaic kernel";
-  }
+    mlir::OpBuilder& builder, mlir::Location loc, kiln::Kernel&& kernel,
+    mlir::ValueRange inputs, mlir::TypeRange output_types) {
+  TT_ASSIGN_OR_RETURN(std::string serialized_kernel,
+                      std::move(kernel).Serialize());
 
   std::string backend_config_json = absl::StrFormat(
       R"({
@@ -226,8 +219,7 @@ absl::StatusOr<mlir::stablehlo::CustomCallOp> CreateCustomCallOp(
           }
         ]
       })",
-      absl::Base64Escape(mlir::torch_tpu::GetOpString(module.get())),
-      GetDeviceVmemLimitBytes());
+      absl::Base64Escape(serialized_kernel), GetDeviceVmemLimitBytes());
 
   auto get_default_layout = [&builder](mlir::Type type) {
     int64_t rank = mlir::cast<mlir::RankedTensorType>(type).getRank();
@@ -325,9 +317,8 @@ mlir::MlirOp PadBias(mlir::MlirOp bias, int64_t padded_q_len,
   return bias;
 }
 
-mlir::torch_tpu::Tiling CreateTiling(mlir::MlirOp query, mlir::MlirOp key,
-                                     bool has_mask, bool is_backward = false,
-                                     bool has_dropout = false) {
+Tiling CreateTiling(mlir::MlirOp query, mlir::MlirOp key, bool has_mask,
+                    bool is_backward = false, bool has_dropout = false) {
   auto query_type = GetTensorTypeOrDie(query);
   auto key_type = GetTensorTypeOrDie(key);
   int64_t q_seq_len = query_type.getShape()[query_type.getRank() - 2];
@@ -366,11 +357,11 @@ mlir::MlirOp PackPhiloxSeedAndOffsetTo4xI32(mlir::MlirOp philox_seed,
       /*dimension=*/0));
 }
 
-absl::StatusOr<mlir::torch_tpu::FlashAttnConfig> CreateFlashAttnConfig(
+absl::StatusOr<FlashAttnConfig> CreateFlashAttnConfig(
     mlir::MlirOp query, mlir::MlirOp key, mlir::MlirOp value,
     const std::optional<mlir::MlirOp>& attn_bias, bool is_causal,
     std::optional<double> scale, double dropout_p, bool return_lse,
-    const mlir::torch_tpu::Tiling& tiling, mlir::stablehlo::Precision precision,
+    const Tiling& tiling, mlir::stablehlo::Precision precision,
     std::optional<int64_t> sliding_window_size) {
   if (is_causal && attn_bias.has_value()) {
     return TT_ERROR(error::kInvalidArgument)
@@ -407,7 +398,7 @@ absl::StatusOr<mlir::torch_tpu::FlashAttnConfig> CreateFlashAttnConfig(
       << "expected sliding_window_size to be positive, got "
       << *sliding_window_size;
 
-  mlir::torch_tpu::FlashAttnConfig config;
+  FlashAttnConfig config;
   config.return_lse = return_lse;
   TT_ASSIGN_OR_RETURN(config.element_type, GetElementType(query));
   if (config.element_type == mlir::ElementType::F32) {
@@ -537,7 +528,7 @@ CreateFlashAttentionKernelImpl(const at::Tensor& query, const at::Tensor& key,
                                      /*has_mask=*/attn_bias_mlir.has_value(),
                                      /*is_backward=*/false, has_dropout);
     TT_ASSIGN_OR_RETURN(
-        mlir::torch_tpu::FlashAttnConfig config,
+        FlashAttnConfig config,
         CreateFlashAttnConfig(query_mlir, key_mlir, value_mlir, attn_bias_mlir,
                               is_causal, scale, dropout_p, return_lse, tiling,
                               precision, sliding_window_size));
@@ -599,10 +590,7 @@ CreateFlashAttentionKernelImpl(const at::Tensor& query, const at::Tensor& key,
       result_types.push_back(ml_type);
     }
 
-    auto context = mlir::torch_tpu::CreateMlirContextWithDialects();
-    TT_ASSIGN_OR_RETURN(
-        mlir::OwningOpRef<mlir::ModuleOp> kernel,
-        mlir::torch_tpu::CreateKernel(context.get(), config, tiling));
+    TT_ASSIGN_OR_RETURN(kiln::Kernel kernel, CreateKernel(config, tiling));
 
     TT_ASSIGN_OR_RETURN(
         auto custom_call,
@@ -771,7 +759,7 @@ CreateFlashAttentionBackwardKernel(
                                      /*has_mask=*/attn_bias_mlir.has_value(),
                                      /*is_backward=*/true, has_dropout);
     TT_ASSIGN_OR_RETURN(
-        mlir::torch_tpu::FlashAttnConfig config,
+        FlashAttnConfig config,
         CreateFlashAttnConfig(query_mlir, key_mlir, value_mlir, attn_bias_mlir,
                               is_causal, scale, dropout_p,
                               /*return_lse=*/false, tiling, precision,
@@ -850,11 +838,8 @@ CreateFlashAttentionBackwardKernel(
       dkv_inputs.push_back(mask_mlir.getValue());
     }
 
-    auto context = mlir::torch_tpu::CreateMlirContextWithDialects();
-
-    TT_ASSIGN_OR_RETURN(mlir::OwningOpRef<mlir::ModuleOp> dkv_kernel,
-                        mlir::torch_tpu::CreateBackwardDkvKernel(
-                            context.get(), config, tiling));
+    TT_ASSIGN_OR_RETURN(kiln::Kernel dkv_kernel,
+                        CreateBackwardDkvKernel(config, tiling));
     mlir::RankedTensorType key_type = GetTensorTypeOrDie(key_batch);
     mlir::RankedTensorType value_type = GetTensorTypeOrDie(value_batch);
     TT_ASSIGN_OR_RETURN(
@@ -883,9 +868,8 @@ CreateFlashAttentionBackwardKernel(
 
     dq_inputs.push_back(out_batch.getValue());
 
-    TT_ASSIGN_OR_RETURN(
-        mlir::OwningOpRef<mlir::ModuleOp> dq_kernel,
-        mlir::torch_tpu::CreateBackwardDqKernel(context.get(), config, tiling));
+    TT_ASSIGN_OR_RETURN(kiln::Kernel dq_kernel,
+                        CreateBackwardDqKernel(config, tiling));
     TT_ASSIGN_OR_RETURN(
         auto dq_custom_call,
         CreateCustomCallOp(builder.getOpBuilder(), builder.getLoc(),

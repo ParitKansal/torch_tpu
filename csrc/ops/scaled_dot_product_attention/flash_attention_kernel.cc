@@ -17,343 +17,174 @@
 #include "csrc/ops/scaled_dot_product_attention/flash_attention_kernel.h"
 
 #include <cstdint>
-#include <initializer_list>
+#include <limits>
 #include <optional>
 
-#include "absl/algorithm/container.h"
-#include "absl/container/inlined_vector.h"
 #include "absl/log/absl_log.h"
-#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "csrc/common/error_utils.h"
-#include "csrc/internal/mosaic/op_builders.h"
+#include "csrc/internal/mosaic/kiln/kiln.h"
 #include "csrc/ops/scaled_dot_product_attention/flash_attention_config.h"
 #include "csrc/ops/scaled_dot_product_attention/util.h"
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/SmallVector.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Arith/IR/ArithAttributes.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/Math/IR/Math.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Dialect/SCF/Transforms/Transforms.h"
-#include "mlir/Dialect/Vector/IR/VectorOps.h"
-#include "mlir/IR/AffineExpr.h"
-#include "mlir/IR/AffineMap.h"
-#include "mlir/IR/AttrTypeSubElements.h"
-#include "mlir/IR/Attributes.h"
-#include "mlir/IR/Builders.h"
-#include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/BuiltinTypeInterfaces.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/Diagnostics.h"
-#include "mlir/IR/Location.h"
-#include "mlir/IR/MLIRContext.h"
-#include "mlir/IR/Operation.h"
-#include "mlir/IR/OperationSupport.h"
-#include "mlir/IR/OwningOpRef.h"
-#include "mlir/IR/TypeRange.h"
-#include "mlir/IR/Value.h"
-#include "mlir/Pass/PassManager.h"
-#include "mlir/Support/LLVM.h"
-#include "mlir/Transforms/DialectConversion.h"
-#include "stablehlo/conversions/linalg/transforms/Passes.h"
-#include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
-#include "xla/xla_data.pb.h"
 
-namespace mlir::torch_tpu {  // NON_TORCH_TPU_OK=TODO(willfroom): migrate this.
-
-using mlir::arith::AddFOp;          // USING_DECL_OK
-using mlir::arith::CmpFOp;          // USING_DECL_OK
-using mlir::arith::CmpFPredicate;   // USING_DECL_OK
-using mlir::arith::CmpIOp;          // USING_DECL_OK
-using mlir::arith::CmpIPredicate;   // USING_DECL_OK
-using mlir::arith::ConstantOp;      // USING_DECL_OK
-using mlir::arith::MaximumFOp;      // USING_DECL_OK
-using mlir::arith::MulFOp;          // USING_DECL_OK
-using mlir::arith::SelectOp;        // USING_DECL_OK
-using mlir::arith::SubFOp;          // USING_DECL_OK
-using mlir::func::ReturnOp;         // USING_DECL_OK
-using mlir::math::Exp2Op;           // USING_DECL_OK
-using mlir::scf::IfOp;              // USING_DECL_OK
-using mlir::scf::YieldOp;           // USING_DECL_OK
-using mlir::vector::CombiningKind;  // USING_DECL_OK
+namespace torch_tpu {
 
 namespace {
 
-void SetKernelAttributes(llvm::ArrayRef<const int64_t> qk_dimensions,
-                         const FlashAttnConfig& config, const Tiling& tiling,
-                         func::FuncOp fn, OpBuilder& builder) {
-  const int64_t scratch_operands = 3L;
-  fn->setAttr("scratch_operands", builder.getI64IntegerAttr(scratch_operands));
-  SetScalarPrefetchAttr(config, fn, builder);
-
-  const int64_t num_iteration_indices = absl::c_count_if(
-      fn.getArguments(),
-      [](BlockArgument arg) { return arg.getType().isIntOrIndex(); });
-  if (num_iteration_indices == 0) {
-    // No other attributes are needed in the case there is a single iteration.
-    return;
-  }
-  absl::InlinedVector<int64_t, 4> iteration_bounds = {qk_dimensions.begin(),
-                                                      qk_dimensions.end()};
-  iteration_bounds[iteration_bounds.size() - 1] =
-      config.padded_kv_sequence_length / tiling.kt;
-  iteration_bounds[iteration_bounds.size() - 2] =
-      config.padded_q_sequence_length / tiling.qt;
-  fn->setAttr("iteration_bounds",
-              builder.getDenseI64ArrayAttr(
-                  {iteration_bounds.begin(), iteration_bounds.end()}));
-  MLIRContext* context = builder.getContext();
-  absl::InlinedVector<Attribute, 4> dimension_semantics(
-      num_iteration_indices,
-      GetDimensionSemanticsAttr(context, DimensionSemantics::kParallel));
-  // The last dimension is arbitrary, update it accordingly.
-  dimension_semantics.back() =
-      GetDimensionSemanticsAttr(context, DimensionSemantics::kArbitrary);
-  fn->setAttr("dimension_semantics",
-              builder.getArrayAttr(
-                  {dimension_semantics.begin(), dimension_semantics.end()}));
-
-  // We need transform_indices attribute for q, k, v, any auxiliary arguments,
-  // and output. This boils down to all arguments except iteration indices,
-  // scalar_prefetch arguments, and scratch arguments.
-  // The arguments are in the following order: iteration_indices,
-  // [seed_smem], q, k, v, auxiliary_parameters, output, li, mi.
-  SmallVector<AffineExpr> dims(num_iteration_indices);
-  bindDimsList(context, MutableArrayRef{dims});
-  // Auxiliary function for creating transform_indices attribute.
-  auto transform_indices = [&](ArrayRef<AffineExpr> results) {
-    return builder.getDictionaryAttr({builder.getNamedAttr(
-        "transform_indices", AffineMapAttr::get(AffineMap::get(
-                                 /*dimCount=*/dims.size(),
-                                 /*symbolCount=*/0, results, context)))});
-  };
-
-  llvm::SmallVector<AffineExpr> q_map_expr = {
-      builder.getAffineDimExpr(0), builder.getAffineDimExpr(1),
-      builder.getAffineDimExpr(2), builder.getAffineConstantExpr(0)};
-  llvm::SmallVector<AffineExpr> aux_map_expr = {
-      builder.getAffineDimExpr(0), builder.getAffineDimExpr(1),
-      builder.getAffineConstantExpr(0), builder.getAffineDimExpr(2)};
-
-  auto q_map = transform_indices(q_map_expr);
-  auto aux_map = transform_indices(aux_map_expr);
-
-  auto [k_map, v_map] = CreateKVWindowMaps(builder, fn, config, tiling);
-
-  SmallVector<DictionaryAttr> window_attrs;
-  window_attrs.push_back(q_map);  // Q
-  window_attrs.push_back(k_map);  // K
-  window_attrs.push_back(v_map);  // V
-
-  if (config.has_attn_bias) {
-    SmallVector<AffineExpr, 4> mask_expr{
-        builder.getAffineDimExpr(0), builder.getAffineDimExpr(1),
-        builder.getAffineDimExpr(2), builder.getAffineDimExpr(3)};
-    for (auto dim : config.mask_broadcast_dims) {
-      mask_expr[dim] = builder.getAffineConstantExpr(0);
-    }
-
-    window_attrs.push_back(transform_indices(mask_expr));
-  }
-
-  window_attrs.push_back(q_map);  // oi
-  if (config.return_lse) {
-    window_attrs.push_back(aux_map);  // lse
-  }
-
-  fn->setAttr("window_params",
-              builder.getArrayAttr({window_attrs.begin(), window_attrs.end()}));
-}
+// Row statistics (m, l) are kept lane-replicated in (qt, 128) scratch.
+constexpr int64_t kLanes = 128;
 
 // The running online-softmax state for a band of query rows.
 struct SoftmaxState {
-  Value m;    // [rows, 128] f32 running max (log2 domain).
-  Value l;    // [rows, 128] f32 running sum.
-  Value acc;  // [rows, vo_head_dim] f32 unnormalized output.
+  kiln::Tile m;    // [rows, 128] f32 running max (log2 domain).
+  kiln::Tile l;    // [rows, 128] f32 running sum.
+  kiln::Tile acc;  // [rows, d_vo] f32 unnormalized output.
 };
 
 // Kernel arguments that are shared by all sub-blocks of a grid step.
 struct KernelArgs {
-  Value seed_arg;  // Null when dropout is disabled.
-  Value q_arg;
-  Value k_arg;
-  Value v_arg;
-  Value mask_arg;  // Null when there is no user provided bias.
-  Value oi_arg;
-  Value lse_arg;  // Null when LSE is not returned.
-  Value o_scratch_arg;
-  Value mi_arg;
-  Value li_arg;
-  Value batch_idx;
-  Value head_idx;
-  Value row_block_idx;
-  Value col_block_idx;
+  std::optional<kiln::Ref> seed_ref;
+  kiln::Ref q_ref;
+  kiln::Ref k_ref;
+  kiln::Ref v_ref;
+  std::optional<kiln::Ref> bias_ref;
+  kiln::Ref o_ref;
+  std::optional<kiln::Ref> lse_ref;
+  kiln::Ref acc_ref;
+  kiln::Ref m_ref;
+  kiln::Ref l_ref;
+  kiln::Scalar qi;
+  kiln::Scalar ki;
 };
 
-// Applies PyTorch's inverted dropout to the softmax probabilities `p`: kept
-// entries are rescaled by 1 / (1 - dropout_rate) and dropped entries are
-// zeroed. Returns `p` unchanged when dropout is disabled.
-//
-// Only the probabilities fed into the P @ V matmul are dropped; the softmax
-// statistics (m_i, l_i and hence the LSE) must stay undropped because the
-// backward pass recomputes P from the LSE.
-Value ApplyDropoutToProbabilities(ImplicitLocOpBuilder& b,
-                                  const FlashAttnConfig& config,
-                                  const Tiling& tiling, const KernelArgs& args,
-                                  int64_t row_offset, int64_t col_offset,
-                                  Value p) {
-  if (config.dropout_rate <= 0.0f) {
-    return p;
+kiln::IndexIndices QBlockIndexMap() {
+  return {kiln::ProgramId(0), kiln::ProgramId(1), kiln::ProgramId(2), 0};
+}
+
+kiln::IndexIndices LseBlockIndexMap() {
+  return {kiln::ProgramId(0), kiln::ProgramId(1), 0, kiln::ProgramId(2)};
+}
+
+void InitSoftmaxScratch(const FlashAttnConfig& config, const Tiling& tiling,
+                        const KernelArgs& args) {
+  args.acc_ref() = kiln::Zeros(kiln::f32(tiling.qt, config.vo_head_dim));
+  args.l_ref() = kiln::Zeros(kiln::f32(tiling.qt, kLanes));
+  args.m_ref() = kiln::NInf(kiln::f32(tiling.qt, kLanes));
+}
+
+kiln::Tile ApplyDropoutToProbabilities(const FlashAttnConfig& config,
+                                       const Tiling& tiling,
+                                       const KernelArgs& args,
+                                       int64_t row_offset, int64_t col_offset,
+                                       kiln::Tile p) {
+  if (!args.seed_ref) return p;
+  kiln::Tile keep = DropoutKeepMask(
+      config, tiling, kiln::ProgramId(0), kiln::ProgramId(1), args.qi, args.ki,
+      *args.seed_ref, row_offset, col_offset, p.dims()[0], p.dims()[1]);
+  return ApplyDropout(p, keep, config);
+}
+
+// out = acc / l ; lse = m + Log2(l) (log2-scaled, only used by backward).
+void StoreNormalizedOutput(const FlashAttnConfig& config,
+                           const KernelArgs& args, const SoftmaxState& state,
+                           int64_t row_offset) {
+  const int64_t rows = state.acc.dims()[0];
+  kiln::Tile is_zero_l = state.l == 0.0f;
+  kiln::Tile safe_l = Select(is_zero_l, 1.0f, state.l);
+  args.o_ref(0, 0, kiln::Slice(row_offset, rows), kiln::all) =
+      state.acc * kiln::Reciprocal(safe_l).Lanes(config.vo_head_dim);
+  if (args.lse_ref) {
+    kiln::Tile lse =
+        Select(is_zero_l, kiln::NInf(state.l.shape()), state.m + Log2(safe_l));
+    (*args.lse_ref)(0, 0, kiln::all, kiln::Slice(row_offset, rows)) =
+        kiln::Transpose(lse.Lanes(1));
   }
-  VectorType p_type = cast<VectorType>(p.getType());
-  Value keep = BuildDropoutKeepMask(
-      b, config, tiling.qt, tiling.kt, args.batch_idx, args.head_idx,
-      args.row_block_idx, args.col_block_idx, args.seed_arg, row_offset,
-      col_offset, p_type.getDimSize(0), p_type.getDimSize(1));
-  Value p_rescaled = ScaleValue(b, p, 1.0f / (1.0f - config.dropout_rate));
-  Value zeros = ConstantOp::create(b, b.getZeroAttr(p_type));
-  return arith::SelectOp::create(b, keep, p_rescaled, zeros);
 }
 
 // Folds the [rows, kc] logits sub-block at (row_offset, col_offset) of the
-// current grid tile into the online softmax state `prev`. When `prev` is
-// nullopt this is the first block for these rows, which avoids the rescaling
-// of an (empty) previous state.
-SoftmaxState UpdateSoftmaxState(ImplicitLocOpBuilder& b,
-                                const FlashAttnConfig& config,
+// current grid tile into the online softmax state `prev`.
+SoftmaxState UpdateSoftmaxState(const FlashAttnConfig& config,
                                 const Tiling& tiling, const KernelArgs& args,
-                                Value q, int64_t row_offset, int64_t rows,
-                                int64_t col_offset, int64_t kc,
-                                bool apply_masking,
+                                kiln::Tile q, int64_t row_offset, int64_t rows,
+                                int64_t col_offset, bool apply_masking,
                                 const std::optional<SoftmaxState>& prev) {
-  Type ity = getElementType(*b.getContext(), config.element_type);
-  FloatType f32 = b.getF32Type();
+  const int64_t kc = tiling.kc;
+  const int64_t d_vo = config.vo_head_dim;
+  kiln::DType dt = ToKilnDType(config.element_type);
+  std::optional<kiln::ContractPrecision> precision =
+      ToKilnPrecision(config.precision);
 
-  Value k = LoadTileSlice(b, args.k_arg, col_offset, kc, /*col_offset=*/0,
-                          config.qk_head_dim);
-  Value unscaled_sij = CreateMatmul(
-      b, q, k,
-      MatmulOptions{.transpose_rhs = true, .precision = config.precision});
-  Value sij = ScaleValue(b, unscaled_sij, config.scale * kLog2e);
-
-  if (args.mask_arg) {
-    Value user_bias =
-        LoadTileSlice(b, args.mask_arg, row_offset, rows, col_offset, kc);
-    user_bias = ConvertElementType(b, f32, user_bias);
-    user_bias = ScaleValue(b, user_bias, kLog2e);
-    sij = AddFOp::create(b, sij, user_bias);
+  kiln::Tile k(args.k_ref(0, 0, kiln::Slice(col_offset, kc), kiln::all));
+  kiln::Tile s =
+      kiln::Dot(q, k, {.transpose_rhs = true, .precision = precision}) *
+      (config.scale * kLog2e);
+  if (args.bias_ref) {
+    kiln::Tile bias((*args.bias_ref)(0, 0, kiln::Slice(row_offset, rows),
+                                     kiln::Slice(col_offset, kc)));
+    s = s + bias.AsType(kiln::f32) * kLog2e;
   }
-
   if (apply_masking) {
-    sij = ApplyStructuredMask(
-        b, sij, args.row_block_idx, args.col_block_idx, tiling.qt, tiling.kt,
-        config.q_sequence_length, config.kv_sequence_length, config.is_causal,
-        row_offset, col_offset, config.sliding_window_size);
+    s = ApplyStructuredMask(s, args.qi, args.ki, config, tiling, row_offset,
+                            col_offset);
   }
 
-  Value mij = ReduceBroadcastLane(b, sij, CombiningKind::MAXIMUMF);
-  if (args.mask_arg || config.sliding_window_size.has_value()) {
+  kiln::Tile mij = kiln::MaxReduce(s, 1).Lanes(kLanes);
+  if (args.bias_ref || config.sliding_window_size.has_value()) {
     // Clamping mij instead of sij ensures that when a row is entirely masked
     // out with -inf, sij - mij evaluates to (-inf) - (<large negative finite>)
     // = -inf, so exp2(-inf) = 0.0 naturally without any vector compare or
     // select on p in the inner loop.
-    mij = ClampMinFinite(b, mij);
+    mij = Max(mij, std::numeric_limits<float>::lowest());
   }
-  Value v = LoadTileSlice(b, args.v_arg, col_offset, kc, /*col_offset=*/0,
-                          config.vo_head_dim);
+  kiln::Tile v(args.v_ref(0, 0, kiln::Slice(col_offset, kc), kiln::all));
 
-  SoftmaxState next;
   if (!prev.has_value()) {
-    next.m = mij;
-    Value p =
-        Exp2Op::create(b, SubFOp::create(b, sij, NormalizeLaneDim(b, mij, kc)));
-    next.l = ReduceBroadcastLane(b, p, CombiningKind::ADD);
-    Value p_for_pv = ApplyDropoutToProbabilities(b, config, tiling, args,
-                                                 row_offset, col_offset, p);
-    next.acc = CreateMatmul(b, ConvertElementType(b, ity, p_for_pv), v,
-                            MatmulOptions{.precision = config.precision});
-    return next;
+    kiln::Tile p = Exp2(s - mij.Lanes(kc));
+    kiln::Tile l = kiln::SumReduce(p, 1).Lanes(kLanes);
+    kiln::Tile p_pv = ApplyDropoutToProbabilities(config, tiling, args,
+                                                  row_offset, col_offset, p);
+    kiln::Tile acc = kiln::Dot(p_pv.AsType(dt), v, {.precision = precision});
+    return SoftmaxState{.m = mij, .l = l, .acc = acc};
   }
 
-  next.m = MaximumFOp::create(b, prev->m, mij);
-  Value alpha = Exp2Op::create(b, SubFOp::create(b, prev->m, next.m));
-  Value p = Exp2Op::create(
-      b, SubFOp::create(b, sij, NormalizeLaneDim(b, next.m, kc)));
-  Value tile_sum = ReduceBroadcastLane(b, p, CombiningKind::ADD);
-  next.l = AddFOp::create(b, MulFOp::create(b, alpha, prev->l), tile_sum);
-
-  Value p_for_pv = ApplyDropoutToProbabilities(b, config, tiling, args,
-                                               row_offset, col_offset, p);
-  Value current = CreateMatmul(b, ConvertElementType(b, ity, p_for_pv), v,
-                               MatmulOptions{.precision = config.precision});
-  Value adjustment = MulFOp::create(
-      b, NormalizeLaneDim(b, alpha, config.vo_head_dim), prev->acc);
-  next.acc = AddFOp::create(b, adjustment, current);
-  return next;
+  kiln::Tile m_new = Max(prev->m, mij);
+  kiln::Tile alpha = Exp2(prev->m - m_new);
+  kiln::Tile p = Exp2(s - m_new.Lanes(kc));
+  kiln::Tile l_new = alpha * prev->l + kiln::SumReduce(p, 1).Lanes(kLanes);
+  kiln::Tile p_pv = ApplyDropoutToProbabilities(config, tiling, args,
+                                                row_offset, col_offset, p);
+  kiln::Tile pv = kiln::Dot(p_pv.AsType(dt), v, {.precision = precision});
+  kiln::Tile acc_new = alpha.Lanes(d_vo) * prev->acc + pv;
+  return SoftmaxState{.m = m_new, .l = l_new, .acc = acc_new};
 }
 
-// Normalizes the accumulated output for the query rows starting at
-// `row_offset` and stores it (and optionally the LSE).
-void StoreNormalizedOutput(ImplicitLocOpBuilder& b,
-                           const FlashAttnConfig& config,
-                           const KernelArgs& args, const SoftmaxState& state,
-                           int64_t row_offset) {
-  VectorType l_type = cast<VectorType>(state.l.getType());
-  Value zero_l = ConstantOp::create(b, b.getZeroAttr(l_type));
-  Value is_zero_l = CmpFOp::create(b, CmpFPredicate::OEQ, state.l, zero_l);
-  Value one_l = SplatConstant(b, l_type, 1.0f);
-  Value safe_l = SelectOp::create(b, is_zero_l, one_l, state.l);
-
-  Value li_recip = CreateReciprocal(b, safe_l);
-  Value normalized_output = MulFOp::create(
-      b, state.acc, NormalizeLaneDim(b, li_recip, config.vo_head_dim));
-  StoreTileSlice(b, normalized_output, args.oi_arg, row_offset,
-                 /*col_offset=*/0);
-  if (config.return_lse) {
-    // As LSE is *only* used for the backward pass, we can use the more
-    // efficient log2 instead of log. I.e. this result is actually scaled by
-    // log2(e) of the natural log version of LSE.
-    Value ninf_val = SplatNegInf(b, l_type);
-    Value lse = AddFOp::create(b, state.m, CreateLog2(b, safe_l));
-    lse = SelectOp::create(b, is_zero_l, ninf_val, lse);
-    Value sliced_lse = NormalizeLaneDim(b, lse, 1);
-    Value transposed_lse = vector::TransposeOp::create(b, sliced_lse, {1, 0});
-    // The LSE tile is [1, qt], so the query rows are along the lane dimension.
-    StoreTileSlice(b, transposed_lse, args.lse_arg, /*row_offset=*/0,
-                   /*col_offset=*/row_offset);
-  }
+SoftmaxState LoadSoftmaxState(const KernelArgs& args, int64_t row_offset,
+                              int64_t num_rows) {
+  return SoftmaxState{
+      .m = kiln::Tile(args.m_ref(kiln::Slice(row_offset, num_rows), kiln::all)),
+      .l = kiln::Tile(args.l_ref(kiln::Slice(row_offset, num_rows), kiln::all)),
+      .acc = kiln::Tile(
+          args.acc_ref(kiln::Slice(row_offset, num_rows), kiln::all)),
+  };
 }
 
-// Emits the compute for one grid step.
-//
-// The [qt, kt] grid tile is processed as a static grid of
-// [band_rows, kc] sub-blocks: an outer loop over bands of query rows and an
-// inner loop over KV sub-blocks. Keeping the compute block smaller than the DMA
-// block bounds the size of the softmax intermediates while still amortizing
-// the per grid step overhead over a large DMA block. The online softmax state
-// stays in SSA values across the inner loop; the scratch buffers are only read
-// once and written once per band.
-//
-// `has_padding`: whether the sequence lengths are not tile aligned, in which
-//   case every sub-block is masked.
-// `intersects_causal_diag`: whether this causal tile intersects the diagonal
-//   and so requires causal masking. For square tiles (qt == kt) the query bands
-//   are chosen to match `kc` so that sub-blocks strictly above the diagonal
-//   (fully masked) are skipped entirely and only the sub-blocks on the diagonal
-//   are masked. For non-square tiles every sub-block is masked.
-void EmitGridStep(ImplicitLocOpBuilder& b, const FlashAttnConfig& config,
-                  const Tiling& tiling, const KernelArgs& args,
-                  bool is_single_kv_step, bool has_padding,
+void StoreSoftmaxState(const KernelArgs& args, const SoftmaxState& state,
+                       int64_t row_offset) {
+  const int64_t num_rows = state.acc.dims()[0];
+  args.m_ref(kiln::Slice(row_offset, num_rows), kiln::all) = state.m;
+  args.l_ref(kiln::Slice(row_offset, num_rows), kiln::all) = state.l;
+  args.acc_ref(kiln::Slice(row_offset, num_rows), kiln::all) = state.acc;
+}
+
+// Processes the [qt, kt] grid tile as a static grid of [band_rows, kc]
+// sub-blocks.
+void EmitGridStep(const FlashAttnConfig& config, const Tiling& tiling,
+                  const KernelArgs& args, bool single_kv_step, bool has_padding,
                   bool intersects_causal_diag) {
   const int64_t qt = tiling.qt;
   const int64_t kt = tiling.kt;
   const int64_t kc = tiling.kc;
-  const int64_t num_kv_blocks = kt / kc;
-  // On a square diagonal tile the row and column block indices are equal, so
-  // with band_rows == kc, sub-block (band, kv_block) is fully masked iff
-  // kv_block > band and needs masking iff kv_block == band.
+  const int64_t num_kv_subblocks = kt / kc;
   const bool square_causal_diag_block = intersects_causal_diag && qt == kt &&
                                         !config.sliding_window_size.has_value();
   const int64_t band_rows = square_causal_diag_block ? kc : qt;
@@ -361,257 +192,179 @@ void EmitGridStep(ImplicitLocOpBuilder& b, const FlashAttnConfig& config,
 
   for (int64_t band = 0; band < num_bands; ++band) {
     const int64_t row_offset = band * band_rows;
-    Value q = LoadTileSlice(b, args.q_arg, row_offset, band_rows,
-                            /*col_offset=*/0, config.qk_head_dim);
+    kiln::Tile q(
+        args.q_ref(0, 0, kiln::Slice(row_offset, band_rows), kiln::all));
 
-    std::optional<SoftmaxState> state;
-    if (!is_single_kv_step) {
-      state = SoftmaxState{
-          .m = LoadTileSlice(b, args.mi_arg, row_offset, band_rows, 0, 128),
-          .l = LoadTileSlice(b, args.li_arg, row_offset, band_rows, 0, 128),
-          .acc = LoadTileSlice(b, args.o_scratch_arg, row_offset, band_rows, 0,
-                               config.vo_head_dim),
-      };
-    }
+    std::optional<SoftmaxState> state =
+        single_kv_step
+            ? std::nullopt
+            : std::make_optional(LoadSoftmaxState(args, row_offset, band_rows));
 
-    for (int64_t kv_block = 0; kv_block < num_kv_blocks; ++kv_block) {
-      if (square_causal_diag_block && kv_block > band) {
+    for (int64_t kv_sub = 0; kv_sub < num_kv_subblocks; ++kv_sub) {
+      if (square_causal_diag_block && kv_sub > band) {
         continue;
       }
       const bool apply_causal_mask =
-          square_causal_diag_block ? kv_block == band : intersects_causal_diag;
+          square_causal_diag_block ? kv_sub == band : intersects_causal_diag;
       const bool apply_masking = has_padding || apply_causal_mask;
-      state =
-          UpdateSoftmaxState(b, config, tiling, args, q, row_offset, band_rows,
-                             kv_block * kc, kc, apply_masking, state);
+      state = UpdateSoftmaxState(config, tiling, args, q, row_offset, band_rows,
+                                 kv_sub * kc, apply_masking, state);
     }
 
-    if (is_single_kv_step) {
-      StoreNormalizedOutput(b, config, args, *state, row_offset);
+    if (single_kv_step) {
+      StoreNormalizedOutput(config, args, *state, row_offset);
     } else {
-      StoreTileSlice(b, state->m, args.mi_arg, row_offset, 0);
-      StoreTileSlice(b, state->l, args.li_arg, row_offset, 0);
-      StoreTileSlice(b, state->acc, args.o_scratch_arg, row_offset, 0);
+      StoreSoftmaxState(args, *state, row_offset);
     }
   }
 }
 
-// q [batch_size, num_heads, q_seq_len, d_model]
-// k [batch_size, num_heads, kv_seq_len, d_model]
-// v [batch_size, num_heads, kv_seq_len, d_model]
-func::FuncOp buildModule(ImplicitLocOpBuilder& module_builder,
-                         const FlashAttnConfig& config, const Tiling& tiling) {
-  MLIRContext* context = module_builder.getContext();
-  IntegerType i32 = module_builder.getIntegerType(32);
-  // FlashAttnConfig::element_type is either F32 or BF16.
-  Type ity = getElementType(*context, config.element_type);
-  // The output element type is always F32.
-  FloatType f32 = module_builder.getF32Type();
-  const int64_t qt = tiling.qt;
-  const int64_t kt = tiling.kt;
-  const bool has_dropout = config.dropout_rate > 0.0f;
-
-  SmallVector<int64_t> q_dims = {1, 1, qt, config.qk_head_dim};
-  SmallVector<int64_t> k_dims = {1, 1, kt, config.qk_head_dim};
-  SmallVector<int64_t> v_dims = {1, 1, kt, config.vo_head_dim};
-  SmallVector<int64_t> oi_dims = {1, 1, qt, config.vo_head_dim};
-  SmallVector<int64_t> lse_dims = {1, 1, 1, qt};
-  SmallVector<int64_t> mi_dims = {qt, 128};
-  SmallVector<int64_t> li_dims = {qt, 128};
-
-  // We have 4 iteration indices.
-  SmallVector<Type> inputs(4, i32);
-  AppendScalarPrefetchTypes(context, config, inputs);
-  // Add q, k, v.
-  inputs.insert(inputs.end(), {GetVmemMemRefType(context, q_dims, ity),
-                               GetVmemMemRefType(context, k_dims, ity),
-                               GetVmemMemRefType(context, v_dims, ity)});
-  bool has_mask = config.has_attn_bias;
-  if (has_mask) {
-    SmallVector<int64_t> mask_dims = {1, 1, qt, kt};
-    inputs.push_back(GetVmemMemRefType(context, mask_dims, ity));
-  }
-
-  inputs.push_back(GetVmemMemRefType(context, oi_dims, ity));
-  if (config.return_lse) {
-    inputs.push_back(GetVmemMemRefType(context, lse_dims, f32));
-  }
-  //  Out scratch is always F32.
-  inputs.insert(inputs.end(), {GetVmemMemRefType(context, oi_dims, f32),
-                               GetVmemMemRefType(context, mi_dims, f32),
-                               GetVmemMemRefType(context, li_dims, f32)});
-  func::FuncOp fn =
-      func::FuncOp::create(module_builder, "flash_forward",
-                           module_builder.getFunctionType(inputs, {}));
-  SetTcCoreTypeAttr(fn);
-
-  ImplicitLocOpBuilder fn_builder = ImplicitLocOpBuilder::atBlockBegin(
-      module_builder.getLoc(), fn.addEntryBlock());
-
-  // There are 4 induction variables.
-  unsigned int next_index = 4;
-  KernelArgs args;
-  args.seed_arg = has_dropout ? fn.getArgument(next_index++) : nullptr;
-  args.q_arg = fn.getArgument(next_index++);
-  args.k_arg = fn.getArgument(next_index++);
-  args.v_arg = fn.getArgument(next_index++);
-  args.mask_arg = has_mask ? fn.getArgument(next_index++) : nullptr;
-  args.oi_arg = fn.getArgument(next_index++);
-  args.lse_arg = config.return_lse ? fn.getArgument(next_index++) : nullptr;
-  args.o_scratch_arg = fn.getArgument(next_index++);
-  args.mi_arg = fn.getArgument(next_index++);
-  args.li_arg = fn.getArgument(next_index++);
-  args.batch_idx = fn.getArgument(0);
-  args.head_idx = fn.getArgument(1);
-  args.row_block_idx = fn.getArgument(2);
-  args.col_block_idx = fn.getArgument(3);
-
-  const bool is_single_kv_step =
-      (config.padded_kv_sequence_length == tiling.kt) && !config.is_causal;
-  const bool has_padding =
-      NeedsPadMask(tiling.qt, tiling.kt, config.q_sequence_length,
-                   config.kv_sequence_length);
-
-  ConstantOp zero = ConstantOp::create(fn_builder, fn_builder.getZeroAttr(i32));
-  std::optional<scf::IfOp> causal_if;
-  if (config.is_causal && !config.sliding_window_size.has_value()) {
-    causal_if =
-        CreateCausalIfOp(fn_builder, args.row_block_idx, args.col_block_idx, qt,
-                         kt, config.sliding_window_size);
-    fn_builder.setInsertionPointToStart(causal_if->thenBlock());
-  }
-
-  if (!is_single_kv_step) {
-    IfOp::create(
-        fn_builder,
-        CmpIOp::create(fn_builder, CmpIPredicate::eq, zero, args.col_block_idx),
-        /*thenBuilder=*/
-        [&](OpBuilder& builder, Location loc) -> void {
-          ImplicitLocOpBuilder b(loc, builder);
-          ZeroTile(b, args.o_scratch_arg);
-          ZeroTile(b, args.li_arg);
-          NInfTile(b, args.mi_arg);
-          YieldOp::create(b, loc);
-        });
-  }
-
-  // Scratch accumulators are reused across `row_block_idx` and reset at
-  // `col_block_idx == 0`. With a sliding window, `col_block_idx == 0` can be
-  // outside the window and skipped, so enter `causal_if` after the reset above.
-  if (config.is_causal && config.sliding_window_size.has_value()) {
-    causal_if =
-        CreateCausalIfOp(fn_builder, args.row_block_idx, args.col_block_idx, qt,
-                         kt, config.sliding_window_size);
-    fn_builder.setInsertionPointToStart(causal_if->thenBlock());
-  }
-
-  if (config.is_causal) {
-    // Only tiles that intersect the diagonal need masking; tiles strictly
-    // below it are computed without any masking overhead.
-    Value intersects_diag = CreateIntersectsDiagCondition(
-        fn_builder, args.row_block_idx, args.col_block_idx, qt, kt,
-        config.sliding_window_size);
-    scf::IfOp::create(
-        fn_builder, intersects_diag,
-        [&](OpBuilder& then_builder, Location then_loc) {
-          ImplicitLocOpBuilder then_implicit_b(then_loc, then_builder);
-          EmitGridStep(then_implicit_b, config, tiling, args, is_single_kv_step,
-                       has_padding,
-                       /*intersects_causal_diag=*/true);
-          YieldOp::create(then_implicit_b);
-        },
-        [&](OpBuilder& else_builder, Location else_loc) {
-          ImplicitLocOpBuilder else_implicit_b(else_loc, else_builder);
-          EmitGridStep(else_implicit_b, config, tiling, args, is_single_kv_step,
-                       has_padding,
-                       /*intersects_causal_diag=*/false);
-          YieldOp::create(else_implicit_b);
-        });
-  } else {
-    EmitGridStep(fn_builder, config, tiling, args, is_single_kv_step,
-                 has_padding,
-                 /*intersects_causal_diag=*/false);
-  }
-
-  if (is_single_kv_step) {
-    ReturnOp::create(fn_builder);
-    return fn;
-  }
-
-  if (causal_if.has_value()) {
-    fn_builder.setInsertionPointAfter(*causal_if);
-  }
-
-  Value last_col_idx = ConstantOp::create(
-      fn_builder, fn_builder.getI32IntegerAttr(
-                      (config.padded_kv_sequence_length / tiling.kt) - 1));
-  Value is_last_col = CmpIOp::create(fn_builder, CmpIPredicate::eq,
-                                     args.col_block_idx, last_col_idx);
-  IfOp::create(fn_builder, is_last_col,
-               /*thenBuilder=*/
-               [&](OpBuilder& builder, Location loc) -> void {
-                 ImplicitLocOpBuilder b(loc, builder);
-                 SoftmaxState state{
-                     .m = LoadTile(b, args.mi_arg),
-                     .l = LoadTile(b, args.li_arg),
-                     .acc = LoadTile(b, args.o_scratch_arg),
-                 };
-                 StoreNormalizedOutput(b, config, args, state,
-                                       /*row_offset=*/0);
-                 YieldOp::create(b, loc);
-               });
-
-  ReturnOp::create(fn_builder);
-
-  return fn;
-}
 }  // namespace
 
-absl::StatusOr<OwningOpRef<ModuleOp>> CreateKernel(
-    MLIRContext* context, const FlashAttnConfig& config, const Tiling& tiling) {
-  OpBuilder builder(context);
-  OwningOpRef<ModuleOp> module =
-      ModuleOp::create(builder, builder.getUnknownLoc());
-  ImplicitLocOpBuilder module_builder(module->getLoc(),
-                                      module->getBodyRegion());
-  if (config.padded_q_sequence_length % tiling.qt != 0 ||
-      config.padded_kv_sequence_length % tiling.kt != 0) {
-    return TT_ERROR(::torch_tpu::error::kInvalidArgument)
-           << "Padded sequence lengths must be divisible by tile sizes.";
-  }
-
-  if (config.num_heads % config.kv_num_heads != 0) {
-    return TT_ERROR(::torch_tpu::error::kInvalidArgument)
-           << "num_heads must be divisible by kv_num_heads.";
-  }
-
-  if (config.dropout_rate < 0.0f || config.dropout_rate >= 1.0f) {
-    return TT_ERROR(::torch_tpu::error::kInvalidArgument)
-           << "dropout_rate must be in [0.0, 1.0), got " << config.dropout_rate;
-  }
+absl::StatusOr<kiln::Kernel> CreateKernel(const FlashAttnConfig& config,
+                                          const Tiling& tiling) {
+  TT_RETURN_IF_ERROR(ValidateFlashAttnConfig(config, tiling));
 
   Tiling normalized_tiling = tiling;
   if (normalized_tiling.kc <= 0) {
     normalized_tiling.kc = normalized_tiling.kt;
   }
   if (normalized_tiling.kt % normalized_tiling.kc != 0 ||
-      normalized_tiling.kc % 128 != 0) {
-    return TT_ERROR(::torch_tpu::error::kInvalidArgument)
+      normalized_tiling.kc % kLanes != 0) {
+    return TT_ERROR(error::kInvalidArgument)
            << "KV compute tile size must be a multiple of 128 that divides "
               "the KV tile size.";
   }
 
-  auto fn = buildModule(module_builder, config, normalized_tiling);
+  const int64_t qt = normalized_tiling.qt;
+  const int64_t kt = normalized_tiling.kt;
+  const int64_t d_qk = config.qk_head_dim;
+  const int64_t d_vo = config.vo_head_dim;
+  const int64_t num_q_blocks = config.padded_q_sequence_length / qt;
+  const int64_t num_kv_blocks = config.padded_kv_sequence_length / kt;
+  const bool single_kv_step = num_kv_blocks == 1 && !config.is_causal;
+  const bool has_padding = NeedsPadMask(config, normalized_tiling);
+  kiln::DType dt = ToKilnDType(config.element_type);
 
-  absl::InlinedVector<int64_t, 4> q_shape = {
-      config.batch_size, config.num_heads, config.q_sequence_length,
-      config.qk_head_dim};
+  // ---------------------------------------------------------------------------
+  // Grid & block specs.
+  // ---------------------------------------------------------------------------
+  kiln::GridSpec grid{
+      .name = "flash_forward",
+      .grid = {config.batch_size, config.num_heads, num_q_blocks,
+               num_kv_blocks},
+      .dimension_semantics = {kiln::DimensionSemantics::kParallel,
+                              kiln::DimensionSemantics::kParallel,
+                              kiln::DimensionSemantics::kParallel,
+                              kiln::DimensionSemantics::kArbitrary},
+  };
 
-  SetKernelAttributes(q_shape, config, normalized_tiling, fn, builder);
+  kiln::IndexMap q_map(QBlockIndexMap);
+  kiln::IndexMap kv_map = KvBlockIndexMap(config, normalized_tiling);
 
-  ABSL_VLOG(1) << "Forward kernel:\n" << GetOpString(module.get());
+  std::optional<kiln::OutSpec> lse_spec;
+  if (config.return_lse) {
+    lse_spec =
+        kiln::OutSpec{kiln::f32(1, 1, 1, qt), kiln::IndexMap(LseBlockIndexMap)};
+  }
 
-  return module;
+  // ---------------------------------------------------------------------------
+  // Kernel body.
+  // ---------------------------------------------------------------------------
+  TT_ASSIGN_OR_RETURN(
+      kiln::Kernel kernel,
+      kiln::CreateKernel(
+          grid, DropoutSeedSpec(config),
+          kiln::InSpec{dt(1, 1, qt, d_qk), q_map},
+          kiln::InSpec{dt(1, 1, kt, d_qk), kv_map},
+          kiln::InSpec{dt(1, 1, kt, d_vo), kv_map},
+          AttnBiasSpec(config, normalized_tiling, dt),
+          kiln::OutSpec{dt(1, 1, qt, d_vo), q_map}, lse_spec,
+          kiln::ScratchSpec{kiln::f32(qt, d_vo)},
+          kiln::ScratchSpec{kiln::f32(qt, kLanes)},
+          kiln::ScratchSpec{kiln::f32(qt, kLanes)},
+          [&](std::optional<kiln::Ref> seed_ref, kiln::Ref q_ref,
+              kiln::Ref k_ref, kiln::Ref v_ref,
+              std::optional<kiln::Ref> bias_ref, kiln::Ref o_ref,
+              std::optional<kiln::Ref> lse_ref, kiln::Ref acc_ref,
+              kiln::Ref m_ref, kiln::Ref l_ref) {
+            KernelArgs args{
+                .seed_ref = seed_ref,
+                .q_ref = q_ref,
+                .k_ref = k_ref,
+                .v_ref = v_ref,
+                .bias_ref = bias_ref,
+                .o_ref = o_ref,
+                .lse_ref = lse_ref,
+                .acc_ref = acc_ref,
+                .m_ref = m_ref,
+                .l_ref = l_ref,
+                .qi = kiln::ProgramId(2),
+                .ki = kiln::ProgramId(3),
+            };
+
+            auto emit_causal_step = [&] {
+              kiln::If(
+                  IntersectsDiagonal(args.qi, args.ki, config,
+                                     normalized_tiling),
+                  [&] {
+                    EmitGridStep(config, normalized_tiling, args,
+                                 single_kv_step, has_padding,
+                                 /*intersects_causal_diag=*/true);
+                  },
+                  [&] {
+                    EmitGridStep(config, normalized_tiling, args,
+                                 single_kv_step, has_padding,
+                                 /*intersects_causal_diag=*/false);
+                  });
+            };
+
+            if (config.is_causal && !config.sliding_window_size.has_value()) {
+              kiln::If(BelowOrOnDiagonal(args.qi, args.ki, config,
+                                         normalized_tiling),
+                       [&] {
+                         if (!single_kv_step) {
+                           kiln::If(args.ki == 0, [&] {
+                             InitSoftmaxScratch(config, normalized_tiling,
+                                                args);
+                           });
+                         }
+                         emit_causal_step();
+                       });
+            } else {
+              // Scratch accumulators are reused across `qi` and reset at
+              // `ki == 0`. With a sliding window, `ki == 0` can be outside the
+              // window and skipped, so reset before the causal guard.
+              if (!single_kv_step) {
+                kiln::If(args.ki == 0, [&] {
+                  InitSoftmaxScratch(config, normalized_tiling, args);
+                });
+              }
+              if (config.is_causal) {
+                kiln::If(BelowOrOnDiagonal(args.qi, args.ki, config,
+                                           normalized_tiling),
+                         emit_causal_step);
+              } else {
+                EmitGridStep(config, normalized_tiling, args, single_kv_step,
+                             has_padding, /*intersects_causal_diag=*/false);
+              }
+            }
+
+            if (!single_kv_step) {
+              kiln::If(args.ki == num_kv_blocks - 1, [&] {
+                StoreNormalizedOutput(config, args,
+                                      SoftmaxState{
+                                          .m = kiln::Tile(args.m_ref),
+                                          .l = kiln::Tile(args.l_ref),
+                                          .acc = kiln::Tile(args.acc_ref),
+                                      },
+                                      /*row_offset=*/0);
+              });
+            }
+          }));
+
+  ABSL_VLOG(1) << "Forward kernel:\n" << kiln::ToString(kernel);
+  return kernel;
 }
 
-}  // namespace mlir::torch_tpu
+}  // namespace torch_tpu

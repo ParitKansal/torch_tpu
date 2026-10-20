@@ -30,7 +30,6 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "c10/core/SymIntArrayRef.h"
-#include "csrc/common/aten_utils.h"
 #include "csrc/common/cache_key.h"
 #include "csrc/common/dimension_types.h"
 #include "csrc/common/dtype.h"
@@ -39,6 +38,7 @@
 #include "csrc/common/to_string.h"
 #include "csrc/common/utils.h"
 #include "csrc/eager/device_buffer.h"
+#include "csrc/eager/device_buffer_utils.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/tensor_to_buffer.h"
 #include "csrc/ops/macros/kernel.h"
@@ -701,39 +701,89 @@ at::Tensor AtenAdaptiveAvgPool2d(const at::Tensor& self,
   });
 }
 
+namespace {
+
+absl::StatusOr<Dimensions> ValidateAdaptiveAvgPool3dOutputSize(
+    c10::SymIntArrayRef output_size) {
+  TT_RET_CHECK(output_size.size() == 1 || output_size.size() == 3,
+               error::kInvalidArgument)
+      << "expected output_size to have 1 or 3 elements, got "
+      << output_size.size();
+  const int64_t out_d = output_size[0].expect_int();
+  const int64_t out_h =
+      output_size.size() == 3 ? output_size[1].expect_int() : out_d;
+  const int64_t out_w =
+      output_size.size() == 3 ? output_size[2].expect_int() : out_d;
+  TT_RET_CHECK(out_d >= 0 && out_h >= 0 && out_w >= 0, error::kInvalidArgument)
+      << "expected output_size elements to be non-negative, got [" << out_d
+      << ", " << out_h << ", " << out_w << "]";
+  return Dimensions{out_d, out_h, out_w};
+}
+
+absl::Status ValidateAdaptiveAvgPool3dInputs(const at::Tensor& self) {
+  const int64_t spatial_dim_count = 3;
+  const int64_t num_dims = self.dim();
+  TT_RET_CHECK(
+      num_dims == spatial_dim_count + 1 || num_dims == spatial_dim_count + 2,
+      error::kInvalidArgument)
+      << "expected input to be a " << spatial_dim_count + 1 << "-D or "
+      << spatial_dim_count + 2 << "-D tensor, got " << num_dims << "-D tensor";
+
+  for (int64_t i = 1; i < num_dims; ++i) {
+    TT_RET_CHECK(self.size(i) > 0, error::kInvalidArgument)
+        << "expected input to have non-zero size for non-batch dimensions, got "
+        << self.sizes() << " with dimension " << i << " being empty";
+  }
+
+  return absl::OkStatus();
+}
+
+absl::Status ValidateAdaptiveAvgPool3dBackwardGradOutput(
+    const at::Tensor& grad_output, const at::Tensor& self) {
+  TT_RET_CHECK(grad_output.dim() == self.dim(), error::kInvalidArgument)
+      << "expected grad_output to have " << self.dim() << " dimensions, got "
+      << grad_output.dim();
+  for (int64_t i = 1; i < grad_output.dim(); ++i) {
+    TT_RET_CHECK(grad_output.size(i) > 0, error::kInvalidArgument)
+        << "expected grad_output to have non-zero size for non-batch "
+           "dimensions, got "
+        << grad_output.sizes() << " with dimension " << i << " being empty";
+  }
+  return absl::OkStatus();
+}
+
+}  // namespace
+
 at::Tensor& AtenAdaptiveAvgPool3dOut(const at::Tensor& self,
                                      c10::SymIntArrayRef output_size,
                                      at::Tensor& out) {
   TT_KERNEL(
       OpName::kAdaptiveAvgPool3dOut, param_keys, (self, output_size, out), {
+        TT_ASSIGN_OR_THROW(const Dimensions out_spatial,
+                           ValidateAdaptiveAvgPool3dOutputSize(output_size));
+        TT_THROW_IF_ERROR(ValidateAdaptiveAvgPool3dInputs(self));
+
         const int64_t spatial_dim_count = 3;
-        auto num_dims = self.dim();
+        const int64_t num_dims = self.dim();
+        const int64_t out_d = out_spatial[0];
+        const int64_t out_h = out_spatial[1];
+        const int64_t out_w = out_spatial[2];
 
-        TT_CHECK_THROW(num_dims == spatial_dim_count + 1 ||
-                           num_dims == spatial_dim_count + 2,
-                       error::kInvalidArgument)
-            << "expected input to be a " << spatial_dim_count + 1 << "-D or "
-            << spatial_dim_count + 2 << "-D tensor, got " << num_dims
-            << "-D tensor";
-
-        // The output size is either a single integer or a triple-integer tuple
-        const int64_t out_d = output_size[0].expect_int();
-        int64_t out_h = out_d;
-        int64_t out_w = out_d;
-        if (output_size.size() > 1) {
-          out_h = output_size[1].expect_int();
-          out_w = output_size[2].expect_int();
-        }
-
-        SmallInt64Vector expected_out_shape = CopyIntVector(self.sizes());
+        Dimensions expected_out_shape = CopyIntVector(self.sizes());
         expected_out_shape[num_dims - 3] = out_d;
         expected_out_shape[num_dims - 2] = out_h;
         expected_out_shape[num_dims - 1] = out_w;
-        if (out.sizes() != expected_out_shape) {
-          AtenResize_(out, expected_out_shape, std::nullopt);
-        }
 
-        if (out.numel() == 0) {
+        TT_ASSIGN_OR_THROW(const auto output_dtype,
+                           ConvertTo<mlir::ElementType>(out.scalar_type()));
+
+        if (out_d == 0 || out_h == 0 || out_w == 0 || self.numel() == 0) {
+          TT_ASSIGN_OR_THROW(
+              DeviceBufferRef zero_buf,
+              CreateZeroSizeDeviceBufferRef(expected_out_shape, output_dtype));
+          TT_THROW_IF_ERROR(
+              ResizeTensorIfShapeDiffers(out, expected_out_shape));
+          TT_THROW_IF_ERROR(AssignBufferToAtTensor(std::move(zero_buf), out));
           return out;
         }
 
@@ -749,8 +799,7 @@ at::Tensor& AtenAdaptiveAvgPool3dOut(const at::Tensor& self,
                "int16, int32, int64, complex64), got "
             << torch_tpu::ToString(self.scalar_type());
 
-        TT_ASSIGN_OR_THROW(const auto output_dtype,
-                           ConvertTo<mlir::ElementType>(out.scalar_type()));
+        TT_THROW_IF_ERROR(ResizeTensorIfShapeDiffers(out, expected_out_shape));
 
         const int64_t in_d = self.size(num_dims - 3);
         const int64_t in_h = self.size(num_dims - 2);
@@ -766,16 +815,16 @@ at::Tensor& AtenAdaptiveAvgPool3dOut(const at::Tensor& self,
         ABSL_CHECK_OK(  // CRASH_OK
             param_keys.SetParam("std_avg_pool", use_std_avg_pool));
         if (use_std_avg_pool) {
-          auto stride_d = in_d / out_d;
-          auto stride_h = in_h / out_h;
-          auto stride_w = in_w / out_w;
-          auto kernel_d = in_d - (out_d - 1) * stride_d;
-          auto kernel_h = in_h - (out_h - 1) * stride_h;
-          auto kernel_w = in_w - (out_w - 1) * stride_w;
+          const int64_t stride_d = in_d / out_d;
+          const int64_t stride_h = in_h / out_h;
+          const int64_t stride_w = in_w / out_w;
+          const int64_t kernel_d = in_d - (out_d - 1) * stride_d;
+          const int64_t kernel_h = in_h - (out_h - 1) * stride_h;
+          const int64_t kernel_w = in_w - (out_w - 1) * stride_w;
 
-          Dimensions kernel_size = {kernel_d, kernel_h, kernel_w};
-          Dimensions stride = {stride_d, stride_h, stride_w};
-          Dimensions padding = {0, 0, 0};
+          const Dimensions kernel_size = {kernel_d, kernel_h, kernel_w};
+          const Dimensions stride = {stride_d, stride_h, stride_w};
+          const Dimensions padding = {0, 0, 0};
 
           TT_ASSIGN_OR_THROW(
               auto result,
@@ -808,40 +857,26 @@ at::Tensor& AtenAdaptiveAvgPool3dOut(const at::Tensor& self,
 
 at::Tensor AtenAdaptiveAvgPool3d(const at::Tensor& self,
                                  c10::SymIntArrayRef output_size) {
-  TT_KERNEL(OpName::kAdaptiveAvgPool3d, _,
-            (self, IgnoreInCacheKey(output_size,
-                                    "Delegates to AtenAdaptiveAvgPool3dOut")),
-            {
-              const int64_t spatial_dim_count = 3;
-              auto num_dims = self.dim();
+  TT_KERNEL(
+      OpName::kAdaptiveAvgPool3d, _,
+      (self,
+       IgnoreInCacheKey(output_size, "Delegates to AtenAdaptiveAvgPool3dOut")),
+      {
+        TT_ASSIGN_OR_THROW(const Dimensions out_spatial,
+                           ValidateAdaptiveAvgPool3dOutputSize(output_size));
+        TT_THROW_IF_ERROR(ValidateAdaptiveAvgPool3dInputs(self));
 
-              TT_CHECK_THROW(num_dims == spatial_dim_count + 1 ||
-                                 num_dims == spatial_dim_count + 2,
-                             error::kInvalidArgument)
-                  << "expected input to be a " << spatial_dim_count + 1
-                  << "-D or " << spatial_dim_count + 2 << "-D tensor, got "
-                  << num_dims << "-D tensor";
+        const int64_t num_dims = self.dim();
+        auto out_shape = CopyIntVector(self.sizes());
+        out_shape[num_dims - 3] = out_spatial[0];
+        out_shape[num_dims - 2] = out_spatial[1];
+        out_shape[num_dims - 1] = out_spatial[2];
 
-              // The output size is either a single integer or a triple-integer
-              // tuple
-              const int64_t out_d = output_size[0].expect_int();
-              int64_t out_h = out_d;
-              int64_t out_w = out_d;
-              if (output_size.size() > 1) {
-                out_h = output_size[1].expect_int();
-                out_w = output_size[2].expect_int();
-              }
+        at::Tensor out = at::empty(out_shape, self.options());
 
-              auto out_shape = CopyIntVector(self.sizes());
-              out_shape[num_dims - 3] = out_d;
-              out_shape[num_dims - 2] = out_h;
-              out_shape[num_dims - 1] = out_w;
-
-              at::Tensor out = at::empty(out_shape, self.options());
-
-              AtenAdaptiveAvgPool3dOut(self, output_size, out);
-              return out;
-            });
+        AtenAdaptiveAvgPool3dOut(self, output_size, out);
+        return out;
+      });
 }
 
 at::Tensor AtenAdaptiveAvgPool2dBackward(const at::Tensor& grad_output,
@@ -910,8 +945,26 @@ at::Tensor& AtenAdaptiveAvgPool3dBackwardGradInput(
   TT_KERNEL(
       OpName::kAdaptiveAvgPool3dBackwardGradInput, param_keys,
       (grad_output, self, grad_input), {
+        TT_THROW_IF_ERROR(ValidateAdaptiveAvgPool3dInputs(self));
+        TT_THROW_IF_ERROR(
+            ValidateAdaptiveAvgPool3dBackwardGradOutput(grad_output, self));
+
+        TT_ASSIGN_OR_THROW(
+            const auto output_dtype,
+            ConvertTo<mlir::ElementType>(grad_input.scalar_type()));
+        if (self.numel() == 0) {
+          const Dimensions out_dims = CopyIntVector(self.sizes());
+          TT_ASSIGN_OR_THROW(
+              DeviceBufferRef zero_buf,
+              CreateZeroSizeDeviceBufferRef(out_dims, output_dtype));
+          TT_THROW_IF_ERROR(ResizeTensorIfShapeDiffers(grad_input, out_dims));
+          TT_THROW_IF_ERROR(
+              AssignBufferToAtTensor(std::move(zero_buf), grad_input));
+          return grad_input;
+        }
+
         const int64_t spatial_dim_count = 3;
-        const auto num_dims = self.dim();
+        const int64_t num_dims = self.dim();
         const int64_t in_d = self.size(num_dims - 3);
         const int64_t in_h = self.size(num_dims - 2);
         const int64_t in_w = self.size(num_dims - 1);
@@ -925,16 +978,16 @@ at::Tensor& AtenAdaptiveAvgPool3dBackwardGradInput(
         TT_THROW_IF_ERROR(
             param_keys.SetParam("std_avg_pool", use_std_avg_pool));
         if (use_std_avg_pool) {
-          auto stride_d = in_d / out_d;
-          auto stride_h = in_h / out_h;
-          auto stride_w = in_w / out_w;
-          auto kernel_d = in_d - (out_d - 1) * stride_d;
-          auto kernel_h = in_h - (out_h - 1) * stride_h;
-          auto kernel_w = in_w - (out_w - 1) * stride_w;
+          const int64_t stride_d = in_d / out_d;
+          const int64_t stride_h = in_h / out_h;
+          const int64_t stride_w = in_w / out_w;
+          const int64_t kernel_d = in_d - (out_d - 1) * stride_d;
+          const int64_t kernel_h = in_h - (out_h - 1) * stride_h;
+          const int64_t kernel_w = in_w - (out_w - 1) * stride_w;
 
-          Dimensions kernel_size = {kernel_d, kernel_h, kernel_w};
-          Dimensions stride = {stride_d, stride_h, stride_w};
-          Dimensions padding = {0, 0, 0};
+          const Dimensions kernel_size = {kernel_d, kernel_h, kernel_w};
+          const Dimensions stride = {stride_d, stride_h, stride_w};
+          const Dimensions padding = {0, 0, 0};
 
           TT_ASSIGN_OR_THROW(
               auto result, BuildAvgPoolBackwardGradInputNd(
@@ -944,10 +997,6 @@ at::Tensor& AtenAdaptiveAvgPool3dBackwardGradInput(
                                spatial_dim_count, std::move(param_keys)));
           return grad_input;
         }
-
-        TT_ASSIGN_OR_THROW(
-            const auto output_dtype,
-            ConvertTo<mlir::ElementType>(grad_input.scalar_type()));
 
         auto op_builder = [](FixedSizeSpan<mlir::MlirOp, 2> inputs)
             -> absl::StatusOr<mlir::MlirOp> {
@@ -969,6 +1018,9 @@ at::Tensor& AtenAdaptiveAvgPool3dBackwardGradInput(
 at::Tensor AtenAdaptiveAvgPool3dBackward(const at::Tensor& grad_output,
                                          const at::Tensor& self) {
   TT_KERNEL(OpName::kAdaptiveAvgPool3dBackward, _, (grad_output, self), {
+    TT_THROW_IF_ERROR(ValidateAdaptiveAvgPool3dInputs(self));
+    TT_THROW_IF_ERROR(
+        ValidateAdaptiveAvgPool3dBackwardGradOutput(grad_output, self));
     auto grad_input = at::empty(self.sizes(), self.options());
     AtenAdaptiveAvgPool3dBackwardGradInput(grad_output, self, grad_input);
     return grad_input;

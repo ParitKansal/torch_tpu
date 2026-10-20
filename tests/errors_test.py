@@ -8945,6 +8945,76 @@ Device-side assertion tracking was not enabled by user.""",
     ):
       torch.ops.aten.adaptive_avg_pool2d.out(inp, tuple(out.shape), out=out)
 
+  def test_adaptive_avg_pool2d_empty_spatial_dim(self):
+    inp_empty_h = torch.ones(1, 0, 4, device=et.device())
+    inp_empty_w = torch.ones(1, 4, 0, device=et.device())
+    out = torch.empty(1, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d(): expected input to have non-zero size for non-batch dimensions, got [1, 0, 4] with dimension 1 being empty""",
+        gpu="""adaptive_avg_pool2d(): Expected input to have non-zero size for non-batch dimensions, but input has sizes [1, 0, 4] with dimension 1 being empty""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool2d.out(inp_empty_h, [2, 2], out=out)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d(): expected input to have non-zero size for non-batch dimensions, got [1, 4, 0] with dimension 2 being empty""",
+        gpu="""adaptive_avg_pool2d(): Expected input to have non-zero size for non-batch dimensions, but input has sizes [1, 4, 0] with dimension 2 being empty""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool2d.out(inp_empty_w, [2, 2], out=out)
+
+  def test_adaptive_avg_pool2d_invalid_output_size(self):
+    inp = torch.ones(1, 1, 4, 4, device=et.device())
+    out = torch.empty(1, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d(): expected output_size to have 1 or 2 elements, got 0""",
+        gpu="""adaptive_avg_pool2d: output_size must be 2""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool2d.out(inp, [], out=out)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d(): expected output_size to have 1 or 2 elements, got 3""",
+        gpu="""adaptive_avg_pool2d: output_size must be 2""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool2d.out(inp, [1, 2, 3], out=out)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d(): expected output_size elements to be non-negative, got [-1, 2]""",
+        gpu="""numel: integer multiplication overflow""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool2d.out(inp, [-1, 2], out=out)
+
+  def test_adaptive_avg_pool2d_backward_invalid_grad_output(self):
+    inp = torch.ones(2, 3, 4, 4, device=et.device())
+    grad_empty = torch.ones(2, 3, 0, 0, device=et.device())
+    grad_3d = torch.ones(3, 2, 2, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d_backward(): expected grad_output to have non-zero size for non-batch dimensions, got [2, 3, 0, 0] with dimension 2 being empty""",
+        gpu="""adaptive_avg_pool2d_backward(): Expected grad_output to have non-zero size for non-batch dimensions, but grad_output has sizes [2, 3, 0, 0] with dimension 2 being empty""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._adaptive_avg_pool2d_backward(grad_empty, inp)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d_backward(): expected grad_output to have 4 dimensions, got 3""",
+        gpu="""adaptive_avg_pool2d_backward_out_cuda_template: Expected dimensions 4 for `gradOutput_` but got dimensions 3""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._adaptive_avg_pool2d_backward(grad_3d, inp)
+
   def test_adaptive_avg_pool3d_invalid_rank(self):
     inp = torch.ones(10, 10, 10, device=et.device())
     out = torch.empty(5, 5, 5, device=et.device())

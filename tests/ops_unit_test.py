@@ -22473,6 +22473,54 @@ class OpTestingFrameworkTest(op_testing.OpInfoTestBase):
             torch.sum(x_cpu.to(torch.int64)).item(),
         )
 
+  def test_addcdiv_mixed_dtypes(self):
+    with self.subTest("int32_self_float32_tensors"):
+
+      def compute_int_float(device):
+        s = torch.tensor([1, 2], dtype=torch.int32, device=device)
+        t1 = torch.tensor([3.0, 5.0], dtype=torch.float32, device=device)
+        t2 = torch.tensor([2.0, 2.0], dtype=torch.float32, device=device)
+        out = torch.empty(2, dtype=torch.float32, device=device)
+        res_func = torch.addcdiv(s, t1, t2, value=2.5)
+        torch.addcdiv(s, t1, t2, value=2.5, out=out)
+        return res_func, out
+
+      self.assert_close_tpu_vs_cpu(compute_int_float)
+
+    with self.subTest("float32_self_float64_tensors"):
+
+      def compute_f32_f64(device):
+        s = torch.tensor(
+            [-16777216.0, -33554432.0], dtype=torch.float32, device=device
+        )
+        t1 = torch.tensor(
+            [16777217.0, 67108866.0], dtype=torch.float64, device=device
+        )
+        t2 = torch.tensor([1.0, 2.0], dtype=torch.float64, device=device)
+        out_f32 = torch.empty(2, dtype=torch.float32, device=device)
+        res_func = torch.addcdiv(s, t1, t2)
+        torch.addcdiv(s, t1, t2, out=out_f32)
+        return res_func, out_f32
+
+      self.assert_close_tpu_vs_cpu(compute_f32_f64)
+
+    with self.subTest("float32_self_complex64_tensors"):
+
+      def compute_f32_c64(device):
+        s = torch.tensor([1.0, 2.0], dtype=torch.float32, device=device)
+        t1 = torch.tensor(
+            [2.0 + 4.0j, 6.0 - 2.0j], dtype=torch.complex64, device=device
+        )
+        t2 = torch.tensor(
+            [1.0 + 1.0j, 2.0 + 0.0j], dtype=torch.complex64, device=device
+        )
+        out = torch.empty(2, dtype=torch.complex64, device=device)
+        res_func = torch.addcdiv(s, t1, t2, value=1.0 + 2.0j)
+        torch.addcdiv(s, t1, t2, value=1.0 + 2.0j, out=out)
+        return res_func, out
+
+      self.assert_close_tpu_vs_cpu(compute_f32_c64)
+
 
 if __name__ == "__main__":
   absltest.main()

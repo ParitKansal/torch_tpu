@@ -16360,6 +16360,94 @@ class UpsampleBilinear2dAaErrorTest(et.ErrorTestBase):
           t, [10, 10], False, None, None, out=out
       )
 
+  def test_addcdiv_errors(self):
+    with self.subTest("out_on_cpu"):
+      s = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      out = torch.empty(2, 2, device="cpu", dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): expected out tensor to be on tpu, got cpu""",
+          gpu="""Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=out)
+
+    with self.subTest("out_dtype_mismatch"):
+      s = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      out = torch.empty(2, 2, device=et.device(), dtype=torch.int32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): result type float32 can't be cast to the desired output type int32""",
+          gpu="""result type Float can't be cast to the desired output type Int""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=out)
+
+    with self.subTest("integral_tensor1_and_tensor2"):
+      s = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 2, device=et.device(), dtype=torch.int32)
+      t2 = torch.ones(2, 2, device=et.device(), dtype=torch.int32)
+      out = torch.empty(2, 2, device=et.device(), dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): integer division with addcdiv is no longer supported; use (input + value * torch.trunc(tensor1 / tensor2)).to(input.dtype) for integer inputs and (input + value * tensor1 / tensor2) for float inputs""",
+          gpu="""Integer division with addcdiv is no longer supported, and in a future  release addcdiv will perform a true division of tensor1 and tensor2. The historic addcdiv behavior can be implemented as (input + value * torch.trunc(tensor1 / tensor2)).to(input.dtype) for integer inputs and as (input + value * tensor1 / tensor2) for float inputs. The future addcdiv behavior is just the latter implementation: (input + value * tensor1 / tensor2), for all dtypes.""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=out)
+
+    with self.subTest("inplace_broadcast_self"):
+      s = torch.ones(2, 1, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): output with shape [2, 3] doesn't match the broadcast shape of the tensor being operated on in-place, which has shape [2, 1]""",
+          gpu="""output with shape [2, 1] doesn't match the broadcast shape [2, 3]""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=s)
+
+    with self.subTest("inplace_broadcast_tensor1"):
+      s = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(1, 3, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): output with shape [2, 3] doesn't match the broadcast shape of the tensor being operated on in-place, which has shape [1, 3]""",
+          gpu="""output with shape [1, 3] doesn't match the broadcast shape [2, 3]""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=t1)
+
+    with self.subTest("inplace_broadcast_tensor2"):
+      s = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(1, 3, device=et.device(), dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): output with shape [2, 3] doesn't match the broadcast shape of the tensor being operated on in-place, which has shape [1, 3]""",
+          gpu="""output with shape [1, 3] doesn't match the broadcast shape [2, 3]""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=t2)
+
+    with self.subTest("value_overflow"):
+      s = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): value cannot be converted to type float32 without overflow""",
+          gpu="""value cannot be converted to type float without overflow""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, value=1e40)
+
 
 if __name__ == "__main__":
   multiprocessing.handle_test_main(absltest.main)

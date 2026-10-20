@@ -1589,17 +1589,15 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
     self.assertEqual(out0.shape, ())
     utils.assert_close(out0.cpu(), torch.tensor(2.5, dtype=torch.float64))
 
-    # 0-D scalar integer tensor test (matching PyTorch CUDA behavior)
+    # 0-D scalar integer tensor test: aten._logcumsumexp.out supports 0-D,
+    # whereas the public torch.logcumsumexp composite rejects integer dtypes
+    # (tested in errors_test.py).
     x_int = torch.tensor(5, dtype=torch.int32, device=device)
     out_int = torch.empty((), dtype=torch.int32, device=device)
     torch.ops.aten._logcumsumexp.out(x_int, 0, out=out_int)
     self.assertEqual(out_int.dtype, torch.int32)
     self.assertEqual(out_int.shape, ())
     utils.assert_close(out_int.cpu(), torch.tensor(5, dtype=torch.int32))
-
-    res_int = torch.logcumsumexp(x_int, 0)
-    self.assertEqual(res_int.dtype, torch.int32)
-    utils.assert_close(res_int.cpu(), torch.tensor(5, dtype=torch.int32))
 
     # Empty tensor test with shape resizing
     xe = torch.empty(0, 4, dtype=torch.float32, device=device)

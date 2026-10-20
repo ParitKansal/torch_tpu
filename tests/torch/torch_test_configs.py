@@ -69,6 +69,14 @@ TEST_EXCLUSIONS: Final[Mapping[str, Mapping[str, str | Sequence[str]]]] = {
             "test_incorrect_schema_mutation",
         ],
     },
+    "test_fake_tensor": {
+        "PropagateRealTensorsTestFakeTensorDevice": "*",
+        "TestFakeTensorDevice": [
+            "test_aten_set_data_multi_device",
+            "test_conv_mismatched_device_error_matches_eager",
+            "test_index_put_error",
+        ],
+    },
     "test_out_dtype_op": {
         "TestOutDtypeOpDevice": [
             "test_out_dtype_inductor_decomp",

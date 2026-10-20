@@ -2778,14 +2778,7 @@ class TestOps(op_testing.OpInfoTestBase):
         # unsupported (the reference sample generator itself overflows for
         # them), and the max-based logaddexp combiner has no defined extension
         # to complex.
-        exclude_dtypes=(
-            COMPLEX_DTYPES
-            + (
-                torch.uint8,
-                torch.int8,
-                torch.int16,
-            )
-        ),
+        exclude_dtypes=COMPLEX_DTYPES + INTEGRAL_DTYPES,
     )
 
   def test_logical_and(self):

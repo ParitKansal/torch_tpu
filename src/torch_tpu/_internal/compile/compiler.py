@@ -564,10 +564,9 @@ class StaticCompiler(Compiler):
     graph_transform_observer.GraphTransformObserver(
         graph_module, "mark_embedded_constants"
     ).apply_graph_pass(mark_embedded_constants.apply)
-    if not is_fwd:
-      graph_transform_observer.GraphTransformObserver(
-          graph_module, "mark_activation_checkpoints"
-      ).apply_graph_pass(mark_activation_checkpoints.apply)
+    graph_transform_observer.GraphTransformObserver(
+        graph_module, "mark_activation_checkpoints"
+    ).apply_graph_pass(mark_activation_checkpoints.apply)
 
     graph_module.graph.lint()
     graph_module.recompile()

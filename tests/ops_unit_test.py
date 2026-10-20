@@ -1746,6 +1746,48 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
       self.assertEqual(out_tpu.dtype, torch.int64)
       utils.assert_close(out_tpu.cpu(), out_cpu)
 
+  def test_addcmul_mixed_dtypes(self):
+    device = torch.device("tpu")
+    # 1. int32 / bool self with float32 tensor1/tensor2
+    s_i32 = torch.ones(2, dtype=torch.int32, device=device)
+    t1_f32 = torch.full((2,), 2.0, dtype=torch.float32, device=device)
+    t2_f32 = torch.full((2,), 3.0, dtype=torch.float32, device=device)
+    res_i32 = torch.addcmul(s_i32, t1_f32, t2_f32)
+    self.assertEqual(res_i32.dtype, torch.float32)
+    utils.assert_close(
+        res_i32.cpu(), torch.tensor([7.0, 7.0], dtype=torch.float32)
+    )
+
+    s_bool = torch.ones(2, dtype=torch.bool, device=device)
+    res_bool = torch.addcmul(s_bool, t1_f32, t2_f32)
+    self.assertEqual(res_bool.dtype, torch.float32)
+    utils.assert_close(
+        res_bool.cpu(), torch.tensor([7.0, 7.0], dtype=torch.float32)
+    )
+
+    # 2. float32 self with float64 tensor1/tensor2 (retaining float64 precision)
+    s_f32 = torch.tensor(
+        [-16777216.0, -33554432.0], dtype=torch.float32, device=device
+    )
+    t1_f64 = torch.tensor(
+        [16777217.0, 33554433.0], dtype=torch.float64, device=device
+    )
+    t2_f64 = torch.ones(2, dtype=torch.float64, device=device)
+    res_f64 = torch.addcmul(s_f32, t1_f64, t2_f64)
+    self.assertEqual(res_f64.dtype, torch.float64)
+    utils.assert_close(
+        res_f64.cpu(), torch.tensor([1.0, 1.0], dtype=torch.float64)
+    )
+
+    # 3. int8 self with int32 tensor1/tensor2 (100 * 100 = 10000 in int32)
+    s_i8 = torch.zeros(2, dtype=torch.int8, device=device)
+    t_i32 = torch.full((2,), 100, dtype=torch.int32, device=device)
+    res_i8_i32 = torch.addcmul(s_i8, t_i32, t_i32)
+    self.assertEqual(res_i8_i32.dtype, torch.int32)
+    utils.assert_close(
+        res_i8_i32.cpu(), torch.tensor([10000, 10000], dtype=torch.int32)
+    )
+
   def test_binary_arithmetic_out_upcast(self):
     device = torch.device("tpu")
     a = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32, device=device)

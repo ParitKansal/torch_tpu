@@ -2684,6 +2684,80 @@ Device-side assertion tracking was not enabled by user.""",
     ):
       torch.addcmul(self_tensor, tensor1, tensor2, value=value)
 
+    out_b = torch.empty((5, 5), dtype=torch.bool, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu=""""addcmul_cuda" not implemented for 'Bool'""",
+        tpu="""addcmul(): expected no input tensor dtype to be bool, got input: bool, tensor1: bool, tensor2: bool""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(self_tensor, tensor1, tensor2, value=True, out=out_b)
+
+  def test_addcmul_out_dtype_error(self):
+    s = torch.full((2,), 1.25, dtype=torch.float32, device=et.device())
+    t1 = torch.full((2,), 1.5, dtype=torch.float32, device=et.device())
+    t2 = torch.ones(2, dtype=torch.float32, device=et.device())
+    out = torch.empty(2, dtype=torch.int32, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""result type Float can't be cast to the desired output type Int""",
+        tpu="""addcmul(): result type float32 can't be cast to the desired output type int32""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s, t1, t2, out=out)
+
+    out_cpu = torch.empty(2, dtype=torch.float32, device="cpu")
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!""",
+        tpu="""addcmul(): expected out tensor to be on tpu, got cpu""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s, t1, t2, out=out_cpu)
+
+  def test_addcmul_out_inplace_broadcast_error(self):
+    s = torch.ones(1, 4, dtype=torch.float32, device=et.device())
+    t1 = torch.ones(3, 4, dtype=torch.float32, device=et.device())
+    t2 = torch.ones(3, 4, dtype=torch.float32, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""output with shape [1, 4] doesn't match the broadcast shape [3, 4]""",
+        tpu="""addcmul(): output with shape [3, 4] doesn't match the broadcast shape of the tensor being operated on in-place, which has shape [1, 4]""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s, t1, t2, out=s)
+
+  def test_addcmul_value_overflow_error(self):
+    s = torch.ones(2, dtype=torch.float32, device=et.device())
+    t1 = torch.ones(2, dtype=torch.float32, device=et.device())
+    t2 = torch.ones(2, dtype=torch.float32, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""value cannot be converted to type float without overflow""",
+        tpu="""addcmul(): value cannot be converted to type float32 without overflow""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s, t1, t2, value=1e40)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""value cannot be converted to type float without overflow""",
+        tpu="""addcmul(): value cannot be converted to type float32 without overflow""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s, t1, t2, value=1 + 2j)
+
+    s_i64 = torch.ones(2, dtype=torch.int64, device=et.device())
+    t1_i64 = torch.ones(2, dtype=torch.int64, device=et.device())
+    t2_i64 = torch.ones(2, dtype=torch.int64, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""value cannot be converted to type int64_t without overflow""",
+        tpu="""addcmul(): value cannot be converted to type int64 without overflow""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s_i64, t1_i64, t2_i64, value=1e20)
+
   def test_index_put_too_many_indices_error(self):
     # TODO(mkkhanna): Fix exception type for TPU.
     err_type = RuntimeError if et.is_on_tpu() else IndexError

@@ -17,6 +17,7 @@
 #include "csrc/ops/convolution/convolution_aten_kernels.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -25,19 +26,20 @@
 
 #include "ATen/core/ATen_fwd.h"
 #include "ATen/core/TensorBody.h"
-#include "ATen/ops/promote_types.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "c10/core/ScalarType.h"
 #include "csrc/common/aten_utils.h"
 #include "csrc/common/cache_key.h"
+#include "csrc/common/context_states.h"
 #include "csrc/common/dimension_types.h"
 #include "csrc/common/dtype.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/fixed_size_span.h"
 #include "csrc/common/to_string.h"
 #include "csrc/eager/device_buffer.h"
+#include "csrc/eager/eager_mode.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/tensor_to_buffer.h"
 #include "csrc/ops/convolution/convolution.h"
@@ -46,6 +48,7 @@
 #include "csrc/ops/op_builder_utils.h"
 #include "csrc/ops/op_names.h"
 #include "csrc/ops/precision_context.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "stablehlo/dialect/StablehloOps.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
 #include "stablehlo/integrations/cpp/builder/MlirBuilder.h"
@@ -78,6 +81,31 @@ Dimensions ExpandIfNecessary(at::IntArrayRef param, int num_spatial_dims) {
   return Dimensions(param.begin(), param.end());
 }
 
+absl::Status ValidateConvolutionSpatialParameters(
+    absl::Span<const int64_t> stride, absl::Span<const int64_t> padding,
+    absl::Span<const int64_t> dilation,
+    absl::Span<const int64_t> output_padding, const bool transposed) {
+  for (size_t i = 0; i < stride.size(); ++i) {
+    TT_RET_CHECK(stride[i] > 0, error::kInvalidArgument)
+        << "expected stride to be greater than 0, got " << ToString(stride);
+    TT_RET_CHECK(padding[i] >= 0, error::kInvalidArgument)
+        << "expected padding to be non-negative, got " << ToString(padding);
+    TT_RET_CHECK(dilation[i] > 0, error::kInvalidArgument)
+        << "expected dilation to be greater than 0, got " << ToString(dilation);
+    TT_RET_CHECK(output_padding[i] >= 0, error::kInvalidArgument)
+        << "expected output_padding to be non-negative, got "
+        << ToString(output_padding);
+    TT_RET_CHECK(!transposed || output_padding[i] < stride[i] ||
+                     output_padding[i] < dilation[i],
+                 error::kInvalidArgument)
+        << "expected output_padding to be smaller than either stride or "
+           "dilation, got output_padding="
+        << ToString(output_padding) << ", stride=" << ToString(stride)
+        << ", dilation=" << ToString(dilation);
+  }
+  return absl::OkStatus();
+}
+
 absl::Status ValidateConvolutionInputs(
     const at::Tensor& input, const at::Tensor& weight,
     absl::Span<const int64_t> bias, absl::Span<const int64_t> stride,
@@ -97,6 +125,8 @@ absl::Status ValidateConvolutionInputs(
       num_spatial_dims, dilation, "dilation"));
   TT_RETURN_IF_ERROR(ValidateConvolutionSpatialDimensionsMatch(
       num_spatial_dims, output_padding, "output_padding"));
+  TT_RETURN_IF_ERROR(ValidateConvolutionSpatialParameters(
+      stride, padding, dilation, output_padding, transposed));
 
   TT_RETURN_IF_ERROR(ValidateConvolutionWeight(
       weight.sizes(), num_spatial_dims, in_channels, groups, transposed));
@@ -140,26 +170,28 @@ absl::StatusOr<Dimensions> GetOutputDimensions(
   }
 
   for (int i = 0; i < num_spatial_dims; ++i) {
+    int64_t output_dim_size = 0;
     if (transposed) {
       // H_out = (H_in - 1) * stride - 2 * padding + dilation * (kernel_size -
       // 1)
       // + output_padding + 1
-      int64_t output_dim_size = (input.size(i + 2) - 1) * stride[i];
+      output_dim_size = (input.size(i + 2) - 1) * stride[i];
       output_dim_size -= 2 * padding[i];
       output_dim_size += dilation[i] * (weight.size(i + 2) - 1);
       output_dim_size += output_padding[i] + 1;
-      output_sizes.push_back(output_dim_size);
     } else {
       // Output shape formula for spatial dimensions:
       // https://docs.pytorch.org/docs/stable/generated/torch.nn.Conv2d.html#torch.nn.Conv2d
-      int64_t output_dim_size = input.size(i + 2);
-      output_dim_size += padding[i] * 2;
-      output_dim_size += stride[i] - 1;
-      output_dim_size -= (weight.size(i + 2) - 1) * dilation[i];
-      // Truncating integer division is intended
-      output_dim_size /= stride[i];
-      output_sizes.push_back(output_dim_size);
+      const int64_t padded_input = input.size(i + 2) + padding[i] * 2;
+      const int64_t dilated_kernel = (weight.size(i + 2) - 1) * dilation[i] + 1;
+      output_dim_size = padded_input >= dilated_kernel
+                            ? (padded_input - dilated_kernel) / stride[i] + 1
+                            : padded_input - dilated_kernel;
     }
+    TT_RET_CHECK(output_dim_size >= 1, error::kInvalidArgument)
+        << "expected calculated output spatial size to be at least 1, got "
+        << output_dim_size << " at spatial dimension " << i;
+    output_sizes.push_back(output_dim_size);
   }
   return output_sizes;
 }
@@ -178,21 +210,30 @@ absl::StatusOr<at::ScalarType> GetPromotedType(
     const std::optional<at::Tensor>& bias_opt) {
   TT_RETURN_IF_ERROR(IsTypeSupported(input, "input"));
   TT_RETURN_IF_ERROR(IsTypeSupported(weight, "weight"));
+  TT_RET_CHECK(input.scalar_type() == weight.scalar_type(),
+               error::kInvalidArgument)
+      << "expected input and weight to have the same dtype, got "
+      << ToString(input.scalar_type()) << " and "
+      << ToString(weight.scalar_type());
 
-  at::ScalarType promoted_type =
-      at::promote_types(input.scalar_type(), weight.scalar_type());
+  const at::ScalarType promoted_type = input.scalar_type();
 
   // CUDA runs zero-batch and zero-channel convolutions on a dtype-agnostic
   // path, so only non-empty int32 inputs fail.
   TT_RET_CHECK(
-      input.size(0) == 0 || input.size(1) == 0 || promoted_type != at::kInt,
+      (input.dim() >= 2 && (input.size(0) == 0 || input.size(1) == 0)) ||
+          promoted_type != at::kInt,
       error::kPythonNotImplementedError)
       << "not implemented for " << ToString(promoted_type);
 
   if (bias_opt.has_value()) {
     // TODO: native PyTorch does not errors on boolean bias.
     TT_RETURN_IF_ERROR(IsTypeSupported(*bias_opt, "bias"));
-    promoted_type = at::promote_types(promoted_type, bias_opt->scalar_type());
+    TT_RET_CHECK(input.scalar_type() == bias_opt->scalar_type(),
+                 error::kInvalidArgument)
+        << "expected input and bias to have the same dtype, got "
+        << ToString(input.scalar_type()) << " and "
+        << ToString(bias_opt->scalar_type());
   }
 
   return promoted_type;
@@ -212,8 +253,9 @@ absl::StatusOr<ConvolutionDispatchParams> PrepareConvolutionDispatch(
     const at::Tensor& input, const at::Tensor& weight,
     const std::optional<at::Tensor>& bias_opt, at::IntArrayRef stride,
     at::IntArrayRef padding, at::IntArrayRef dilation, bool transposed,
-    at::IntArrayRef output_padding, int64_t groups,
+    at::IntArrayRef output_padding, int64_t groups, const at::Tensor& out,
     OpParamCacheKeys& param_keys) {
+  TT_RETURN_IF_ERROR(ValidateConvolutionInput(input.sizes()));
   const int num_spatial_dims = input.dim() - 2;
   Dimensions expanded_stride = ExpandIfNecessary(stride, num_spatial_dims);
   Dimensions expanded_padding = ExpandIfNecessary(padding, num_spatial_dims);
@@ -230,8 +272,11 @@ absl::StatusOr<ConvolutionDispatchParams> PrepareConvolutionDispatch(
       GetOutputDimensions(input, weight, bias_opt, expanded_stride,
                           expanded_padding, expanded_dilation, transposed,
                           expanded_output_padding, groups));
-  TT_ASSIGN_OR_RETURN(at::ScalarType promoted_dtype,
+  TT_ASSIGN_OR_RETURN(const at::ScalarType promoted_dtype,
                       GetPromotedType(input, weight, bias_opt));
+  TT_RETURN_IF_ERROR(IsTypeSupported(out, "out"));
+  TT_RETURN_IF_ERROR(ValidateOutDtype(out, promoted_dtype,
+                                      /*allow_out_dtype_cast=*/false));
   TT_ASSIGN_OR_RETURN(const auto mlir_dtype,
                       ConvertTo<mlir::ElementType>(promoted_dtype));
 
@@ -255,7 +300,7 @@ absl::Status ConvolutionBinaryOut(
       ConvolutionDispatchParams params,
       PrepareConvolutionDispatch(input, weight, std::nullopt, stride, padding,
                                  dilation, transposed, output_padding, groups,
-                                 param_keys));
+                                 out, param_keys));
 
   auto op_builder =
       [stride = Strides(params.expanded_stride.begin(),
@@ -296,7 +341,7 @@ absl::Status ConvolutionTernaryOut(
   TT_ASSIGN_OR_RETURN(ConvolutionDispatchParams params,
                       PrepareConvolutionDispatch(
                           input, weight, bias, stride, padding, dilation,
-                          transposed, output_padding, groups, param_keys));
+                          transposed, output_padding, groups, out, param_keys));
 
   auto op_builder =
       [stride = Strides(params.expanded_stride.begin(),
@@ -352,9 +397,41 @@ absl::StatusOr<at::ScalarType> GetPromotedTypeBackward(
   TT_RETURN_IF_ERROR(IsTypeSupported(grad_output, "grad"));
   TT_RETURN_IF_ERROR(IsTypeSupported(input, "input"));
   TT_RETURN_IF_ERROR(IsTypeSupported(weight, "weight"));
-  return at::promote_types(
-      at::promote_types(input.scalar_type(), weight.scalar_type()),
-      grad_output.scalar_type());
+  TT_RET_CHECK(input.scalar_type() == weight.scalar_type(),
+               error::kInvalidArgument)
+      << "expected input and weight to have the same dtype, got "
+      << ToString(input.scalar_type()) << " and "
+      << ToString(weight.scalar_type());
+  TT_RET_CHECK(input.scalar_type() == grad_output.scalar_type(),
+               error::kInvalidArgument)
+      << "expected input and grad_output to have the same dtype, got "
+      << ToString(input.scalar_type()) << " and "
+      << ToString(grad_output.scalar_type());
+  return input.scalar_type();
+}
+
+absl::Status ValidateGradOutputShape(
+    absl::Span<const int64_t> grad_out_sizes,
+    absl::Span<const int64_t> expected_out_dims,
+    std::optional<mlir::RankedTensorType> grad_out_type = std::nullopt,
+    std::optional<mlir::RankedTensorType> in_type = std::nullopt) {
+  bool matches = grad_out_sizes.size() == expected_out_dims.size();
+  for (size_t d = 0; matches && d < expected_out_dims.size(); ++d) {
+    const bool is_grad_out_dynamic =
+        grad_out_type.has_value() &&
+        d < static_cast<size_t>(grad_out_type->getRank()) &&
+        grad_out_type->isDynamicDim(d);
+    const bool is_in_dynamic = d != 1 && in_type.has_value() &&
+                               d < static_cast<size_t>(in_type->getRank()) &&
+                               in_type->isDynamicDim(d);
+    if (!is_grad_out_dynamic && !is_in_dynamic) {
+      matches = (grad_out_sizes[d] == expected_out_dims[d]);
+    }
+  }
+  TT_RET_CHECK(matches, error::kInvalidArgument)
+      << "expected grad_output to have shape " << ToString(expected_out_dims)
+      << ", got " << ToString(grad_out_sizes);
+  return absl::OkStatus();
 }
 
 absl::StatusOr<DeviceBufferRefArray<3>> ConvolutionBackward(
@@ -363,6 +440,7 @@ absl::StatusOr<DeviceBufferRefArray<3>> ConvolutionBackward(
     at::IntArrayRef stride, at::IntArrayRef padding, at::IntArrayRef dilation,
     bool transposed, at::IntArrayRef output_padding, int64_t groups,
     std::array<bool, 3> output_mask, OpParamCacheKeys param_keys) {
+  TT_RETURN_IF_ERROR(ValidateConvolutionInput(input.sizes()));
   const int num_spatial_dims = input.dim() - 2;
   Dimensions expanded_stride = ExpandIfNecessary(stride, num_spatial_dims);
   Dimensions expanded_padding = ExpandIfNecessary(padding, num_spatial_dims);
@@ -382,20 +460,42 @@ absl::StatusOr<DeviceBufferRefArray<3>> ConvolutionBackward(
   TT_RETURN_IF_ERROR(ValidateConvolutionInputs(
       input, weight, bias_dimensions, expanded_stride, expanded_padding,
       expanded_dilation, transposed, expanded_output_padding, groups));
+  TT_ASSIGN_OR_RETURN(
+      Dimensions expected_out_dims,
+      GetOutputDimensions(input, weight, /*bias_opt=*/std::nullopt,
+                          expanded_stride, expanded_padding, expanded_dilation,
+                          transposed, expanded_output_padding, groups));
   TT_ASSIGN_OR_RETURN(at::ScalarType promoted_dtype,
                       GetPromotedTypeBackward(grad_output, input, weight));
+  const bool is_compile_fx_graph =
+      GetEagerMode() == EagerMode::kInternalCompileFxGraph;
+  if (!is_compile_fx_graph) {
+    TT_RETURN_IF_ERROR(
+        ValidateGradOutputShape(grad_output.sizes(), expected_out_dims));
+  }
   TT_ASSIGN_OR_RETURN(const auto output_dtype,
                       ConvertTo<mlir::ElementType>(promoted_dtype));
 
   auto input_sizes = input.sizes();
   auto weight_sizes = weight.sizes();
+  Dimensions grad_out_sizes(grad_output.sizes().begin(),
+                            grad_output.sizes().end());
 
   auto op_builder = [stride = expanded_stride, padding = expanded_padding,
                      dilation = expanded_dilation, groups, transposed,
-                     output_mask, output_dtype,
-                     current_precision](FixedSizeSpan<mlir::MlirOp, 3> inputs)
+                     output_mask, output_dtype, current_precision,
+                     is_compile_fx_graph,
+                     expected_out_dims = std::move(expected_out_dims),
+                     grad_out_sizes = std::move(grad_out_sizes)](
+                        FixedSizeSpan<mlir::MlirOp, 3> inputs)
       -> absl::StatusOr<MlirOpResults<3>> {
     auto& [grad_out, in, w] = inputs;
+    if (is_compile_fx_graph) {
+      TT_RETURN_IF_ERROR(ValidateGradOutputShape(
+          grad_out_sizes, expected_out_dims, GetTensorTypeOrDie(grad_out),
+          GetTensorTypeOrDie(in)));
+    }
+
     mlir::MlirOp grad_in, grad_w, grad_b;
 
     auto make_undefined = [&grad_out,

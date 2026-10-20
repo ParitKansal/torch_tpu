@@ -17194,33 +17194,6 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
       self.assert_close_tpu_vs_cpu(test_fn)
 
   @parameterized.product(
-      input_dtype=[torch.float32, torch.bfloat16],
-      weight_dtype=[torch.float32, torch.bfloat16],
-  )
-  def test_convolution_backward_mixed_dtype(self, input_dtype, weight_dtype):
-    """Tests convolution backward with mixed dtypes."""
-    input_ = torch.randn(1, 1, 3, 3, dtype=input_dtype, requires_grad=True)
-    weight = torch.randn(1, 1, 1, 1, dtype=weight_dtype, requires_grad=True)
-    bias = torch.randn(1, dtype=weight_dtype, requires_grad=True)
-
-    def test_fn(device):
-      out = torch.nn.functional.conv2d(
-          input_.to(device), weight.to(device), bias=bias.to(device)
-      )
-      grad_output = torch.randn_like(out, dtype=input_dtype, device=device)
-      out.backward(grad_output)
-
-      return input_.grad, weight.grad, bias.grad
-
-    # TODO(b/489136147): Fix test case & disable allow_failure
-    self.assert_close_tpu_vs_cpu(
-        test_fn,
-        rtol=1e-2,
-        atol=1e-2,
-        allow_failure=(input_dtype != weight_dtype),
-    )
-
-  @parameterized.product(
       stride=[2],
       padding=[1],
       groups=[1],
@@ -17232,30 +17205,28 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
     out_channels_per_group = 2
     in_channels = groups * in_channels_per_group
     out_channels = groups * out_channels_per_group
-    input_ = torch.randn(batch, in_channels, 4, 3, requires_grad=True)
-    weight = torch.randn(
-        out_channels, in_channels_per_group, 3, 4, requires_grad=True
-    )
-    bias = torch.randn(1, requires_grad=True)
+    input_ = torch.randn(batch, in_channels, 4, 3)
+    weight = torch.randn(out_channels, in_channels_per_group, 3, 4)
+    bias = torch.randn(out_channels)
+    grad_output = torch.randn(batch, out_channels, 2, 1)
 
     def test_fn(device):
+      in_dev = input_.to(device).detach().requires_grad_(True)
+      w_dev = weight.to(device).detach().requires_grad_(True)
+      b_dev = bias.to(device).detach().requires_grad_(True)
       out = torch.nn.functional.conv2d(
-          input_.to(device),
-          weight.to(device),
-          bias=bias.to(device),
+          in_dev,
+          w_dev,
+          bias=b_dev,
           stride=stride,
           padding=padding,
           groups=groups,
       )
-      grad_output = torch.randn_like(out, device=device)
-      out.backward(grad_output)
+      out.backward(grad_output.to(device))
 
-      return input_.grad, weight.grad, bias.grad
+      return in_dev.grad, w_dev.grad, b_dev.grad
 
-    # TODO(b/489136147): Fix test case & disable allow_failure
-    self.assert_close_tpu_vs_cpu(
-        test_fn, rtol=1e-2, atol=1e-2, allow_failure=True
-    )
+    self.assert_close_tpu_vs_cpu(test_fn, rtol=1e-2, atol=1e-2)
 
   @parameterized.product(
       kernel_size=[3],

@@ -6850,6 +6850,244 @@ Supported combinations for non-constant padding:
     ):
       _run_convolution_backward(grad, inp, w)
 
+  @_parameterize_convolution_fwd_bwd(
+      forward={"tpu_fn": "convolution"},
+      backward={"tpu_fn": "convolution_backward"},
+  )
+  def test_convolution_zero_dim_input(self, convolution, tpu_fn: str):
+    inp = torch.ones(2, 3, 0, 8, device=et.device())
+    w = torch.ones(1, 3, 3, 3, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected non-zero input channels and spatial dimensions, got shape [3, 0, 8]""",
+        gpu="""Only zero batch or zero channel inputs are supported, but got input shape: [2, 3, 0, 8]""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, padding=(2, 2))
+
+  @_parameterize_convolution_fwd_bwd(
+      forward={
+          "tpu_fn": "convolution",
+          "gpu_groups_msg": "non-positive groups is not supported",
+      },
+      backward={
+          "tpu_fn": "convolution_backward",
+          "gpu_groups_msg": (
+              "expected groups to be greater than 0, but got groups=0"
+          ),
+      },
+  )
+  def test_convolution_invalid_groups_and_weight(
+      self, convolution, tpu_fn: str, gpu_groups_msg: str
+  ):
+    inp = torch.ones(2, 3, 10, 10, device=et.device())
+    w = torch.ones(1, 3, 3, 3, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected groups to be greater than 0, got 0""",
+        gpu=gpu_groups_msg,
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, groups=0)
+
+    w_transposed = torch.ones(3, 1, 3, 3, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected in_channels to be divisible by groups, got in_channels=3 and groups=2""",
+        gpu="""Given groups=2, expected weight to be divisible by 2 at dimension 0, but got weight of size [[3, 1, 3, 3]] instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w_transposed, groups=2, transposed=True)
+
+    w_non_divisible_in = torch.ones(2, 1, 3, 3, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected in_channels to be divisible by groups, got in_channels=3 and groups=2""",
+        gpu="""Given groups=2, weight of size [2, 1, 3, 3], expected input[2, 3, 10, 10] to have 2 channels, but got 3 channels instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w_non_divisible_in, groups=2)
+
+    inp_grouped = torch.ones(2, 4, 10, 10, device=et.device())
+    w_grouped = torch.ones(3, 2, 3, 3, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected out_channels to be divisible by groups, got out_channels=3 and groups=2""",
+        gpu="""Given groups=2, expected weight to be divisible by 2 at dimension 0, but got weight of size [[3, 2, 3, 3]] instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp_grouped, w_grouped, groups=2)
+
+    w_zero = torch.ones(0, 3, 3, 3, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected non-zero weight dimensions, got shape [0, 3, 3, 3]""",
+        gpu="""Given groups=1, expected weight to be at least 1 at dimension 0, but got weight of size [0, 3, 3, 3] instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w_zero)
+
+  @_parameterize_convolution_fwd_bwd(
+      forward={"tpu_fn": "convolution"},
+      backward={"tpu_fn": "convolution_backward"},
+  )
+  def test_convolution_invalid_spatial_parameters(
+      self, convolution, tpu_fn: str
+  ):
+    inp = torch.ones(2, 3, 10, 10, device=et.device())
+    w = torch.ones(1, 3, 3, 3, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected stride to be greater than 0, got [0, 1]""",
+        gpu="""non-positive stride is not supported""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, stride=(0, 1))
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected padding to be non-negative, got [-1, 0]""",
+        gpu="""negative padding is not supported""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, padding=(-1, 0))
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected dilation to be greater than 0, got [0, 1]""",
+        gpu="""Dilation must be greater than 0 but got 0""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, dilation=(0, 1))
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected output_padding to be non-negative, got [-1, 0]""",
+        gpu="""negative output_padding is not supported""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, output_padding=(-1, 0))
+
+    w_transposed = torch.ones(3, 1, 3, 3, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected output_padding to be smaller than either stride or dilation, got output_padding=[1, 0], stride=[1, 1], dilation=[1, 1]""",
+        gpu="""output padding must be smaller than either stride or dilation, but got output_padding_height: 1 output_padding_width: 0 stride_height: 1 stride_width: 1 dilation_height: 1 dilation_width: 1""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(
+          inp,
+          w_transposed,
+          stride=(1, 1),
+          dilation=(1, 1),
+          output_padding=(1, 0),
+          transposed=True,
+      )
+
+  @_parameterize_convolution_fwd_bwd(
+      forward={"tpu_fn": "convolution"},
+      backward={"tpu_fn": "convolution_backward"},
+  )
+  def test_convolution_output_size_too_small(self, convolution, tpu_fn: str):
+    inp = torch.ones(2, 3, 2, 8, device=et.device())
+    w = torch.ones(1, 3, 3, 3, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected calculated output spatial size to be at least 1, got -1 at spatial dimension 0""",
+        gpu="""Calculated padded input size per channel: (2 x 8). Kernel size: (3 x 3). Kernel size can't be greater than actual input size""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w)
+
+  @et.gpu_crashes_or_raises(
+      reason=(
+          "cuDNN crashes with std::length_error when grad_output shape does not"
+          " match expected output shape"
+      )
+  )
+  def test_convolution_backward_invalid_grad_output_shape(self):
+    grad = torch.ones(2, 1, 7, 8, device=et.device())
+    inp = torch.ones(2, 3, 10, 10, device=et.device())
+    w = torch.ones(1, 3, 3, 3, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution_backward(): expected grad_output to have shape [2, 1, 8, 8], got [2, 1, 7, 8]""",
+        gpu="""Given input size [2, 3, 10, 10], weight size [1, 3, 3, 3], expected grad_output to have size [2, 1, 8, 8], but got [2, 1, 7, 8]""",
+        message_reviewed_by="gunhyun",
+    ):
+      _run_convolution_backward(grad, inp, w)
+
+  def test_convolution_mixed_dtypes(self):
+    inp = torch.ones(2, 3, 10, 10, device=et.device(), dtype=torch.float32)
+    w_bf16 = torch.ones(1, 3, 3, 3, device=et.device(), dtype=torch.bfloat16)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution(): expected input and weight to have the same dtype, got float32 and bfloat16""",
+        gpu="""Input type (torch.cuda.FloatTensor) and weight type (CUDABFloat16Type) should be the same""",
+        message_reviewed_by="gunhyun",
+    ):
+      _run_convolution(inp, w_bf16)
+
+    w = torch.ones(1, 3, 3, 3, device=et.device(), dtype=torch.float32)
+    bias_bf16 = torch.ones(1, device=et.device(), dtype=torch.bfloat16)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution(): expected input and bias to have the same dtype, got float32 and bfloat16""",
+        gpu="""Input type (torch.cuda.FloatTensor) and bias type (CUDABFloat16Type) should be the same""",
+        message_reviewed_by="gunhyun",
+    ):
+      _run_convolution(inp, w, bias=bias_bf16)
+
+    grad = torch.ones(2, 1, 8, 8, device=et.device(), dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution_backward(): expected input and weight to have the same dtype, got float32 and bfloat16""",
+        gpu="""Input type (torch.cuda.FloatTensor) and weight type (CUDABFloat16Type) should be the same""",
+        message_reviewed_by="gunhyun",
+    ):
+      _run_convolution_backward(grad, inp, w_bf16)
+
+    grad_bf16 = torch.ones(2, 1, 8, 8, device=et.device(), dtype=torch.bfloat16)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution_backward(): expected input and grad_output to have the same dtype, got float32 and bfloat16""",
+        gpu="""Expected tensor for argument #1 'grad_output' to have the same type as tensor for argument #2 'weight'; but type CUDABFloat16Type does not equal torch.cuda.FloatTensor (while checking arguments for cudnn_convolution_backward_input)""",
+        message_reviewed_by="gunhyun",
+    ):
+      _run_convolution_backward(grad_bf16, inp, w)
+
+  def test_convolution_out_invalid_dtype(self):
+    inp = torch.ones(2, 3, 10, 10, device=et.device(), dtype=torch.float32)
+    w = torch.ones(1, 3, 3, 3, device=et.device(), dtype=torch.float32)
+    out_bool = torch.empty(2, 1, 8, 8, device=et.device(), dtype=torch.bool)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution(): expected the dtype of the out tensor to be neither long nor bool, got bool""",
+        gpu="""Expected out tensor to have dtype float, but got bool instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.convolution.out(
+          inp, w, None, (1, 1), (0, 0), (1, 1), False, (0, 0), 1, out=out_bool
+      )
+
+    out_bf16 = torch.empty(2, 1, 8, 8, device=et.device(), dtype=torch.bfloat16)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution(): expected the output dtype to be float32, got bfloat16""",
+        gpu="""Expected out tensor to have dtype float, but got c10::BFloat16 instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.convolution.out(
+          inp, w, None, (1, 1), (0, 0), (1, 1), False, (0, 0), 1, out=out_bf16
+      )
+
   @parameterized.named_parameters(
       {"testcase_name": "min", "op": torch.min, "op_name": "min"},
       {"testcase_name": "max", "op": torch.max, "op_name": "max"},

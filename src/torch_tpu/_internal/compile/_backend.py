@@ -64,7 +64,6 @@ from torch_tpu._internal.compile import compiler
 from torch_tpu._internal.compile import split_compiler
 from torch_tpu._internal.compile.debug import TpuCompileDebug
 from torch_tpu._internal.compile.dynamic import dynamic_compiler
-from torch_tpu._internal.compile.torch_tpu_compiled_executable import AsyncCompiledArtifact
 from torch_tpu._internal.distributed import device_mesh
 from torch_tpu._internal.distributed import process_group_utils
 from torch_tpu._internal.sync import sync
@@ -1014,17 +1013,13 @@ class TpuBackend:
       # Call the debug callback, or if async, submit a job that waits on the compile futures.
       if debug is not None and debug_callback is not None:
         if async_compile:
-          futures = [
-              cast(AsyncCompiledArtifact, e)._future
-              for e in compiled_artifacts
-              if isinstance(e, AsyncCompiledArtifact)
-          ]
+          artifacts_to_wait = list(compiled_artifacts)
 
           # Ensure callbacks that fail are visible
           def wait_and_call():
             try:
-              for f in futures:
-                f.result()
+              for artifact in artifacts_to_wait:
+                artifact.resolve()
               debug_callback(debug)
             except Exception:
               logging.exception("debug_callback crashed.")

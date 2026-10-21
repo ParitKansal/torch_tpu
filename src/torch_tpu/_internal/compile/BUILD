@@ -153,7 +153,6 @@ torch_tpu_py_library(
         ":compiler",
         ":debug",
         ":split_compiler",
-        ":torch_tpu_compiled_executable",
         "//shims/absl_py/logging",
         "//shims/torch:pytorch",
         "//src/torch_tpu/_internal/benchmarks:xprof_adapter",

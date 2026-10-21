@@ -571,6 +571,44 @@ class AsyncCompileTest(seed_test_utils.RepeatableTest):
       res = artifact([value])
       test_utils.assert_close(res.cpu(), torch.sin(value.cpu() + 1))
 
+  def test_async_compile_debug_callback_waits_for_compile(self):
+    barrier = CompileBarrier()
+    self.addCleanup(barrier.release_all)
+    model = SimpleModel().to("tpu")
+    callback_called = threading.Event()
+    captured_mlir_counts: list[int] = []
+
+    def debug_cb(debug):
+      captured_mlir_counts.append(len(debug.stablehlo_forward_text))
+      callback_called.set()
+
+    with mock.patch.object(
+        tpu_compiler_mod.StaticCompiler,
+        "_compile",
+        barrier.intercept_compile(tpu_compiler_mod.StaticCompiler._compile),
+    ):
+      compiled = torch.compile(
+          torch.no_grad()(model),
+          backend="tpu",
+          fullgraph=True,
+          dynamic=False,
+          options={"async_compile": True, "debug_callback": debug_cb},
+      )
+      with self.assertRaises(  # ASSERT_RAISES_OK=AsyncCompilationSubmitted warmup signal.
+          tpu_compile.AsyncCompilationSubmitted
+      ) as cm:
+        compiled(torch.ones(4, 16, device="tpu"))
+
+      self.assertTrue(barrier.wait_for_compile_start(0))
+      self.assertFalse(
+          callback_called.wait(timeout=0.5),
+          "debug_callback fired before async compilation finished!",
+      )
+      barrier.release_all()
+      cm.exception.artifact.resolve()
+      self.assertTrue(callback_called.wait(timeout=5.0))
+      self.assertEqual(captured_mlir_counts, [1])
+
 
 if __name__ == "__main__":
   absltest.main()

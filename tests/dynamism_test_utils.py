@@ -276,6 +276,8 @@ triaged_ops_deny_lists: dict[
         "linalg.lu_solve": {EAGER},
         "linalg.qr": {EAGER},
         "linalg.solve_triangular": {EAGER},
+        "linalg.svd": {EAGER},
+        "linalg.svdvals": {EAGER},
     },
     "the lowering emits an op without bounded shape support": {
         # _upsample_bicubic2d_aa and _upsample_bilinear2d_aa lower via 1D gathers with static output sizes.
@@ -783,8 +785,10 @@ class ConvolutionDynamicOpInfo(DynamicOpInfo):
   convolution_ops = {
       "nn.functional.conv1d",
       "nn.functional.conv2d",
+      "nn.functional.conv3d",
       "nn.functional.conv_transpose1d",
       "nn.functional.conv_transpose2d",
+      "nn.functional.conv_transpose3d",
   }
 
   @staticmethod

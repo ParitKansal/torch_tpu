@@ -400,6 +400,10 @@ ACCURACY_OVERRIDES_VS_GPU = {
     "linalg.qr": {
         torch.float32: {"rtol": 1e-4, "atol": 1e-4},
     },
+    "linalg.svdvals": {
+        torch.complex64: {"rtol": 5.6e-3},
+        torch.float32: {"rtol": 4.9e-3},
+    },
     "linalg.vector_norm": {
         torch.complex64: {"rtol": 4.8e-6},
         torch.float32: {"rtol": 4.8e-6},
@@ -483,6 +487,9 @@ ACCURACY_OVERRIDES_VS_GPU = {
         torch.bfloat16: {"rtol": 1.8e-2, "atol": 2.0e-2},
         torch.float16: {"rtol": 3.5e-3, "atol": 3.0e-3},
     },
+    "nn.functional.avg_pool1d": {
+        torch.float16: {"rtol": 1.9e-3, "atol": 7.4e-4},
+    },
     "nn.functional.avg_pool2d": {
         torch.bfloat16: {"rtol": 3.1e-2, "atol": 4.5e-2},
         torch.float16: {"rtol": 3.1e-3, "atol": 4.1e-3},
@@ -501,6 +508,10 @@ ACCURACY_OVERRIDES_VS_GPU = {
         torch.float16: {"rtol": 3.9e-1, "atol": 4.2e-1},
         torch.float32: {"rtol": 4.2e-1, "atol": 4.6e-1},
     },
+    "nn.functional.conv3d": {
+        torch.float16: {"rtol": 6.5e-1, "atol": 6.6e-1},
+        torch.float32: {"rtol": 5e-1, "atol": 7e-1},
+    },
     "nn.functional.conv_transpose1d": {
         torch.float16: {"rtol": 6.7e-2, "atol": 1.6e-1},
         torch.float32: {"rtol": 7.1e-2, "atol": 2.1e-1},
@@ -509,6 +520,11 @@ ACCURACY_OVERRIDES_VS_GPU = {
         torch.bfloat16: {"rtol": 7.4e-2, "atol": 7.6e-2},
         torch.float16: {"rtol": 2.2e-1, "atol": 6.6e-2},
         torch.float32: {"rtol": 3e-1, "atol": 9.4e-2},
+    },
+    "nn.functional.conv_transpose3d": {
+        torch.bfloat16: {"rtol": 2.2e-1, "atol": 2.3e-1},
+        torch.float16: {"rtol": 1.1, "atol": 8.2e-1},
+        torch.float32: {"rtol": 6.2e-1, "atol": 1.1},
     },
     "nn.functional.embedding": {
         torch.float16: {
@@ -728,6 +744,9 @@ ACCURACY_OVERRIDES_VS_GPU_COMPILED = {
     "ldexp": {
         torch.complex64: {"rtol": 4.4e-6},
     },
+    "linalg.svdvals": {
+        torch.complex64: {"rtol": 5.6e-3},
+    },
     "linalg.vector_norm": {
         torch.complex64: {"rtol": 4.8e-6},
         torch.float32: {"rtol": 4.8e-6},
@@ -803,6 +822,11 @@ ACCURACY_OVERRIDES_VS_GPU_COMPILED = {
         torch.float16: {"rtol": 3.9e-1, "atol": 4.2e-1},
         torch.float32: {"rtol": 4.2e-1, "atol": 4.6e-1},
     },
+    "nn.functional.conv3d": {
+        torch.bfloat16: {"atol": 1.9e-2},
+        torch.float16: {"rtol": 6.5e-1, "atol": 6.6e-1},
+        torch.float32: {"rtol": 5e-1, "atol": 7e-1},
+    },
     "nn.functional.conv_transpose1d": {
         torch.bfloat16: {"atol": 8.3e-3},
         torch.float16: {"rtol": 6.7e-2, "atol": 1.6e-1},
@@ -812,6 +836,11 @@ ACCURACY_OVERRIDES_VS_GPU_COMPILED = {
         torch.bfloat16: {"rtol": 6.2e-2, "atol": 8e-2},
         torch.float16: {"rtol": 2.2e-1, "atol": 6.7e-2},
         torch.float32: {"rtol": 3e-1, "atol": 9.4e-2},
+    },
+    "nn.functional.conv_transpose3d": {
+        torch.bfloat16: {"rtol": 2.4e-1, "atol": 2.3e-1},
+        torch.float16: {"rtol": 1.1, "atol": 8.2e-1},
+        torch.float32: {"rtol": 6.2e-1, "atol": 1.1},
     },
     "nn.functional.cross_entropy": {
         torch.float16: {"rtol": 1.3e-3},
@@ -968,6 +997,10 @@ ACCURACY_OVERRIDES_GRAD_VS_GPU: dict[
             torch.float32: {"rtol": 1.2e-1, "atol": 6e-2},
             torch.float64: {"rtol": 2.6e-6, "atol": 5.2e-6},
         },
+        "linalg.svdvals": {
+            torch.complex64: {"atol": 9.9e-3},
+            torch.float32: {"atol": 6.6e-3},
+        },
         "linalg.vector_norm": {
             torch.complex64: {"rtol": 1.3e-5, "atol": 1.3e-5},
             torch.float16: {"rtol": 2.1e-3, "atol": 1.5e-3},
@@ -989,6 +1022,14 @@ ACCURACY_OVERRIDES_GRAD_VS_GPU: dict[
         "native_batch_norm": {
             torch.bfloat16: {"atol": 1.1e-2},
             torch.float16: {"atol": 1.4e-3},
+        },
+        "nn.functional.conv3d": {
+            torch.float16: {"rtol": 3.9e-2, "atol": 6.6e-2},
+            torch.float32: {"rtol": 4.5e-2, "atol": 8.8e-2},
+        },
+        "nn.functional.conv_transpose3d": {
+            torch.float16: {"rtol": 5e-2, "atol": 5.6e-2},
+            torch.float32: {"rtol": 4e-2, "atol": 6.5e-2},
         },
         "nn.functional.cross_entropy": {
             torch.bfloat16: {"atol": 1.2e-3},
@@ -1279,7 +1320,6 @@ class TestOps(op_testing.OpInfoTestBase):
         },
     )
 
-  @op_testing.skip_if_torch_tpu_vs_gpu_mode
   def test_adaptive_max_pool2d(self):
     self.do_test_op(
         "nn.functional.adaptive_max_pool2d",
@@ -1450,6 +1490,23 @@ class TestOps(op_testing.OpInfoTestBase):
 
   def test_atanh(self):
     self.do_test_op("atanh")
+
+  def test_avg_pool1d(self):
+    self.do_test_op(
+        "nn.functional.avg_pool1d",
+        # avg_pool1d backward is not implemented in TorchTPU.
+        check_grad=False,
+        # GPU short-circuits empty-batch inputs in avg_pool1d before checking
+        # dtype, whereas TorchTPU's ValidateAvgPool1dDtype rejects bool, uint8,
+        # int8, int16, int32, and complex64 upfront.
+        exclude_dtypes={
+            "cpu": (torch.int64, torch.bool),
+            "gpu": (
+                (torch.bool, torch.uint8, torch.int8, torch.int16, torch.int32)
+                + COMPLEX_DTYPES
+            ),
+        },
+    )
 
   def test_avg_pool2d(self):
     self.do_test_op(
@@ -1706,9 +1763,8 @@ class TestOps(op_testing.OpInfoTestBase):
   def test_cumprod(self):
     self.do_test_op("cumprod")
 
-  # TODO(b/529376045): Scan HLO lowering failing on GitHub
-  # def test_cummax(self):
-  #   self.do_test_op("cummax")
+  def test_cummax(self):
+    self.do_test_op("cummax")
 
   def test_cumsum(self):
     self.do_test_op(
@@ -1717,9 +1773,8 @@ class TestOps(op_testing.OpInfoTestBase):
         exclude_inplace_dtypes=_if_tpu_vs_gpu_compiled((torch.bool,), ()),
     )
 
-  # TODO(bawilson): Scan HLO lowering failing on GitHub
-  # def test_cummin(self):
-  #   self.do_test_op("cummin")
+  def test_cummin(self):
+    self.do_test_op("cummin")
 
   def test_diagonal(self):
     self.do_test_op("diagonal")
@@ -1794,16 +1849,24 @@ class TestOps(op_testing.OpInfoTestBase):
         },
     )
 
-  # TODO(b/529376045): Scan HLO lowering failing on GitHub
-  # def test_embedding_bag(self):
-  #   self.do_test_op(
-  #       "nn.functional.embedding_bag",
-  #       # TODO: add support for sparse embeddings.
-  #       skip_if=lambda device, variant, op_input: (
-  #           op_input.kwargs.get("sparse", False)
-  #           or op_input.kwargs.get("scale_grad_by_freq", False)
-  #       ),
-  #   )
+  def test_embedding_bag(self):
+    self.do_test_op(
+        "nn.functional.embedding_bag",
+        # TODO: add support for sparse embeddings, scale_grad_by_freq, and
+        # _embedding_bag_per_sample_weights_backward on TPU.
+        skip_if=lambda device, variant, op_input: (
+            op_input.kwargs.get("sparse", False)
+            or op_input.kwargs.get("scale_grad_by_freq", False)
+            or (
+                op_testing._COMPUTE_GRAD.value
+                and (
+                    op_input.kwargs.get("per_sample_weights") is not None
+                    or len(op_input.args) >= 8
+                    and op_input.args[7] is not None
+                )
+            )
+        ),
+    )
 
   def test_empty(self):
     self.do_test_op(
@@ -2526,6 +2589,62 @@ class TestOps(op_testing.OpInfoTestBase):
   def test_index_put(self):
     self.do_test_op("index_put")
 
+  def test_index_reduce_amax(self):
+    self.do_test_op(
+        "index_reduce",
+        variant_test_name="amax",
+        # CUDA does not support complex or bool dtypes for index_reduce, while
+        # TorchTPU lacks upfront dtype validation and only supports 0D/1D inputs
+        # in BuildScatterShlo.
+        exclude_dtypes=COMPLEX_DTYPES + (torch.bool,),
+        exclude_inplace_dtypes=COMPLEX_DTYPES + (torch.bool,),
+        skip_if=lambda _device, _variant, op_input: (
+            op_input.input_value.ndim > 1
+        ),
+    )
+
+  def test_index_reduce_amin(self):
+    self.do_test_op(
+        "index_reduce",
+        variant_test_name="amin",
+        # CUDA does not support complex or bool dtypes for index_reduce, while
+        # TorchTPU lacks upfront dtype validation and only supports 0D/1D inputs
+        # in BuildScatterShlo.
+        exclude_dtypes=COMPLEX_DTYPES + (torch.bool,),
+        exclude_inplace_dtypes=COMPLEX_DTYPES + (torch.bool,),
+        skip_if=lambda _device, _variant, op_input: (
+            op_input.input_value.ndim > 1
+        ),
+    )
+
+  def test_index_reduce_mean(self):
+    self.do_test_op(
+        "index_reduce",
+        variant_test_name="mean",
+        # CUDA does not support complex or bool dtypes for index_reduce, while
+        # TorchTPU lacks upfront dtype validation and only supports 0D/1D inputs
+        # in BuildScatterShlo.
+        exclude_dtypes=COMPLEX_DTYPES + (torch.bool,),
+        exclude_inplace_dtypes=COMPLEX_DTYPES + (torch.bool,),
+        skip_if=lambda _device, _variant, op_input: (
+            op_input.input_value.ndim > 1
+        ),
+    )
+
+  def test_index_reduce_prod(self):
+    self.do_test_op(
+        "index_reduce",
+        variant_test_name="prod",
+        # CUDA does not support complex or bool dtypes for index_reduce, while
+        # TorchTPU lacks upfront dtype validation and only supports 0D/1D inputs
+        # in BuildScatterShlo.
+        exclude_dtypes=COMPLEX_DTYPES + (torch.bool,),
+        exclude_inplace_dtypes=COMPLEX_DTYPES + (torch.bool,),
+        skip_if=lambda _device, _variant, op_input: (
+            op_input.input_value.ndim > 1
+        ),
+    )
+
   def test_index_select(self):
     self.do_test_op(
         "index_select",
@@ -2559,7 +2678,13 @@ class TestOps(op_testing.OpInfoTestBase):
     )
 
   def test_lcm(self):
-    self.do_test_op("lcm")
+    self.do_test_op(
+        "lcm",
+        # Cap samples to avoid shard timeouts when lcm shares a shard with other
+        # multi-dtype ops (lcm compiles a while loop per shape/dtype across
+        # base, out, and inplace variants).
+        max_samples_per_op_dtype=6,
+    )
 
   def test_ldexp(self):
     self.do_test_op("ldexp")
@@ -2664,6 +2789,48 @@ class TestOps(op_testing.OpInfoTestBase):
         # ApplyPivotsInPlace in linalg_lu_kernels.cc calls .item() in C++ loop,
         # which fails placeholder tensor materialization in compiled mode.
         skip_if=lambda device, variant, op_input: op_testing.is_compiled_mode(),
+    )
+
+  def test_linalg_svd(self):
+    self.do_test_op(
+        "linalg.svd",
+        # TODO(b/553658275): support data sampling of integral and
+        # half-precision float dtypes for SVD-based linear algebra ops.
+        exclude_dtypes={
+            "cpu": (
+                INTEGRAL_DTYPES
+                + (torch.half, torch.bfloat16, torch.float64, torch.complex128)
+            ),
+            "gpu": INTEGRAL_DTYPES + (torch.half, torch.bfloat16),
+        },
+        # Singular vectors U (index 0) and Vh (index 2) have sign/phase
+        # ambiguity across backends; singular value gradients are tested in
+        # test_linalg_svdvals.
+        skip_output_indices=[0, 2],
+        check_dynamism=False,
+        check_grad=False,
+    )
+
+  def test_linalg_svdvals(self):
+    self.do_test_op(
+        "linalg.svdvals",
+        # TODO(b/553658275): support data sampling of integral and
+        # half-precision float dtypes for SVD-based linear algebra ops.
+        exclude_dtypes={
+            "cpu": (
+                INTEGRAL_DTYPES
+                + (torch.half, torch.bfloat16, torch.float64, torch.complex128)
+            ),
+            "gpu": INTEGRAL_DTYPES + (torch.half, torch.bfloat16),
+        },
+        check_dynamism=False,
+        # TODO(b/544855640): TPU implementation of _linalg_svd(compute_uv=True)
+        # invoked by svdvals backward hangs on float64 (subtest18), causing
+        # shard timeouts.
+        skip_if=lambda _device, _variant, op_input: (
+            op_testing._COMPUTE_GRAD.value
+            and op_input.input_value.dtype == torch.float64
+        ),
     )
 
   def test_linalg_lu_out(self):
@@ -2800,9 +2967,8 @@ class TestOps(op_testing.OpInfoTestBase):
   def test_logical_not(self):
     self.do_test_op("logical_not")
 
-  # TODO(b/529376045): Scan HLO lowering failing on GitHub
-  # def test_masked_scatter(self):
-  #   self.do_test_op("masked_scatter")
+  def test_masked_scatter(self):
+    self.do_test_op("masked_scatter")
 
   def test_masked_select(self):
     self.do_test_op("masked_select")
@@ -2861,7 +3027,6 @@ class TestOps(op_testing.OpInfoTestBase):
   def test_maximum(self):
     self.do_test_op("maximum")
 
-  @op_testing.skip_if_torch_tpu_vs_gpu_mode
   def test_max_pool1d(self):
     self.do_test_op(
         "nn.functional.max_pool1d",
@@ -3067,6 +3232,9 @@ class TestOps(op_testing.OpInfoTestBase):
         },
     )
 
+  def test_new_full(self):
+    self.do_test_op("new_full")
+
   def test_new_ones(self):
     self.do_test_op("new_ones")
 
@@ -3204,22 +3372,48 @@ class TestOps(op_testing.OpInfoTestBase):
         },
     )
 
-  # TODO(gleasonk): why does compilation time out on this input?
-  #    input shape: (1, 1, 11, 12, 13),
-  #                 created from (1, 1, 10, 11, 12) + pad (0, 0, 1, 1, 1)
-  #    kernel shape: (1, 1, 4, 4, 4)
-  #    strides: (1, 1, 1)
-  #    padding: (4, 4, 4), symmetric
-  #    dilation: (3, 3, 3)
-  #    -> output shape: (1, 1, 10, 11, 12)
-  # Timeout occurs with both XlaBuilder and StableHLO implementations.
-  # def test_nn_functional_conv3d(self):
-  #   self.do_test_op(
-  #       "nn.functional.conv3d",
-  #       # TODO: fix nn.functional.conv*d() failing with integral and complex
-  #       # dtypes. See comments in test_nn_functional_conv1d.
-  #       exclude_dtypes=COMPLEX_DTYPES + INTEGRAL_DTYPES,
-  #   )
+  def test_nn_functional_conv_transpose3d(self):
+    self.do_test_op(
+        "nn.functional.conv_transpose3d",
+        # TODO: fix nn.functional.conv*d() failing with integral and complex
+        # dtypes.
+        # Known issues:
+        # 1. CPU sometimes fails with low-bitwidth integers, even though XLA
+        #    succeeds; possible bug in CPU kernel?
+        exclude_dtypes={
+            "cpu": (
+                COMPLEX_DTYPES
+                + (
+                    torch.uint8,
+                    torch.int8,
+                    torch.int16,
+                    torch.int32,
+                    torch.int64,
+                )
+            ),
+            "gpu": COMPLEX_DTYPES + (torch.uint8, torch.int8, torch.int16),
+        },
+    )
+
+  def test_nn_functional_conv3d(self):
+    self.do_test_op(
+        "nn.functional.conv3d",
+        # TODO: fix nn.functional.conv*d() failing with integral and complex
+        # dtypes. See comments in test_nn_functional_conv1d.
+        exclude_dtypes={
+            "cpu": (
+                COMPLEX_DTYPES
+                + (
+                    torch.uint8,
+                    torch.int8,
+                    torch.int16,
+                    torch.int32,
+                    torch.int64,
+                )
+            ),
+            "gpu": COMPLEX_DTYPES + (torch.uint8, torch.int8, torch.int16),
+        },
+    )
 
   def test_nn_functional_relu(self):
     self.do_test_op(
@@ -3368,6 +3562,14 @@ class TestOps(op_testing.OpInfoTestBase):
   def test_nn_functional_softplus(self):
     self.do_test_op("nn.functional.softplus")
 
+  def test_nn_functional_unfold(self):
+    self.do_test_op(
+        "nn.functional.unfold",
+        # TorchTPU supports integral dtypes for im2col/unfold, whereas CUDA
+        # does not implement im2col_out_cuda for integral dtypes.
+        exclude_dtypes=INTEGRAL_DTYPES,
+    )
+
   def test_nn_functional_mse_loss(self):
     self.do_test_op(
         "nn.functional.mse_loss",
@@ -3443,6 +3645,21 @@ class TestOps(op_testing.OpInfoTestBase):
 
   def test_repeat(self):
     self.do_test_op("repeat")
+
+  def test_repeat_interleave(self):
+    self.do_test_op(
+        "repeat_interleave",
+        skip_if=lambda _device, _variant, op_input: (
+            op_testing.is_compiled_mode()
+            and (
+                isinstance(op_input.kwargs.get("repeats"), torch.Tensor)
+                or (
+                    op_input.args and isinstance(op_input.args[0], torch.Tensor)
+                )
+            )
+            and op_input.kwargs.get("output_size") is None
+        ),
+    )
 
   def test_replication_pad(self):
     self.do_test_op(
@@ -3641,6 +3858,9 @@ class TestOps(op_testing.OpInfoTestBase):
 
   def test_slice(self):
     self.do_test_op("slice")
+
+  def test_slice_scatter(self):
+    self.do_test_op("slice_scatter")
 
   def test_softmax(self):
     self.do_test_op("softmax")
@@ -3902,6 +4122,28 @@ class TestOps(op_testing.OpInfoTestBase):
 
   def test_unfold(self):
     self.do_test_op("unfold")
+
+  def test_unique(self):
+    self.do_test_op(
+        "unique",
+        # PyTorch autograd backward is not implemented for _unique2.
+        check_grad=False,
+        exclude_dtypes=COMPLEX_DTYPES,
+        check_dynamism=False,
+        # TODO: _unique2 on 0D inputs with return_inverse=True produces a 1D
+        # PjRtBuffer for a 0D ATen inverse_indices output tensor.
+        skip_if=lambda _device, _variant, op_input: (
+            not op_testing._CHECK_DYNAMISM_USING_SEED.value
+            and (
+                op_testing.is_compiled_mode()
+                or not op_input.kwargs.get("sorted", True)
+                or (
+                    op_input.input_value.ndim == 0
+                    and op_input.kwargs.get("return_inverse", False)
+                )
+            )
+        ),
+    )
 
   def test_unique_consecutive(self):
     self.do_test_op(

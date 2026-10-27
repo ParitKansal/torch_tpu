@@ -62,7 +62,7 @@ absl::StatusOr<mlir::MlirOp> BuildEluShlo(mlir::MlirOp input_op,
   //  y = self * input_scale
   auto input_scaled = mlir::stablehlo::Mul(input_bcast, input_scale_bcast);
 
-  // --- Negative path: scale * alpha * (exp(input_scaled) - 1) ---
+  // --- Negative path: scale * alpha * expm1(input_scaled) ---
   // Use expm1: exp(input_scaled) - 1 loses precision when input_scaled is
   // close to 0, because exp(input_scaled) is then close to 1.
   auto expm1_input_scaled = mlir::stablehlo::Expm1(input_scaled);

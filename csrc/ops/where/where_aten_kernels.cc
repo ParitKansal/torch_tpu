@@ -73,9 +73,10 @@ at::Tensor AtenWhereSelf(const at::Tensor& condition, const at::Tensor& self,
         DeviceBufferRef result_buf,
         (DispatchWhere<absl::StatusOr<DeviceBufferRef>>(
             condition, self, other,
-            [&](at::ScalarType /*output_aten_type*/,
-                mlir::ElementType output_element_type,
-                const Dimensions& output_dims, auto op_builder) {
+            [&]  // REF_CAPTURE_OK=called synchronously
+            (at::ScalarType /*output_aten_type*/,
+             mlir::ElementType output_element_type,
+             const Dimensions& output_dims, auto op_builder) {
               return DispatchOp<3>(
                   std::move(op_builder), {condition, self, other},
                   {.out_dtype = output_element_type,
@@ -93,9 +94,9 @@ at::Tensor& AtenWhereSelfOut(const at::Tensor& condition,
   TT_KERNEL(OpName::kWhereSelfOut, _, (condition, self, other, out), {
     TT_THROW_IF_ERROR((DispatchWhere<absl::Status>(
         condition, self, other,
-        [&](at::ScalarType output_aten_type,
-            mlir::ElementType output_element_type,
-            const Dimensions& output_dims, auto op_builder) -> absl::Status {
+        [&]  // REF_CAPTURE_OK=called synchronously
+        (at::ScalarType output_aten_type, mlir::ElementType output_element_type,
+         const Dimensions& output_dims, auto op_builder) -> absl::Status {
           TT_RET_CHECK(output_aten_type == out.scalar_type(),
                        error::kInvalidArgument)
               << "expected the output dtype to be "

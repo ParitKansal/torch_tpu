@@ -39,7 +39,6 @@
 
 #include "ATen/core/ATen_fwd.h"
 #include "ATen/core/TensorBody.h"
-#include "absl/algorithm/container.h"
 #include "absl/base/const_init.h"
 #include "absl/base/no_destructor.h"
 #include "absl/base/optimization.h"
@@ -58,12 +57,13 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "c10/core/Device.h"
+#include "c10/core/DeviceGuard.h"
 #include "c10/core/WrapDimMinimal.h"
+#include "c10/core/impl/DeviceGuardImplInterface.h"
 #include "c10/util/ArrayRef.h"  // IWYU pragma: keep for IntArrayRef
 #include "c10/util/Exception.h"
 #include "c10/util/Optional.h"
 #include "c10/util/StringUtil.h"
-#include "csrc/common/context_states.h"
 #include "csrc/common/device_type.h"
 #include "csrc/common/env_vars.h"
 #include "csrc/common/status_builder.h"
@@ -74,130 +74,115 @@
 namespace torch_tpu {
 namespace {
 
-// Words that are allowed to start an error message with an uppercase letter.
-// This is an exception to the rule that error messages must start with a
-// lowercase letter.
-constexpr std::array<std::string_view, 3> kAllowedStartingWords{"TorchTPU",
-                                                                "PjRt", "XLA"};
-
-// Helper to check if a message starts with any of the allowed words.
-[[nodiscard]] bool StartsWithAllowedWord(const std::string_view message) {
-  return absl::c_any_of(
-      kAllowedStartingWords,
-      [&](const std::string_view word) { return message.starts_with(word); });
+// Returns whether `message` starts with one of the words that are allowed to
+// start an error message with an uppercase letter. This is an exception to the
+// rule that error messages must start with a lowercase letter.
+//
+// The allowed word must be matched as a whole word. For example, "XLA" matches
+// "XLA compiler" and "XLA's", but not "XLAB".
+[[nodiscard]] bool StartsWithAllowedUppercaseWord(
+    const std::string_view message) {
+  static const LazyRE2 kAllowedUppercaseStartingWordPattern = {
+      R"(^(TorchTPU|PjRt|XLA)\b)"};
+  return RE2::PartialMatch(message, *kAllowedUppercaseStartingWordPattern);
 }
 
-#if TT_CHECKS_ERROR_FORMAT
-
-// Pair of corresponding type names.
-struct TypeNamePair {
+// The same dtype has different names in PyTorch and StableHLO. This struct
+// stores the pair of names for a particular dtype.
+struct DTypeNames {
   std::string_view torch;
   std::string_view stablehlo;
 };
 
-// Even though this array might get outdated, we should keep this check due to
-// the following reasons:
+// Maps between PyTorch and StableHLO dtype names.
 //
-//   1. It won't be changing too frequent
-//   2. These type names doesn't collide with PyTorch names
-//   3. It's not critical for TorchTPU realeases, i.e. getting this wrong
-//      won't be too bad
-constexpr std::array<TypeNamePair, 19> type_name_pairs{{
-    // NOTE: the order in this array is important!
-    //   These types are partially ordered, so that if type A comes before
-    //   another type B, it means that A is NOT a substring of B.
-    //
-    //   For example:
-    //     - f16 and bf16: since f16 is a substring of bf16, bf16 should
-    //                     appear before f16.
-    //     - f32 and complexf32: since f32 is a substring of complexf32,
-    //                     complexf32 should appear before f32.
-
-    // Integer types.
-    {.torch = "bool", .stablehlo = "pred"},
-    {.torch = "uint2", .stablehlo = "ui2"},
-    {.torch = "uint4", .stablehlo = "ui4"},
-    {.torch = "uint8", .stablehlo = "ui8"},
-    {.torch = "uint16", .stablehlo = "ui16"},
-    {.torch = "uint32", .stablehlo = "ui32"},
-    {.torch = "uint64", .stablehlo = "ui64"},
-    {.torch = "int2", .stablehlo = "i2"},
-    {.torch = "int4", .stablehlo = "i4"},
-    {.torch = "int8", .stablehlo = "i8"},
-    {.torch = "int16", .stablehlo = "i16"},
-    {.torch = "int32", .stablehlo = "i32"},
-    {.torch = "int64", .stablehlo = "i64"},
-
-    // Complex types.
-    {.torch = "complex64", .stablehlo = "complexf32"},
-    {.torch = "complex128", .stablehlo = "complexf64"},
-
-    // Floating-point types.
+// The order doesn't affect the checks: each StableHLO type name is matched as a
+// whole word (see `ValidateNoStableHloTypeName()`), so e.g. "f16" doesn't
+// match "bf16".
+constexpr std::array<DTypeNames, 19> kDtypeNames{{
+    // go/keep-sorted start
     {.torch = "bfloat16", .stablehlo = "bf16"},
+    {.torch = "bool", .stablehlo = "pred"},
+    {.torch = "complex128", .stablehlo = "complexf64"},
+    {.torch = "complex64", .stablehlo = "complexf32"},
     {.torch = "float16", .stablehlo = "f16"},
     {.torch = "float32", .stablehlo = "f32"},
     {.torch = "float64", .stablehlo = "f64"},
+    {.torch = "int16", .stablehlo = "i16"},
+    {.torch = "int2", .stablehlo = "i2"},
+    {.torch = "int32", .stablehlo = "i32"},
+    {.torch = "int4", .stablehlo = "i4"},
+    {.torch = "int64", .stablehlo = "i64"},
+    {.torch = "int8", .stablehlo = "i8"},
+    {.torch = "uint16", .stablehlo = "ui16"},
+    {.torch = "uint2", .stablehlo = "ui2"},
+    {.torch = "uint32", .stablehlo = "ui32"},
+    {.torch = "uint4", .stablehlo = "ui4"},
+    {.torch = "uint64", .stablehlo = "ui64"},
+    {.torch = "uint8", .stablehlo = "ui8"},
+    // go/keep-sorted end
 }};
 
-// Default message for checks' pre-condition violations.
-constexpr std::string_view kPreconditionViolatedError =
-    "Error message check pre-condition violated.";
+// Default message for error message checks' pre-condition violations.
+constexpr std::string_view kErrorMessageCheckPreconditionViolated =
+    "Error message check pre-condition violated. This indicates a bug in "
+    "TorchTPU's error message format checker.";
 
-// Check: is not empty nor filled with blank spaces.
-// Pre-conditions: None.
-absl::Status TrimmedErrorMessageIsNotEmpty(const std::string_view message) {
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Error message checks crash and are
-                 // unreachable from Python.
-      !absl::StripAsciiWhitespace(message).empty(), error::kInternal)
-      << "The trimmed error message should not be empty. Add an appropriate "
-         "error message to this error.";
-  return absl::OkStatus();
+// The Validate*() functions below each check one error message guideline.
+// They return a description of the violation if `message` doesn't follow the
+// guideline, or std::nullopt if it does.
+
+// Validates that the message is neither empty nor just whitespace.
+std::optional<std::string> ValidateNotBlank(const std::string_view message) {
+  if (absl::StripAsciiWhitespace(message).empty()) {
+    return "The error message must not be whitespace only.";
+  }
+  return std::nullopt;
 }
 
-// Check: has no leading whitespace.
-// Pre-conditions: The error message must not be empty.
-absl::Status HasNoLeadingWhitespace(const std::string_view message) {
+// Validates that the message has no leading whitespace.
+// Pre-conditions: The message must not be empty.
+std::optional<std::string> ValidateNoLeadingWhitespace(
+    const std::string_view message) {
   ABSL_CHECK(  // CRASH_OK
       !message.empty())
-      << kPreconditionViolatedError;
+      << kErrorMessageCheckPreconditionViolated;
 
   const size_t num_leading_whitespace =
       message.size() - absl::StripLeadingAsciiWhitespace(message).size();
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Error message checks crash and are
-                 // unreachable from Python.
-      num_leading_whitespace == 0, error::kInternal)
-      << "The error message should not start with whitespace. Remove the "
-         "leading "
-      << num_leading_whitespace << " whitespace character(s).";
-  return absl::OkStatus();
+  if (num_leading_whitespace != 0) {
+    return absl::StrCat(
+        "The error message must not start with whitespace. Remove the ",
+        num_leading_whitespace, " leading whitespace character(s).");
+  }
+  return std::nullopt;
 }
 
-// Check: has no trailing whitespace.
-//
-// Pre-conditions: The error message must not be empty.
-absl::Status HasNoTrailingWhitespace(const std::string_view message) {
+// Validates that the message has no trailing whitespace.
+// Pre-conditions: The message must not be empty.
+std::optional<std::string> ValidateNoTrailingWhitespace(
+    const std::string_view message) {
   ABSL_CHECK(  // CRASH_OK
       !message.empty())
-      << kPreconditionViolatedError;
+      << kErrorMessageCheckPreconditionViolated;
 
   const size_t num_trailing_whitespace =
       message.size() - absl::StripTrailingAsciiWhitespace(message).size();
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Error message checks crash and are
-                 // unreachable from Python.
-      num_trailing_whitespace == 0, error::kInternal)
-      << "The error message should not end with whitespace. Remove the "
-         "trailing "
-      << num_trailing_whitespace << " whitespace character(s).";
-
-  return absl::OkStatus();
+  if (num_trailing_whitespace != 0) {
+    return absl::StrCat(
+        "The error message must not end with whitespace. Remove the "
+        "trailing ",
+        num_trailing_whitespace, " whitespace character(s).");
+  }
+  return std::nullopt;
 }
 
-// Check: doesn't capitalize the beginning.
+// Validates that the message doesn't start with an uppercase letter.
 // Pre-conditions:
 //   - The error message must not be empty.
 //   - The error message must not start with whitespace.
 //
-// The first character of `message` should be lower-case. We intentionally allow
+// The first character of `message` must be lower-case. We intentionally allow
 // other characters, e.g. punctuation and numbers.
 //
 // We also allow the message to start with specific allowed words (e.g.,
@@ -209,53 +194,34 @@ absl::Status HasNoTrailingWhitespace(const std::string_view message) {
 //      [bad] ones(): Dimensions...
 //                    |
 //                    |_ `message` starts from this character.
-absl::Status StartsWithNonUppercaseLetter(const std::string_view message) {
+std::optional<std::string> ValidateNoUppercaseStart(
+    const std::string_view message) {
   ABSL_CHECK(  // CRASH_OK
       !message.empty())
-      << kPreconditionViolatedError;
+      << kErrorMessageCheckPreconditionViolated;
   ABSL_CHECK(  // CRASH_OK
       !absl::ascii_isspace(message.front()))
-      << kPreconditionViolatedError;
+      << kErrorMessageCheckPreconditionViolated;
 
-  // Allowed starting words: TorchTPU, PjRt, and XLA.
-  if (StartsWithAllowedWord(message)) {
-    return absl::OkStatus();
+  if (StartsWithAllowedUppercaseWord(message)) {
+    return std::nullopt;
   }
 
-  // Returns the first word of `message`.
-  //
-  // If `to_lower` parameter is set to `true`, convert the first word to
-  // lower-case, and return it.
-  auto get_first_word = [message](const bool to_lower = false) -> std::string {
-    const size_t first_word_end = message.find_first_of(' ');
-    // If there is no blank space in the whole message, first_word_end will be
-    // string_view::npos. So, the expression below will return the whole trimmed
-    // error message.
-    const std::string_view first_word = message.substr(0, first_word_end);
-    return std::string(to_lower ? absl::AsciiStrToLower(first_word)
-                                : first_word);
-  };
-
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Error message checks crash and are
-                 // unreachable from Python.
-      !absl::ascii_isupper(message.front()), error::kInternal)
-      << "The error message should start with a lowercase character. Replace '"
-      << get_first_word() << "' with '" << get_first_word(/* to_lower= */ true)
-      << "'.";
-
-  return absl::OkStatus();
+  if (absl::ascii_isupper(message.front())) {
+    return "The error message must start with a lowercase character.";
+  }
+  return std::nullopt;
 }
 
-// Check: ends with an alphanumeric character.
+// Validates that the message ends with an alphanumeric or allowed character.
 //
 // Pre-conditions:
 //   - The error message must not be empty.
 //   - The error message must not end with whitespace.
 //
-// The last character of `message` should be either alphanumeric or other
+// The last character of `message` must be either alphanumeric or other
 // allowed characters (see kAllowedCharacters).
-absl::Status EndsWithAlphaNumAndAllowedCharacters(
-    const std::string_view message) {
+std::optional<std::string> ValidateLastChar(const std::string_view message) {
   // Each character allowed to appear at the end must be followed by an
   // explanation.
   //   - ']': covers error messages ending with lists and shapes
@@ -268,35 +234,25 @@ absl::Status EndsWithAlphaNumAndAllowedCharacters(
 
   ABSL_CHECK(  // CRASH_OK
       !message.empty())
-      << kPreconditionViolatedError;
+      << kErrorMessageCheckPreconditionViolated;
   ABSL_CHECK(  // CRASH_OK
       !absl::ascii_isspace(message.back()))
-      << kPreconditionViolatedError;
+      << kErrorMessageCheckPreconditionViolated;
 
-  // Find the suffix of non-alphanumeric characters.
-  auto is_character_allowed = [kAllowedCharacters](const char c) {
-    return absl::ascii_isalnum(c) || absl::StrContains(kAllowedCharacters, c);
-  };
+  const char last_char = message.back();
+  if (absl::ascii_isalnum(last_char) ||
+      absl::StrContains(kAllowedCharacters, last_char)) {
+    return std::nullopt;
+  }
 
-  auto last_allowed_char_it =
-      std::find_if(message.rbegin(), message.rend(), is_character_allowed);
-  const size_t not_allowed_suffix_size =
-      std::distance(last_allowed_char_it.base(), message.end());
-
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Error message checks crash and are
-                 // unreachable from Python.
-      not_allowed_suffix_size == 0, error::kInternal)
-      << "The error message should end with either an alpha-numeric character "
-         "or one of the following characters: '"
-      << kAllowedCharacters << "'. Remove the last " << not_allowed_suffix_size
-      << " characters: '"
-      << message.substr(message.size() - not_allowed_suffix_size) << "'.";
-
-  return absl::OkStatus();
+  return absl::StrCat(
+      "The error message must end with either an alpha-numeric character "
+      "or one of the following characters: ",
+      kAllowedCharacters);
 }
 
-// Check: if it states the expected condition first, then it should state what
-// is wrong afterwards.
+// Validates that, if the message states the expected condition or the actual
+// value, it's in the "expected ..., got ..." format.
 //
 // Pre-conditions: The error message must not be empty.
 //
@@ -311,121 +267,95 @@ absl::Status EndsWithAlphaNumAndAllowedCharacters(
 //
 //     2. If (1) is true, check that it follows the following format:
 //         - expected ..., got ...
-absl::Status HasValidFormat(const std::string_view message) {
+std::optional<std::string> ValidateExpectedGotFormat(
+    const std::string_view message) {
   ABSL_CHECK(  // CRASH_OK
       !message.empty())
-      << kPreconditionViolatedError;
+      << kErrorMessageCheckPreconditionViolated;
 
   static LazyRE2 kExpectedConditionOrActualValuePattern = {
       R"((.*\bexpected\b.*|.*[.,]\s*\b(?i:got|but got)\b.*))"};
   static LazyRE2 kExpectedGotPattern = {R"(^expected\b.*, got\b.*)"};
 
-  if (RE2::FullMatch(message, *kExpectedConditionOrActualValuePattern)) {
-    TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Error message checks crash and are
-                   // unreachable from Python.
-        RE2::FullMatch(message, *kExpectedGotPattern), error::kInternal)
-        << "The error message states an expected condition or the actual "
+  if (RE2::FullMatch(message, *kExpectedConditionOrActualValuePattern) &&
+      !RE2::FullMatch(message, *kExpectedGotPattern)) {
+    return "The error message states an expected condition or the actual "
            "value (i.e. contains \"expected\", or \", (but) got\" "
-           "strings). Therefore, it should be in the following format: "
+           "strings). Therefore, it must be in the following format: "
            "\"expected ..., got ...\".";
   }
-
-  return absl::OkStatus();
+  return std::nullopt;
 }
 
-// Check: shows all types as their official PyTorch dtype names.
-// Pre-conditions: The error message must not be empty.
-//
-// Show PyTorch dtype names, as opposed to StableHLO/XLA type names.
+// Validates that the message shows the given dtype by its official PyTorch
+// name, as opposed to its StableHLO/XLA type name:
 //     - "float32" vs. "f32"
 //     - "int32" vs. "si32"
 //     - "int64" vs. "si64"
 //     - "bool" vs. "pred"
 //     - "bfloat16" vs. "bf16".
-absl::Status DoesNotContainStableHloTypeName(const std::string_view message,
-                                             const TypeNamePair& pair) {
+//
+// Pre-conditions: The error message must not be empty.
+std::optional<std::string> ValidateNoStableHloTypeName(
+    const std::string_view message, const DTypeNames& pair) {
   ABSL_CHECK(  // CRASH_OK
       !message.empty())
-      << kPreconditionViolatedError;
+      << kErrorMessageCheckPreconditionViolated;
 
   const std::string type_name_regex =
       absl::StrCat("\\b", pair.stablehlo, "\\b");
 
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Error message checks crash and are
-                 // unreachable from Python.
-      !RE2::PartialMatch(message, type_name_regex), error::kInternal)
-      << "The error message should use the PyTorch dtype names instead of "
-         "the StableHLO type names, i.e. it should show '"
-      << pair.torch << "' instead of '" << pair.stablehlo
-      << "'. Use ToString(mlir::ElementType) for retrieving the PyTorch "
-         "dtype name.";
-  return absl::OkStatus();
+  if (RE2::PartialMatch(message, type_name_regex)) {
+    return absl::StrCat(
+        "The error message must use the PyTorch dtype names instead of "
+        "the StableHLO type names, e.g. it must show '",
+        pair.torch, "' instead of '", pair.stablehlo,
+        "'. Use ToString(mlir::ElementType) for retrieving the PyTorch "
+        "dtype name.");
+  }
+  return std::nullopt;
 }
 
-// Check: if the sentinel is present, it must not have leading nor trailing
-// empty spaces.
+// Validates that the XLA compiler error sentinel is preceded
+// by a non-empty context and has no surrounding spaces.
 //
-// Pre-condition: The error message must not be empty.
-absl::Status HasNoSpacesSurroundingSentinel(const std::string_view message) {
+// Pre-condition: The error message must contain the sentinel.
+std::optional<std::string> ValidateXlaSentinelFormat(
+    const std::string_view message) {
+  const size_t sentinel_start = message.find(kXlaCompilerFailedWith);
   ABSL_CHECK(  // CRASH_OK
-      !message.empty())
-      << kPreconditionViolatedError;
+      sentinel_start != std::string_view::npos)
+      << kErrorMessageCheckPreconditionViolated;
 
-  const size_t sentinel_beg = message.find(kXlaCompilerFailedWith);
-  const size_t sentinel_end = sentinel_beg + kXlaCompilerFailedWith.size();
-
-  if (sentinel_beg == std::string_view::npos) {
-    // Nothing to check if the sentinel string is not found.
-    return absl::OkStatus();
-  }
-
-  const std::string_view context = message.substr(0, sentinel_beg);
+  const std::string_view context = message.substr(0, sentinel_start);
+  const size_t sentinel_end = sentinel_start + kXlaCompilerFailedWith.size();
   const std::string_view xla_error = message.substr(sentinel_end);
 
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Error message checks crash and are
-                 // unreachable from Python.
-      !absl::StripAsciiWhitespace(context).empty(), error::kInternal)
-      << "The TorchTPU context should not be empty when using the XLA error "
-         "sentinel string. Make sure to add a context string before.";
+  if (absl::StripAsciiWhitespace(context).empty()) {
+    return "The TorchTPU context must not be empty when using the XLA error "
+           "sentinel string. Make sure to add a context string before.";
+  }
 
-  const size_t leading_spaces_beg = context.find_last_not_of(' ') + 1;
-  const size_t leading_spaces_count = context.size() - leading_spaces_beg;
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Error message checks crash and are
-                 // unreachable from Python.
-      leading_spaces_count == 0, error::kInternal)
-      << "Expected no spaces before the XLA compiler error sentinel \""
-      << kXlaCompilerFailedWith << "\" (it already begins with one), got "
-      << leading_spaces_count << ".";
+  // We already know that `context` contains at least one non-space character
+  // (from the previous check). Hence the find will succeed.
+  const size_t leading_spaces_start = context.find_last_not_of(' ') + 1;
+  const size_t leading_spaces_count = context.size() - leading_spaces_start;
+  if (leading_spaces_count != 0) {
+    return absl::StrCat(
+        "Expected no spaces before the XLA compiler error sentinel \"",
+        kXlaCompilerFailedWith, "\" (it already begins with one), got ",
+        leading_spaces_count, ".");
+  }
 
   const size_t trailing_spaces_count = xla_error.find_first_not_of(' ');
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Error message checks crash and are
-                 // unreachable from Python.
-      trailing_spaces_count == 0, error::kInternal)
-      << "Expected no spaces after the XLA compiler error sentinel \""
-      << kXlaCompilerFailedWith << "\" (it already ends with one), got "
-      << trailing_spaces_count << ".";
+  if (trailing_spaces_count != 0) {
+    return absl::StrCat(
+        "Expected no spaces after the XLA compiler error sentinel \"",
+        kXlaCompilerFailedWith, "\" (it already ends with one), got ",
+        trailing_spaces_count, ".");
+  }
 
-  return absl::OkStatus();
-}
-
-// Returns whether `message` has whitespace at the start, at the end, or at
-// both ends.
-//
-// Pre-conditions:
-//   - `message` must not be empty.
-//
-// Examples:
-//   HasSurroundingWhitespaces(" foo")  -> true  (leading whitespace)
-//   HasSurroundingWhitespaces("foo ")  -> true  (trailing whitespace)
-//   HasSurroundingWhitespaces(" foo ") -> true  (leading and trailing)
-//   HasSurroundingWhitespaces("foo")   -> false (trimmed)
-//   HasSurroundingWhitespaces("f oo")  -> false (internal whitespace only)
-[[nodiscard]] bool HasSurroundingWhitespaces(const std::string_view message) {
-  ABSL_CHECK(!message.empty())  // CRASH_OK
-      << kPreconditionViolatedError;
-
-  return absl::ascii_isspace(message.front()) ||
-         absl::ascii_isspace(message.back());
+  return std::nullopt;
 }
 
 // Result of splitting an error message after leading context prefixes.
@@ -483,12 +413,6 @@ struct ContextPrefixSplit {
   return SplitAfterContextPrefixes(message).remaining;
 }
 
-// Returns whether `message` contains an XLA compiler error by looking for the
-// sentinel string `kXlaCompilerFailedWith`.
-[[nodiscard]] bool HasXlaCompilerError(const std::string_view message) {
-  return absl::StrContains(message, kXlaCompilerFailedWith);
-}
-
 // Strips the XLA compiler error sentinel and anything after it.
 //
 // Returns the substring before `kXlaCompilerFailedWith`, or the original
@@ -499,279 +423,174 @@ struct ContextPrefixSplit {
   return pos != std::string_view::npos ? message.substr(0, pos) : message;
 }
 
-// Enum specifying whether a check should be enforced or logged as warning.
+// Checks that error messages follow the TorchTPU error handling guidelines
+// (go/tt-error-guide).
 //
-// Checks marked as kWarn that fail are logged as warning messages. Enforced
-// checks that fail will trigger a hard crash.
-enum class CheckKind { kEnforce, kWarn };
-
-// Result of checking the error message.
-struct ErrorMessageChecksResult {
-  // Whether the error message passed the enforced checks.
-  // If true, indicates that the error message conforms to the enforced
-  // guidelines (even if there are non-enforced guidelines failing), so we
-  // should NOT crash.
-  bool success = true;
-
-  // The status messages (i.e. reasons) of the failing checks.
-  std::vector<std::string> failure_reasons;
-};
-
-// Populates the given `ErrorMessageChecksResult` if the given `status` is an
-// error status.
-//
-// Does nothing if `status` is not an error status.
-// Otherwise, propagate its error by setting the `result` appropriately.
-//
-// Before appending the error status to the list of failures of `r`, we prepend:
-//   - The Enforced Prefix: only if this check is being enforced.
-//   - The given `context`: e.g. specifying the group this check belonged to.
-//
-// Returns whether `r` was modified or not, i.e. status is an error status.
-bool PopulateResultIfError(ErrorMessageChecksResult& r,
-                           const absl::Status& status, const CheckKind kind,
-                           const std::string_view context = "") {
-  constexpr std::string_view kEnforcedPrefix = "(enforced) ";
-
-  if (!status.ok()) {
-    const bool should_enforce_check = kind == CheckKind::kEnforce;
-
-    // Given that this check has failed, set `success` depending on the value
-    // of `should_enforce_check`:
-    //
-    //   - If it's `false` (i.e. should NOT be enforced), `success` should not
-    //     change
-    //
-    //   - Otherwise, `success` should be false
-    r.success = r.success && !should_enforce_check;
-
-    const std::string_view enforced_prefix =
-        should_enforce_check ? kEnforcedPrefix : "";
-
-    r.failure_reasons.push_back(
-        absl::StrCat(enforced_prefix, context, status.message()));
-  }
-
-  return !status.ok();
-}
-
-// Trims whitespace from the error message and checks whitespace guidelines.
-//
-// Performs the following checks and appends any violation status to `r`:
-//   - Trimmed error message is not empty.
-//   - Error message has no leading whitespace.
-//   - Error message has no trailing whitespace.
-//
-// The leading and trailing whitespace checks are only run if the trimmed
-// message is not empty.
-//
-// Returns the trimmed message if non-empty; otherwise returns `std::nullopt`.
-[[nodiscard]] std::optional<std::string_view> TrimAndCheckMessage(
-    ErrorMessageChecksResult& r, const std::string_view message,
-    const std::string_view context = "") {
-  const bool is_trimmed_error_empty = PopulateResultIfError(
-      r, TrimmedErrorMessageIsNotEmpty(message), CheckKind::kEnforce, context);
-
-  if (is_trimmed_error_empty) {
-    return std::nullopt;
-  }
-
-  PopulateResultIfError(r, HasNoLeadingWhitespace(message), CheckKind::kEnforce,
-                        context);
-  PopulateResultIfError(r, HasNoTrailingWhitespace(message),
-                        CheckKind::kEnforce, context);
-
-  return absl::StripAsciiWhitespace(message);
-}
-
-// Runs checks on the entire error message.
-//
-// Pre-conditions:
-//   - The error message should be trimmed (i.e. no surrounding whitespace).
-//
-// Populates `r` on any check failure.
-void CheckFullMessage(ErrorMessageChecksResult& r,
-                      const std::string_view message) {
-  ABSL_CHECK(!HasSurroundingWhitespaces(message))  // CRASH_OK
-      << kPreconditionViolatedError;
-
-  PopulateResultIfError(r, EndsWithAlphaNumAndAllowedCharacters(message),
-                        CheckKind::kEnforce);
-  PopulateResultIfError(r, HasNoSpacesSurroundingSentinel(message),
-                        CheckKind::kEnforce);
-}
-
-// Runs checks on the error message without any XLA compiler error.
-//
-// Pre-conditions:
-//   - The error message should be trimmed (i.e. no surrounding whitespace).
-//   - The XLA compiler error message has been removed.
-//
-// This function applies TorchTPU error guidelines on errors that we control.
-// That is the reason for running them only after the XLA compiler error is
-// removed.
-//
-// Populates `r` on any check failure.
-void CheckMessageWithoutXlaCompilerError(ErrorMessageChecksResult& r,
-                                         const std::string_view message,
-                                         const std::string_view context) {
-  ABSL_CHECK(!HasSurroundingWhitespaces(message))  // CRASH_OK
-      << kPreconditionViolatedError;
-  ABSL_CHECK(!HasXlaCompilerError(message))  // CRASH_OK
-      << kPreconditionViolatedError;
-
-  for (const auto& pair : type_name_pairs) {
-    // Error messages coming from the OpenXLA project might contain StableHLO
-    // type names, but we don't have control over it.
-    PopulateResultIfError(r, DoesNotContainStableHloTypeName(message, pair),
-                          CheckKind::kEnforce, context);
-  }
-}
-
-// Checks the TorchTPU core error message formatting guidelines.
-//
-// Pre-conditions:
-//   - The error message should be trimmed (no leading/trailing whitespace).
-//   - The XLA compiler error message has been removed.
-//   - Context prefixes ("failed to ...: ") should already be stripped.
-//
-// This function applies TorchTPU error guidelines on the core error message,
-// after removing external errors and context prefixes.
-//
-// Populates `r` on any check failure.
-void CheckTorchTpuCoreMessage(ErrorMessageChecksResult& r,
-                              const std::string_view message,
-                              const std::string_view context) {
-  ABSL_CHECK(!HasSurroundingWhitespaces(message))  // CRASH_OK
-      << kPreconditionViolatedError;
-  ABSL_CHECK(!HasXlaCompilerError(message))  // CRASH_OK
-      << kPreconditionViolatedError;
-  ABSL_CHECK(!StartsWithContextPrefix(message))  // CRASH_OK
-      << kPreconditionViolatedError;
-
-  // Makes sure the error message after the context prefixes doesn't start with
-  // an upper case letter.
-  //
-  // Example:
-  //   failed to materialize: Expected tensor to be a 1D tensor, got 2D
-  //                          |
-  //                          |__ upper case letter not allowed.
-  PopulateResultIfError(r, StartsWithNonUppercaseLetter(message),
-                        CheckKind::kEnforce, context);
-
-  // Only relevant on TorchTPU error messages.
-  // - False positives might come from XLA compiler errors.
-  // - Context prefixes should be removed so that we can enforce that it starts
-  //   with `expected` if applicable.
-  PopulateResultIfError(r, HasValidFormat(message), CheckKind::kEnforce,
-                        context);
-}
-
-// Runs all checks, and returns their failure reasons.
-//
-// This function splits the error message checks into 3 groups, depending on
-// their needed scope:
+// The checks are split into 3 groups, depending on their needed scope:
 //   1. Full Error Message
 //   2. No XLA Compiler Error Message: (1), but without the XLA compiler error.
 //   3. TorchTPU Core Error Message: (2), but without the context prefixes.
 //
-// Returns the collected failures, or a default constructed
-// `ErrorMessageChecksResult{}` if there are no check failures.
-[[nodiscard]] ErrorMessageChecksResult GetErrorMessageChecksResult(
-    const std::string_view message) {
-  ErrorMessageChecksResult r;
-
-  constexpr std::string_view kNoXlaErrorContext =
-      "After removing the XLA compiler error: ";
-  constexpr std::string_view kTorchTpuCoreContext =
-      "On TorchTPU core error message: ";
-
-  // Trimmed error message.
-  //
-  // It's reset at the start of each group, where the current error message gets
-  // updated and trimmed with a call to `TrimAndCheckMessage()`.
-  //
-  // If `nullopt` gets assigned to variable `trimmed`, it means that the
-  // processed error message is empty after trimming. Meaning that we should
-  // stop running the checks.
-  std::optional<std::string_view> trimmed;
-
-  // Full Error Message
-  // Following checks assume there are no leading or trailing whitespaces.
-  trimmed = TrimAndCheckMessage(r, message);
-
-  if (!trimmed.has_value()) {
-    return r;
-  }
-
-  CheckFullMessage(r, *trimmed);
-
-  // No XLA Compiler Error Message
-  // Following checks assume that there is no XLA compiler error.
-  trimmed = TrimAndCheckMessage(r, RemoveXlaCompilerError(*trimmed),
-                                kNoXlaErrorContext);
-
-  if (!trimmed.has_value()) {
-    return r;
-  }
-
-  CheckMessageWithoutXlaCompilerError(r, *trimmed, kNoXlaErrorContext);
-
-  // TorchTPU Core Error Message
-  // Following checks assume that there are no context prefixes.
-  trimmed = TrimAndCheckMessage(r, RemoveAllContextPrefixes(*trimmed),
-                                kTorchTpuCoreContext);
-
-  if (!trimmed.has_value()) {
-    return r;
-  }
-
-  CheckTorchTpuCoreMessage(r, *trimmed, kTorchTpuCoreContext);
-
-  return r;
-}
-
-// Formats a detailed log message explaining guideline violations.
-[[nodiscard]] std::string GetLogMessage(
-    const TtError& error, const std::vector<std::string>& failure_reasons) {
-  const auto& source = error.thrown_from();
-
-  return absl::StrCat(
-      source.file, ":", source.line,
-      ": Improper error message format in function '", source.function,
-      "' (please follow go/tt-error-guide).\n", "\n", "Actual error message:\n",
-      "  '", error.status().message(), "'\n", "\n", "What's wrong with it:\n",
-      absl::StrJoin(failure_reasons, /* separator= */ "\n",
-                    /* fmt= */ [](std::string* out, const std::string& reason) {
-                      absl::StrAppend(out, "  - ", reason);
-                    }));
-}
-
-void CheckErrorMessageFollowsGuidelines(const TtError& error) {
-  const ErrorMessageChecksResult& result =
-      GetErrorMessageChecksResult(error.status().message());
-
-  if (result.success) {
-    // If there are any error message checks failing, log them as warning.
-    if (!result.failure_reasons.empty()) {
-      ABSL_LOG(WARNING)
-          << GetLogMessage(error, result.failure_reasons) << "\n"
-          << "\n"
-          << "    All error message checks (see above) are going to be "
-             "enforced in\n"
-          << "    the future. The \"Actual error message\" raised above fails "
-             "some\n"
-          << "    checks. Consider addressing the problems described.";
+// Example:
+//   ErrorFormatChecker().Check(error);
+class ErrorFormatChecker {
+ public:
+  // Checks that the message of `error` follows the guidelines. Crashes with an
+  // explanation of all violations if it doesn't.
+  void Check(const TtError& error) {
+    violations_.clear();
+    CheckMessage(error.status().message());
+    if (!violations_.empty()) {
+      ABSL_LOG(FATAL)  // CRASH_OK
+          << ExplainViolations(error);
     }
-    return;
   }
 
-  // Crash if the error message doesn't pass the currently enforced checks.
-  ABSL_LOG(FATAL)  // CRASH_OK
-      << GetLogMessage(error, result.failure_reasons);
-}
+ private:
+  static constexpr std::string_view kFullMessageContext = "";
+  static constexpr std::string_view kNoXlaErrorContext =
+      "After removing the XLA compiler error: ";
+  static constexpr std::string_view kNoContextPrefixContext =
+      "After removing all context prefixes: ";
+  static constexpr std::string_view kNoContextPrefixAndXlaErrorContext =
+      "After removing all context prefixes and the XLA compiler error: ";
 
-#endif  // TT_CHECKS_ERROR_FORMAT
+  // Runs all checks on `message`, and records the violations found.
+  void CheckMessage(const std::string_view message) {
+    // The part of the message that is being checked.
+    std::string_view to_check = message;
+    context_ = kFullMessageContext;
+
+    // Does this message contain an XLA compiler error?
+    const bool has_xla_error =
+        absl::StrContains(to_check, kXlaCompilerFailedWith);
+    if (has_xla_error) {
+      // Yes. First check that the XLA error sentinel is formatted correctly.
+      AppendIfViolation(ValidateXlaSentinelFormat(to_check));
+      // Remove the XLA compiler error.
+      to_check = RemoveXlaCompilerError(to_check);
+      context_ = kNoXlaErrorContext;
+    }
+
+    // StableHLO type names are not allowed anywhere in the TorchTPU part of the
+    // message, including the context prefixes. Hence we check them before
+    // removing the context prefixes. (Error messages coming from the OpenXLA
+    // project might contain StableHLO type names, but we don't have control
+    // over it.)
+    CheckNoStableHloTypeName(to_check);
+
+    const std::string_view no_context_prefixes =
+        RemoveAllContextPrefixes(to_check);
+    if (no_context_prefixes != to_check) {
+      to_check = no_context_prefixes;
+      context_ = has_xla_error ? kNoContextPrefixAndXlaErrorContext
+                               : kNoContextPrefixContext;
+    }
+
+    CheckCoreMessage(to_check);
+  }
+
+  // Validates that `message` doesn't contain any StableHLO type name.
+  void CheckNoStableHloTypeName(const std::string_view message) {
+    if (message.empty()) {
+      return;
+    }
+    for (const auto& pair : kDtypeNames) {
+      AppendIfViolation(ValidateNoStableHloTypeName(message, pair));
+    }
+  }
+
+  // Checks the whitespace guidelines on the error message:
+  //   - Error message is not blank (i.e. empty or whitespace only).
+  //   - Error message has no leading whitespace.
+  //   - Error message has no trailing whitespace.
+  //
+  // The leading and trailing whitespace checks are only run if the message is
+  // not blank.
+  void CheckWhitespaceFormat(const std::string_view message) {
+    if (AppendIfViolation(ValidateNotBlank(message))) {
+      return;
+    }
+
+    AppendIfViolation(ValidateNoLeadingWhitespace(message));
+    AppendIfViolation(ValidateNoTrailingWhitespace(message));
+  }
+
+  // Checks the TorchTPU core error message formatting guidelines.
+  //
+  // Pre-conditions:
+  //   - The XLA compiler error message has been removed.
+  //   - Context prefixes ("failed to ...: ") must already be stripped.
+  //
+  // This function applies TorchTPU error guidelines on the core error message,
+  // after removing external errors and context prefixes.
+  void CheckCoreMessage(const std::string_view message) {
+    ABSL_CHECK(!absl::StrContains(message, kXlaCompilerFailedWith))  // CRASH_OK
+        << kErrorMessageCheckPreconditionViolated;
+    ABSL_CHECK(!StartsWithContextPrefix(message))  // CRASH_OK
+        << kErrorMessageCheckPreconditionViolated;
+    CheckWhitespaceFormat(message);
+
+    // The checks below require a message without surrounding whitespace.
+    // Whitespace violations (if any) have been recorded above.
+    const std::string_view trimmed = absl::StripAsciiWhitespace(message);
+    if (trimmed.empty()) {
+      return;
+    }
+
+    // Makes sure the error message after the context prefixes doesn't start
+    // with an upper case letter.
+    //
+    // Example:
+    //   failed to materialize: Expected tensor to be a 1D tensor, got 2D
+    //                          |
+    //                          |__ upper case letter not allowed.
+    AppendIfViolation(ValidateNoUppercaseStart(trimmed));
+
+    AppendIfViolation(ValidateLastChar(trimmed));
+
+    // Only relevant on TorchTPU error messages.
+    // - False positives might come from XLA compiler errors.
+    // - Context prefixes must be removed so that we can enforce that it
+    //   starts with `expected` if applicable.
+    AppendIfViolation(ValidateExpectedGotFormat(trimmed));
+  }
+
+  // If `violation` is set, records it, prefixed by the current context.
+  //
+  // Returns true if `violation` is set.
+  bool AppendIfViolation(const std::optional<std::string>& violation) {
+    if (!violation.has_value()) return false;
+    violations_.push_back(absl::StrCat(context_, *violation));
+    return true;
+  }
+
+  // Formats a detailed log message explaining the recorded violations.
+  [[nodiscard]] std::string ExplainViolations(const TtError& error) const {
+    const auto& source = error.thrown_from();
+    return absl::StrCat(
+        source.file, ":", source.line,
+        ": Bad error message format in function '", source.function,
+        "' (please follow go/tt-error-guide).\n\n"  //
+        "Actual error message:\n",
+        "  '", error.status().message(),
+        "'\n\n"  //
+        "What's wrong with it:\n",
+        absl::StrJoin(violations_, /* separator= */ "\n",
+                      /* fmt= */
+                      [](std::string* out, const std::string& reason) {
+                        absl::StrAppend(out, "  - ", reason);
+                      }));
+  }
+
+  // Describes which part of the error message is being checked. Prepended to
+  // the recorded violations.
+  std::string_view context_ = kFullMessageContext;
+
+  // The violations found when checking the error message against the
+  // guidelines. If empty, the error message conforms to the guidelines.
+  std::vector<std::string> violations_;
+};
 
 }  // namespace
 
@@ -793,7 +612,7 @@ std::string AdaptExternalErrorMessage(const std::string_view message) {
 
   // Check: error messages should start with a lowercase character.
   // We skip lowercasing if the message starts with specific allowed words.
-  if (!StartsWithAllowedWord(new_message) &&
+  if (!StartsWithAllowedUppercaseWord(new_message) &&
       absl::ascii_isupper(new_message[0])) {
     new_message[0] = absl::ascii_tolower(new_message[0]);
   }
@@ -906,6 +725,10 @@ void CheckDeviceIsTpu(const c10::optional<at::Device> device_opt,
   ABSL_CHECK(device_opt.has_value());       // CRASH_OK
   ABSL_CHECK_EQ(device_opt.value().type(),  // CRASH_OK
                 GetPrivateUse1DeviceType());
+  if (device_opt->has_index() &&
+      c10::impl::hasDeviceGuardImpl(GetPrivateUse1DeviceType())) {
+    c10::DeviceGuard device_guard(*device_opt);
+  }
 }
 
 bool IsXlaOomError(const absl::Status& status) {
@@ -969,11 +792,16 @@ void WaitForPendingAssertionChecks() {
   }
 }
 
-void SyncAndCheckStickyError() {
+absl::Status SyncAndReturnStickyError() {
   WaitForPendingAssertionChecks();
   if (ABSL_PREDICT_FALSE(HasStickyError())) {
-    TT_THROW_IF_ERROR(GetStickyError());
+    return GetStickyError();
   }
+  return absl::OkStatus();
+}
+
+void SyncAndCheckStickyError() {
+  TT_THROW_IF_ERROR(SyncAndReturnStickyError());
 }
 
 void ClearStickyError() {
@@ -1221,11 +1049,11 @@ TtError::TtError(absl::Status status, c10::SourceLocation thrown_from)
 }
 
 void TranslateToC10ErrorAndThrow(const TtError& e) {
-#if TT_CHECKS_ERROR_FORMAT
-  // Check that the error message format follows the TorchTPU guidelines
-  // (go/tt-error-guide) only if we are in an internal debug build.
-  CheckErrorMessageFollowsGuidelines(e);
-#endif
+  if constexpr (kCheckErrorFormat) {
+    // Check that the error message format follows the TorchTPU guidelines
+    // (go/tt-error-guide).
+    ErrorFormatChecker().Check(e);
+  }
 
   const std::string message =
       MakeErrorMessage(e.status(), e.thrown_from(), ExceptionType::kC10Error);

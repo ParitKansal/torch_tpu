@@ -31,6 +31,11 @@ absl::Status ValidateConvolutionSpatialDimensionsMatch(
     int num_spatial_dims, absl::Span<const int64_t> thing,
     std::string_view arg_name);
 
+absl::Status ValidateConvolutionSpatialParameters(
+    absl::Span<const int64_t> stride, absl::Span<const int64_t> padding,
+    absl::Span<const int64_t> dilation,
+    absl::Span<const int64_t> output_padding, bool transposed);
+
 absl::Status ValidateConvolutionWeight(absl::Span<const int64_t> weight,
                                        int64_t num_spatial_dims,
                                        int64_t in_channels, int64_t groups,

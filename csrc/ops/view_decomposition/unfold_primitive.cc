@@ -25,6 +25,7 @@
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "csrc/common/dimension_types.h"
+#include "csrc/common/utils.h"
 #include "csrc/ops/op_builder_utils.h"
 #include "csrc/ops/view_decomposition/strided_layout.h"
 #include "csrc/ops/view_decomposition/view_primitive_error_utils.h"
@@ -149,8 +150,7 @@ absl::StatusOr<mlir::MlirOp> ViewPrimitiveShlo(mlir::MlirOp input,
   start_indices.resize(rank, 0);
   start_indices[rank - 1] = unfold.start_index;
 
-  Indices limit_indices(input_type.getShape().begin(),
-                        input_type.getShape().end());
+  Indices limit_indices = CopyIntVector(input_type.getShape());
   limit_indices[rank - 1] = start_indices[rank - 1] + unfold.window_size;
 
   Strides slice_strides(rank, 1);

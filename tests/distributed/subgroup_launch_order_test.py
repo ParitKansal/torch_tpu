@@ -41,13 +41,12 @@ import torch._functorch.config as functorch_config
 from torch._higher_order_ops import scan
 from torch._inductor.runtime.cache_dir_utils import temporary_cache_dir
 from torch.distributed import _functional_collectives as funcol
-import torch.multiprocessing as mp
 from torch_tpu._internal import pallas
 from torch_tpu._internal.distributed import spmd_util
+from torch_tpu._internal.utils import hardware
 from torch_tpu._internal.utils import test_utils as utils
 from torch_tpu._internal.distributed import multiprocessing
-from tests import seed_test_utils
-from tests.distributed import distributed_utils
+from tests.distributed import continuous_test_utils
 
 P = jax.sharding.PartitionSpec
 
@@ -74,10 +73,55 @@ _LAYOUTS = {
 }
 _LAYOUT_CASES = tuple((name, name) for name in _LAYOUTS)
 # Every group of these layouts is whole chips, so it compiles for a subslice.
-_SUBSLICE_LAYOUTS = ("halves", "pairs")
+# The reversed groups hold the devices of the halves.
+_SUBSLICE_LAYOUTS = ("halves", "pairs", "reversed")
 _TIER2_CACHE_ROOT = "/dev/shm/torch_tpu_cache"
+_CACHE_TOKEN = os.environ.get("TEST_TMPDIR") or os.environ.get(
+    "TORCH_TPU_CACHE_TOKEN"
+)
+if not _CACHE_TOKEN:
+  _CACHE_TOKEN = uuid.uuid4().hex
+  os.environ["TORCH_TPU_CACHE_TOKEN"] = _CACHE_TOKEN
+_CACHE_TOKEN = pathlib.Path(_CACHE_TOKEN).name
+_TIER2_CACHE_NAME = f"subgroup_launch_order_test_{_CACHE_TOKEN}"
+_TIER3_CACHE_ROOT = os.path.join(
+    _TIER2_CACHE_ROOT, f"{_TIER2_CACHE_NAME}_tier3"
+)
+os.environ["TORCH_TPU_TIER2_COMPILATION_CACHE"] = _TIER2_CACHE_NAME
 # Groups in other than ascending rank order need `dist.new_group(sort_ranks=)`.
 _HAS_SORT_RANKS = "sort_ranks" in inspect.signature(dist.new_group).parameters
+# Read from the PCI devices, so the parent process can decide the skips without
+# initializing the TPU that its workers use. Unknown TPUs count as having
+# SparseCores.
+_TPU_SPEC = hardware.get_tpu_spec()
+_HAS_SPARSE_CORES = _TPU_SPEC is None or _TPU_SPEC.sparse_core_spec is not None
+
+
+def _skip_reason(test_name: str) -> str | None:
+  """Returns why the test named `test_name` must be skipped, if it must."""
+  layout = next(
+      (name for name in _LAYOUTS if test_name.endswith(f"_{name}")), None
+  )
+  if layout == "reversed" and not _HAS_SORT_RANKS:
+    return "dist.new_group has no sort_ranks in this torch version"
+  if (
+      test_name.startswith("test_uneven_group_sparse_core_programs")
+      and not _HAS_SPARSE_CORES
+  ):
+    return "This TPU has no SparseCores."
+  if (
+      test_name.startswith("test_uneven_group_all_to_all")
+      and layout in _SUBSLICE_LAYOUTS
+      and (libtpu := utils.libtpu_version()) is not None
+      and libtpu < (0, 0, 51)
+  ):
+    return (
+        "The SparseCores halt in all-to-alls of subslice programs before"
+        " libtpu 0.0.51."
+    )
+  return None
+
+
 _AXIS = "group"
 # One table row per CSR index slot: 16 CSR rows of 64 slots, 8 of them used.
 _TABLE_ROWS = 1024
@@ -85,6 +129,9 @@ _TABLE_WIDTH = 16
 _CSR_ROWS = 16
 _CSR_ROW_NON_ZEROES = 8
 _CSR_MAX_ROW_NON_ZEROES = 64
+_PAIR_GROUPS = None
+_COLUMN_GROUPS = None
+_LAYOUT_GROUPS = {}
 
 
 def _make_groups(rank):
@@ -93,14 +140,19 @@ def _make_groups(rank):
   PyTorch's `dist.new_group` must be called by every rank for every group;
   torch_tpu only uses this rank's own groups.
   """
+  global _PAIR_GROUPS, _COLUMN_GROUPS
+  if _PAIR_GROUPS is None:
+    _PAIR_GROUPS = [(ranks, dist.new_group(ranks=ranks)) for ranks in _PAIRS]
+    _COLUMN_GROUPS = [
+        (ranks, dist.new_group(ranks=ranks)) for ranks in _COLUMNS
+    ]
+
   my_pair, my_pair_ranks = None, None
-  for ranks in _PAIRS:
-    group = dist.new_group(ranks=ranks)
+  for ranks, group in _PAIR_GROUPS:
     if rank in ranks:
       my_pair, my_pair_ranks = group, ranks
   my_column = None
-  for ranks in _COLUMNS:
-    group = dist.new_group(ranks=ranks)
+  for ranks, group in _COLUMN_GROUPS:
     if rank in ranks:
       my_column = group
   return my_pair, my_pair_ranks, my_column
@@ -115,12 +167,18 @@ def _make_layout_group(rank, layout):
   Returns:
     The group of this rank, its ranks and its index in `layout`.
   """
+  if layout not in _LAYOUT_GROUPS:
+    groups = []
+    for ranks in _LAYOUTS[layout]:
+      if ranks == sorted(ranks):
+        group = dist.new_group(ranks=ranks)
+      else:
+        group = dist.new_group(ranks=ranks, sort_ranks=False)
+      groups.append(group)
+    _LAYOUT_GROUPS[layout] = groups
+
   my_group, my_ranks = None, None
-  for ranks in _LAYOUTS[layout]:
-    if ranks == sorted(ranks):
-      group = dist.new_group(ranks=ranks)
-    else:
-      group = dist.new_group(ranks=ranks, sort_ranks=False)
+  for ranks, group in zip(_LAYOUTS[layout], _LAYOUT_GROUPS[layout]):
     if rank in ranks:
       my_group, my_ranks = group, ranks
   return my_group, my_ranks, _LAYOUTS[layout].index(my_ranks)
@@ -128,7 +186,6 @@ def _make_layout_group(rank, layout):
 
 def run_uneven_group_collectives(layout: str) -> None:
   """Group k issues k + 1 group all-reduces; no other group joins them."""
-  dist.init_process_group(backend="tpu_dist")
   rank = int(os.environ["RANK"])
   assert int(os.environ["WORLD_SIZE"]) == _WORLD
   signal.alarm(45)  # A hang here is the failure mode under test.
@@ -164,7 +221,6 @@ def run_uneven_group_collectives(layout: str) -> None:
 
 def run_interleaved_subgroup_and_world_collectives() -> None:
   """Each iteration: pair k runs k + 1 all-gathers, then a world all-reduce."""
-  dist.init_process_group(backend="tpu_dist")
   rank = int(os.environ["RANK"])
   assert int(os.environ["WORLD_SIZE"]) == _WORLD
   signal.alarm(45)
@@ -222,7 +278,6 @@ def _group_sum_op(my_group):
 
 def run_uneven_group_kernels(layout: str) -> None:
   """Group k launches a kernel over its own mesh k + 1 times."""
-  dist.init_process_group(backend="tpu_dist")
   rank = int(os.environ["RANK"])
   assert int(os.environ["WORLD_SIZE"]) == _WORLD
   signal.alarm(45)
@@ -320,7 +375,6 @@ def run_uneven_group_kernels(layout: str) -> None:
 
 def run_uneven_group_sparse_core_programs(layout: str) -> None:
   """Group k launches a SparseCore gather and a group all-reduce k + 1 times."""
-  dist.init_process_group(backend="tpu_dist")
   rank = int(os.environ["RANK"])
   assert int(os.environ["WORLD_SIZE"]) == _WORLD
   signal.alarm(45)
@@ -393,7 +447,6 @@ def _pair_swap_op(my_pair):
 
 def run_uneven_pair_scans() -> None:
   """Pair k runs a scan of pair collectives and pair kernels k + 1 times."""
-  dist.init_process_group(backend="tpu_dist")
   rank = int(os.environ["RANK"])
   assert int(os.environ["WORLD_SIZE"]) == _WORLD
   signal.alarm(45)
@@ -446,7 +499,6 @@ def run_mixed_programs_run_on_the_world() -> None:
 
   The pair's collective is tiled over every pair, so all ranks take part.
   """
-  dist.init_process_group(backend="tpu_dist")
   rank = int(os.environ["RANK"])
   assert int(os.environ["WORLD_SIZE"]) == _WORLD
   signal.alarm(45)
@@ -465,6 +517,10 @@ def run_mixed_programs_run_on_the_world() -> None:
       mixed(x, y).cpu(),
       torch.full((4,), float(_WORLD + 2), dtype=torch.float32),
   )
+
+  # The rest runs a SparseCore op.
+  if not _HAS_SPARSE_CORES:
+    return
 
   # A sparse-dense-matmul lookup shards its table across the SparseCores of
   # all devices (carrying the full-slice device assignment at dispatch time):
@@ -518,7 +574,6 @@ def run_uneven_group_all_to_all(layout: str) -> None:
   check. Each iteration exchanges through `dist.all_to_all_single` eagerly and
   through `torch.tpu.ops.ragged_all_to_all` under `torch.compile`.
   """
-  dist.init_process_group(backend="tpu_dist")
   rank = int(os.environ["RANK"])
   assert int(os.environ["WORLD_SIZE"]) == _WORLD
   signal.alarm(45)
@@ -597,7 +652,6 @@ def _half_region(my_half, members):
 
 def run_uneven_compiled_half_programs() -> None:
   """Half k launches a compiled all-gather and reduce-scatter k + 1 times."""
-  dist.init_process_group(backend="tpu_dist")
   rank = int(os.environ["RANK"])
   assert int(os.environ["WORLD_SIZE"]) == _WORLD
   signal.alarm(45)
@@ -637,7 +691,8 @@ def run_uneven_compiled_half_programs() -> None:
 
 def run_cached_half_programs(warm: bool) -> None:
   """Compiles the half programs with the AOTAutograd cache on."""
-  dist.init_process_group(backend="tpu_dist")
+  torch._dynamo.reset()
+  counters.clear()
   rank = int(os.environ["RANK"])
   assert int(os.environ["WORLD_SIZE"]) == _WORLD
   signal.alarm(45)
@@ -664,7 +719,6 @@ def run_cached_half_programs(warm: bool) -> None:
 
 def run_strict_cache_half_programs() -> None:
   """A strict AOTAutograd cache saves the programs of both halves."""
-  dist.init_process_group(backend="tpu_dist")
   rank = int(os.environ["RANK"])
   assert int(os.environ["WORLD_SIZE"]) == _WORLD
   signal.alarm(45)
@@ -692,7 +746,6 @@ def run_group_programs_from_the_caches(layout: str, compilations: int) -> None:
   cache, a group that fills a box of devices off the origin at its own chips;
   a member whose load fails compiles the program again.
   """
-  dist.init_process_group(backend="tpu_dist")
   rank = int(os.environ["RANK"])
   assert int(os.environ["WORLD_SIZE"]) == _WORLD
   signal.alarm(45)
@@ -720,96 +773,74 @@ def run_group_programs_from_the_caches(layout: str, compilations: int) -> None:
     assert sum(counts[r] for r in group) == compilations, counts
 
 
-class SubgroupLaunchOrderTest(seed_test_utils.MultiProcessRepeatableTest):
+class SubgroupLaunchOrderTest(continuous_test_utils.TpuMultiProcContinuousTest):
+  world_size = _WORLD
 
-  def _skip_unsupported_layout(self, layout: str) -> None:
-    if layout == "reversed" and not _HAS_SORT_RANKS:
-      self.skipTest("dist.new_group has no sort_ranks in this torch version")
+  def setUp(self) -> None:
+    # The test methods run in the worker processes, and before PyTorch 2.14 a
+    # skip raised there is reported as an error that also skips the rest of the
+    # class. So the parent process decides the skips here, before it sends the
+    # test to the workers.
+    if reason := _skip_reason(self._testMethodName):
+      self.skipTest(reason)
+    super().setUp()
 
   @parameterized.named_parameters(*_LAYOUT_CASES)
   def test_uneven_group_collectives(self, layout: str):
-    self._skip_unsupported_layout(layout)
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD,
-        fn=run_uneven_group_collectives,
-        layout=layout,
-    )
+    run_uneven_group_collectives(layout=layout)
 
   def test_interleaved_subgroup_and_world_collectives(self):
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD,
-        fn=run_interleaved_subgroup_and_world_collectives,
-    )
+    run_interleaved_subgroup_and_world_collectives()
 
   @parameterized.named_parameters(*_LAYOUT_CASES)
   def test_uneven_group_kernels(self, layout: str):
-    self._skip_unsupported_layout(layout)
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD,
-        fn=run_uneven_group_kernels,
-        layout=layout,
-    )
+    run_uneven_group_kernels(layout=layout)
 
   @parameterized.named_parameters(*_LAYOUT_CASES)
   def test_uneven_group_sparse_core_programs(self, layout: str):
-    self._skip_unsupported_layout(layout)
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD,
-        fn=run_uneven_group_sparse_core_programs,
-        layout=layout,
-    )
+    run_uneven_group_sparse_core_programs(layout=layout)
 
   @parameterized.named_parameters(*_LAYOUT_CASES)
   def test_uneven_group_all_to_all(self, layout: str):
-    self._skip_unsupported_layout(layout)
-    if layout in _SUBSLICE_LAYOUTS and (
-        (libtpu := utils.libtpu_version()) is not None and libtpu < (0, 0, 51)
-    ):
-      self.skipTest(
-          "The SparseCores halt in all-to-alls of subslice programs before"
-          " libtpu 0.0.51."
-      )
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD,
-        fn=run_uneven_group_all_to_all,
-        layout=layout,
-    )
+    run_uneven_group_all_to_all(layout=layout)
 
   def test_uneven_pair_scans(self):
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD,
-        fn=run_uneven_pair_scans,
-    )
+    run_uneven_pair_scans()
 
   def test_mixed_programs_run_on_the_world(self):
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD,
-        fn=run_mixed_programs_run_on_the_world,
-    )
+    run_mixed_programs_run_on_the_world()
 
   def test_compiled_half_programs_through_the_aot_cache(self):
     with temporary_cache_dir(self.create_tempdir().full_path):
       for warm in (False, True):
-        distributed_utils.dist_run(
-            nproc_per_node=_WORLD,
-            fn=run_cached_half_programs,
-            warm=warm,
-        )
+        run_cached_half_programs(warm=warm)
 
   def test_strict_cache_saves_half_programs(self):
     with temporary_cache_dir(self.create_tempdir().full_path):
-      distributed_utils.dist_run(
-          nproc_per_node=_WORLD,
-          fn=run_strict_cache_half_programs,
-      )
+      run_strict_cache_half_programs()
 
   def _fresh_tier2_cache(self) -> str:
-    """Returns the name of a tier-2 cache that no other test uses."""
-    name = f"subgroup_launch_order_test_{uuid.uuid4().hex}"
-    self.addCleanup(
-        shutil.rmtree, os.path.join(_TIER2_CACHE_ROOT, name), ignore_errors=True
+    """Cleans the tier-2 cache so no other test entries remain."""
+    if dist.is_initialized():
+      torch.accelerator.synchronize()
+      dist.barrier()
+      if dist.get_rank() == 0:
+        cache_dir = os.path.join(_TIER2_CACHE_ROOT, _TIER2_CACHE_NAME)
+        for path in pathlib.Path(cache_dir).glob("**/*.bin"):
+          path.unlink(missing_ok=True)
+        for path in pathlib.Path(cache_dir).glob("**/*.lock"):
+          path.unlink(missing_ok=True)
+      torch.accelerator.synchronize()
+      dist.barrier()
+    return _TIER2_CACHE_NAME
+
+  @classmethod
+  def tearDownClass(cls) -> None:
+    super().tearDownClass()
+    shutil.rmtree(
+        os.path.join(_TIER2_CACHE_ROOT, _TIER2_CACHE_NAME), ignore_errors=True
     )
-    return name
+    shutil.rmtree(_TIER3_CACHE_ROOT, ignore_errors=True)
 
   @parameterized.named_parameters(
       ("halves", "halves"), ("diagonals", "diagonals")
@@ -821,9 +852,7 @@ class SubgroupLaunchOrderTest(seed_test_utils.MultiProcessRepeatableTest):
         os.environ, {"TORCH_TPU_TIER2_COMPILATION_CACHE": tier2_cache}
     ):
       os.environ.pop("TORCH_TPU_TIER3_COMPILATION_CACHE_ROOT", None)
-      distributed_utils.dist_run(
-          nproc_per_node=_WORLD,
-          fn=run_group_programs_from_the_caches,
+      run_group_programs_from_the_caches(
           layout=layout,
           compilations=1,
       )
@@ -833,39 +862,45 @@ class SubgroupLaunchOrderTest(seed_test_utils.MultiProcessRepeatableTest):
   )
   def test_group_programs_through_the_tier3_cache(self, layout: str):
     tier2_cache = self._fresh_tier2_cache()
+    if dist.is_initialized():
+      torch.accelerator.synchronize()
+      dist.barrier()
+      if dist.get_rank() == 0:
+        shutil.rmtree(_TIER3_CACHE_ROOT, ignore_errors=True)
+        pathlib.Path(_TIER3_CACHE_ROOT).mkdir(parents=True, exist_ok=True)
+      torch.accelerator.synchronize()
+      dist.barrier()
     with mock.patch.dict(
         os.environ,
         {
             "TORCH_TPU_TIER2_COMPILATION_CACHE": tier2_cache,
-            "TORCH_TPU_TIER3_COMPILATION_CACHE_ROOT": (
-                self.create_tempdir().full_path
-            ),
+            "TORCH_TPU_TIER3_COMPILATION_CACHE_ROOT": _TIER3_CACHE_ROOT,
             "TORCH_TPU_INTERNAL_TIER3_COMPILATION_CACHE_LOCAL_BACKUP_TASK": "0",
         },
     ):
-      distributed_utils.dist_run(
-          nproc_per_node=_WORLD,
-          fn=run_group_programs_from_the_caches,
+      run_group_programs_from_the_caches(
           layout=layout,
           compilations=1,
       )
       # Without the tier-2 entries, the second run loads from the tier-3 cache.
-      for path in pathlib.Path(_TIER2_CACHE_ROOT, tier2_cache).glob("**/*.bin"):
-        path.unlink()
-      distributed_utils.dist_run(
-          nproc_per_node=_WORLD,
-          fn=run_group_programs_from_the_caches,
+      if dist.is_initialized():
+        torch.accelerator.synchronize()
+        dist.barrier()
+        if dist.get_rank() == 0:
+          for path in pathlib.Path(_TIER2_CACHE_ROOT, tier2_cache).glob(
+              "**/*.bin"
+          ):
+            path.unlink(missing_ok=True)
+        torch.accelerator.synchronize()
+        dist.barrier()
+      run_group_programs_from_the_caches(
           layout=layout,
           compilations=0,
       )
 
   def test_uneven_compiled_half_programs(self):
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD,
-        fn=run_uneven_compiled_half_programs,
-    )
+    run_uneven_compiled_half_programs()
 
 
 if __name__ == "__main__":
-  mp.set_start_method("spawn")
   multiprocessing.handle_test_main(absltest.main)

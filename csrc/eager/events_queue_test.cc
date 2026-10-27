@@ -22,6 +22,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -29,7 +30,6 @@
 #include "absl/types/span.h"
 #include "csrc/common/cache_key.h"
 #include "csrc/common/compilation_spec.h"
-#include "csrc/common/context_states.h"
 #include "csrc/common/dimension_types.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/shape.h"
@@ -37,7 +37,9 @@
 #include "csrc/eager/current_stream.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/device_buffer_utils.h"
+#include "csrc/eager/eager_mode.h"
 #include "csrc/eager/materialize.h"
+#include "csrc/eager/split_traversal.h"
 #include "csrc/eager/structured_log_buffer.h"
 #include "csrc/eager/tensor_to_buffer.h"
 #include "csrc/ops/op_builder_utils.h"
@@ -94,12 +96,14 @@ TEST_F(EventsQueueTest, GetsLiveDeferredBuffers) {
   // Both a and b are live and unsynced and will be materialized on the next
   // stream materialization or device materialization.
   const auto [device_index, stream_id] = GetCurrentDeviceStreamId();
-  EventSnapshot::Record(device_index, stream_id, {});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
+  InsertGraphBreak(device_index, stream_id, {}, MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work = GetReadyWork(device_index, stream_id);
 
-  ASSERT_EQ(pending_snapshots.size(), 1);
-  EXPECT_THAT(pending_snapshots[0].must_execute,
+  ASSERT_EQ(ready_work.size(), 1);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
+  EXPECT_THAT(eager_execution.must_execute,
               testing::ElementsAre(ref_a.device_buffer_list(),
                                    ref_b.device_buffer_list()));
 }
@@ -116,13 +120,13 @@ TEST_F(EventsQueueTest, IgnoresPlaceholderBuffers) {
 
   // The placeholder does not need to be synced.
   const auto [device_index, stream_id] = GetCurrentDeviceStreamId();
-  EventSnapshot::Record(device_index, stream_id, {});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
-  EXPECT_TRUE(pending_snapshots.empty());
+  InsertGraphBreak(device_index, stream_id, {}, MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work = GetReadyWork(device_index, stream_id);
+  EXPECT_TRUE(ready_work.empty());
 }
 
-TEST_F(EventsQueueTest, SyncIgnoresEmptyBuffers) {
+TEST_F(EventsQueueTest, IgnoresEmptyBuffers) {
   ClearAllStreams();
   ScopedPythonContextCapturer capturer(OpName::kEmpty);
   Shape shape(Dimensions{8}, mlir::ElementType::F32);
@@ -134,11 +138,11 @@ TEST_F(EventsQueueTest, SyncIgnoresEmptyBuffers) {
 
   // The empty buffer does not need to be synced.
   const auto [device_index, stream_id] = GetCurrentDeviceStreamId();
-  EventSnapshot::Record(device_index, stream_id, {});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
+  InsertGraphBreak(device_index, stream_id, {}, MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work = GetReadyWork(device_index, stream_id);
 
-  EXPECT_TRUE(pending_snapshots.empty());
+  EXPECT_TRUE(ready_work.empty());
 }
 
 TEST_F(EventsQueueTest, IgnoresAlreadyMaterializedBuffers) {
@@ -147,20 +151,19 @@ TEST_F(EventsQueueTest, IgnoresAlreadyMaterializedBuffers) {
 
   // Create a fully-materialized buffer (filled with zeros) and record its
   // DataPtr creation.
-  TT_ASSERT_OK_AND_ASSIGN(
-      auto ref,
-      TpuMallocAndMemcpyHtoD(/*host_data=*/nullptr, mlir::ElementType::UI8, {1},
-                             /*non_blocking=*/false));
-  ASSERT_TRUE(ref.is_materialized());
+  TT_ASSERT_OK_AND_ASSIGN(auto ref,
+                          TpuMallocAndMemcpyHtoD(/*host_data=*/nullptr,
+                                                 mlir::ElementType::UI8, {1}));
+  ASSERT_TRUE(ref.Synchronize().ok()) << ref.Synchronize();
   ref.device_buffer_list()->IncrementLiveDataPtrs(ref.index());
 
   // The placeholder does not need to be synced.
   const auto [device_index, stream_id] = GetCurrentDeviceStreamId();
-  EventSnapshot::Record(device_index, stream_id, {});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
+  InsertGraphBreak(device_index, stream_id, {}, MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work = GetReadyWork(device_index, stream_id);
 
-  EXPECT_TRUE(pending_snapshots.empty());
+  EXPECT_TRUE(ready_work.empty());
 }
 
 TEST_F(EventsQueueTest, ClearsBuffersAfterMaterialization) {
@@ -168,11 +171,10 @@ TEST_F(EventsQueueTest, ClearsBuffersAfterMaterialization) {
   ScopedPythonContextCapturer capturer(OpName::kEmpty);
   Shape shape(Dimensions{1}, mlir::ElementType::UI8);
 
-  TT_ASSERT_OK_AND_ASSIGN(
-      auto input_ref,
-      TpuMallocAndMemcpyHtoD(/*host_data=*/nullptr, mlir::ElementType::UI8, {1},
-                             /*non_blocking=*/false));
-  ASSERT_TRUE(input_ref.is_materialized());
+  TT_ASSERT_OK_AND_ASSIGN(auto input_ref,
+                          TpuMallocAndMemcpyHtoD(/*host_data=*/nullptr,
+                                                 mlir::ElementType::UI8, {1}));
+  ASSERT_TRUE(input_ref.Synchronize().ok()) << input_ref.Synchronize();
   input_ref.device_buffer_list()->IncrementLiveDataPtrs(input_ref.index());
 
   // Record creation a deferred buffer (with a real op builder).
@@ -202,11 +204,11 @@ TEST_F(EventsQueueTest, ClearsBuffersAfterMaterialization) {
 
   // We don't need to sync the buffer anymore.
   const auto [device_index, stream_id] = GetCurrentDeviceStreamId();
-  EventSnapshot::Record(device_index, stream_id, {});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
+  InsertGraphBreak(device_index, stream_id, {}, MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work = GetReadyWork(device_index, stream_id);
 
-  EXPECT_TRUE(pending_snapshots.empty());
+  EXPECT_TRUE(ready_work.empty());
 }
 
 TEST_F(EventsQueueTest, StopsTrackingAfterClearEventsQueue) {
@@ -226,21 +228,21 @@ TEST_F(EventsQueueTest, StopsTrackingAfterClearEventsQueue) {
   ClearAllStreams();
 
   // The buffer is no longer tracked.
-  EventSnapshot::Record(device_index, stream_id, {});
-  auto pending_snapshots1 =
-      PrepareSnapshotMaterializations(device_index, stream_id);
+  InsertGraphBreak(device_index, stream_id, {}, MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work1 = GetReadyWork(device_index, stream_id);
 
-  EXPECT_TRUE(pending_snapshots1.empty());
+  EXPECT_TRUE(ready_work1.empty());
 
   // Create a second data pointer to the same buffer.
   ref.device_buffer_list()->IncrementLiveDataPtrs(ref.index());
 
-  EventSnapshot::Record(device_index, stream_id, {});
+  InsertGraphBreak(device_index, stream_id, {}, MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
   // The buffer is live, but the DeferredOp was cleared and so does not need
   // to be materialized.
-  auto pending_snapshots2 =
-      PrepareSnapshotMaterializations(device_index, stream_id);
-  EXPECT_TRUE(pending_snapshots2.empty());
+  auto ready_work2 = GetReadyWork(device_index, stream_id);
+  EXPECT_TRUE(ready_work2.empty());
 }
 
 TEST_F(EventsQueueTest, DeadCodeEliminated) {
@@ -282,13 +284,16 @@ TEST_F(EventsQueueTest, DeadCodeEliminated) {
 
   const auto device_index = list_d->device_index();
   const auto stream_id = list_d->stream_id();
-  EventSnapshot::Record(device_index, stream_id, {list_d});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
+  InsertGraphBreak(device_index, stream_id, {list_d},
+                   MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work = GetReadyWork(device_index, stream_id);
 
-  ASSERT_EQ(pending_snapshots.size(), 1);
+  ASSERT_EQ(ready_work.size(), 1);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
   // The dead ops should be stripped.
-  EXPECT_THAT(pending_snapshots[0].must_execute, testing::ElementsAre(list_d));
+  EXPECT_THAT(eager_execution.must_execute, testing::ElementsAre(list_d));
 }
 
 TEST_F(EventsQueueTest, DeadSideEffectsRetained) {
@@ -339,17 +344,20 @@ TEST_F(EventsQueueTest, DeadSideEffectsRetained) {
 
   const auto device_index = list_d->device_index();
   const auto stream_id = list_d->stream_id();
-  EventSnapshot::Record(device_index, stream_id, {list_d});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
-  ASSERT_EQ(pending_snapshots.size(), 1);
+  InsertGraphBreak(device_index, stream_id, {list_d},
+                   MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work = GetReadyWork(device_index, stream_id);
+  ASSERT_EQ(ready_work.size(), 1);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
 
   // We must still execute the dead ops.
-  ASSERT_EQ(pending_snapshots[0].must_execute.size(), 4);
-  EXPECT_EQ(pending_snapshots[0].must_execute[0].get(), dead_a_ptr);
-  EXPECT_EQ(pending_snapshots[0].must_execute[1].get(), dead_b_ptr);
-  EXPECT_EQ(pending_snapshots[0].must_execute[2].get(), dead_c_ptr);
-  EXPECT_EQ(pending_snapshots[0].must_execute[3], list_d);
+  ASSERT_EQ(eager_execution.must_execute.size(), 4);
+  EXPECT_EQ(eager_execution.must_execute[0].get(), dead_a_ptr);
+  EXPECT_EQ(eager_execution.must_execute[1].get(), dead_b_ptr);
+  EXPECT_EQ(eager_execution.must_execute[2].get(), dead_c_ptr);
+  EXPECT_EQ(eager_execution.must_execute[3], list_d);
 }
 
 TEST_F(EventsQueueTest, MaterializationIgnoresUnusedEmptyOps) {
@@ -379,11 +387,14 @@ TEST_F(EventsQueueTest, MaterializationIgnoresUnusedEmptyOps) {
 
   const auto device_index = non_empty_list->device_index();
   const auto stream_id = non_empty_list->stream_id();
-  EventSnapshot::Record(device_index, stream_id, {non_empty_list});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
-  ASSERT_EQ(pending_snapshots.size(), 1);
-  EXPECT_THAT(pending_snapshots[0].must_execute,
+  InsertGraphBreak(device_index, stream_id, {non_empty_list},
+                   MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work = GetReadyWork(device_index, stream_id);
+  ASSERT_EQ(ready_work.size(), 1);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
+  EXPECT_THAT(eager_execution.must_execute,
               testing::ElementsAre(non_empty_list));
 }
 
@@ -428,13 +439,17 @@ TEST_F(EventsQueueTest, PrepareDeviceTraversals) {
   auto pending_stream_snapshots = RecordDeviceSnapshots(device_index);
   ASSERT_EQ(pending_stream_snapshots.size(), 1);
 
-  auto pending_event_snapshots = PrepareSnapshotMaterializations(
-      device_index, pending_stream_snapshots[0].stream_id);
-  ASSERT_EQ(pending_event_snapshots.size(), 1);
+  auto ready_work =
+      GetReadyWork(device_index, pending_stream_snapshots[0].stream_id);
+  ASSERT_EQ(ready_work.size(), 2);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
   // The execution will contain a and b but not c, as it is on a different
   // device.
-  EXPECT_THAT(pending_event_snapshots[0].must_execute,
+  EXPECT_THAT(eager_execution.must_execute,
               testing::ElementsAre(list_a, list_b));
+  // There will be a snapshot request for the stream after the eager execution.
+  EXPECT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[1]));
 }
 
 TEST_F(EventsQueueTest, PrepareStreamTraversals) {
@@ -477,14 +492,17 @@ TEST_F(EventsQueueTest, PrepareStreamTraversals) {
   ExchangeCurrentStreamId(device_index, default_stream_id);
 
   // Ask for a plan to materialize the stream for a and b (but not c).
-  EventSnapshot::Record(device_index, default_stream_id, {});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, default_stream_id);
-  ASSERT_EQ(pending_snapshots.size(), 1);
+  (void)EventSnapshot::Record(device_index, default_stream_id, {});
+  auto ready_work = GetReadyWork(device_index, default_stream_id);
+  ASSERT_EQ(ready_work.size(), 2);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
 
   // c is not included as it is on a different stream.
-  EXPECT_THAT(pending_snapshots[0].must_execute,
+  EXPECT_THAT(eager_execution.must_execute,
               testing::ElementsAre(list_a, list_b));
+  // There will be a snapshot request for the stream after the eager execution.
+  EXPECT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[1]));
 }
 
 TEST_F(EventsQueueTest, StreamsMaterializeSeparately) {
@@ -527,13 +545,16 @@ TEST_F(EventsQueueTest, StreamsMaterializeSeparately) {
   ExchangeCurrentStreamId(device_index, default_stream_id);
 
   // Ask for a plan to materialize the stream for c (but not a or b)
-  EventSnapshot::Record(device_index, non_default_stream_id, {});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, non_default_stream_id);
-  ASSERT_EQ(pending_snapshots.size(), 1);
+  InsertGraphBreak(device_index, non_default_stream_id, {},
+                   MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work = GetReadyWork(device_index, non_default_stream_id);
+  ASSERT_EQ(ready_work.size(), 1);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
 
   // Only c is included as it is on a different stream from a and b.
-  EXPECT_THAT(pending_snapshots[0].must_execute, testing::ElementsAre(list_c));
+  EXPECT_THAT(eager_execution.must_execute, testing::ElementsAre(list_c));
 }
 
 TEST_F(EventsQueueTest, RetainsFailedCompletedFutures) {
@@ -546,14 +567,14 @@ TEST_F(EventsQueueTest, RetainsFailedCompletedFutures) {
 
   RecordAsyncDeviceToHost(std::move(failed_future));
 
-  EventSnapshot::Record(device_index, stream_id);
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
-  ASSERT_EQ(pending_snapshots.size(), 1);
+  (void)EventSnapshot::Record(device_index, stream_id);
+  auto ready_work = GetReadyWork(device_index, stream_id);
+  ASSERT_EQ(ready_work.size(), 1);
+  ASSERT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[0]));
+  const auto& snapshot_request = std::get<SnapshotRequest>(ready_work[0]);
+  ASSERT_EQ(snapshot_request.futures.size(), 1);
 
-  ASSERT_EQ(pending_snapshots[0].futures.size(), 1);
-
-  auto status = pending_snapshots[0].futures[0].Await();
+  auto status = snapshot_request.futures[0].Await();
   EXPECT_EQ(status.code(), error::kInvalidArgument);
 }
 
@@ -566,10 +587,12 @@ TEST_F(EventsQueueTest, PrunesSuccessfulCompletedFutures) {
 
   RecordAsyncDeviceToHost(std::move(ok_future));
 
-  EventSnapshot::Record(device_index, stream_id);
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
-  EXPECT_TRUE(pending_snapshots.empty());
+  (void)EventSnapshot::Record(device_index, stream_id);
+  auto ready_work = GetReadyWork(device_index, stream_id);
+  ASSERT_EQ(ready_work.size(), 1);
+  ASSERT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[0]));
+  const auto& snapshot_request = std::get<SnapshotRequest>(ready_work[0]);
+  EXPECT_TRUE(snapshot_request.futures.empty());
 }
 
 TEST_F(EventsQueueTest, StreamMustMaterializeEmptyTensors) {
@@ -590,20 +613,23 @@ TEST_F(EventsQueueTest, StreamMustMaterializeEmptyTensors) {
   const auto stream_id = empty_list->stream_id();
 
   // A normal stream materialization does not materialize the empty tensor.
-  EventSnapshot::Record(device_index, stream_id, {});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
+  InsertGraphBreak(device_index, stream_id, {}, MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work = GetReadyWork(device_index, stream_id);
 
-  EXPECT_TRUE(pending_snapshots.empty());
+  EXPECT_TRUE(ready_work.empty());
 
   // A stream materialization that must materialize the empty tensor does so.
-  EventSnapshot::Record(device_index, stream_id, {empty_list});
-  pending_snapshots = PrepareSnapshotMaterializations(device_index, stream_id);
-  ASSERT_EQ(pending_snapshots.size(), 1);
+  (void)EventSnapshot::Record(device_index, stream_id, {empty_list});
+  ready_work = GetReadyWork(device_index, stream_id);
+  ASSERT_EQ(ready_work.size(), 2);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
   // Constant ops are listed only in must_materialize, but not must_execute.
-  EXPECT_EQ(pending_snapshots[0].must_execute.size(), 0);
-  EXPECT_THAT(pending_snapshots[0].must_materialize,
+  EXPECT_EQ(eager_execution.must_execute.size(), 0);
+  EXPECT_THAT(eager_execution.must_materialize,
               testing::ElementsAre(empty_list));
+  EXPECT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[1]));
 }
 
 TEST_F(EventsQueueTest, DeviceMustMaterializeEmptyTensors) {
@@ -625,18 +651,21 @@ TEST_F(EventsQueueTest, DeviceMustMaterializeEmptyTensors) {
 
   // A normal device materialization does not materialize the empty tensor.
   RecordDeviceSnapshots(device_index);
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
-  EXPECT_TRUE(pending_snapshots.empty());
+  auto ready_work = GetReadyWork(device_index, stream_id);
+  ASSERT_EQ(ready_work.size(), 1);
+  EXPECT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[0]));
 
   // A device materialization that must materialize the empty tensor does so.
   RecordDeviceSnapshots(device_index, {empty_list});
-  pending_snapshots = PrepareSnapshotMaterializations(device_index, stream_id);
-  ASSERT_EQ(pending_snapshots.size(), 1);
+  ready_work = GetReadyWork(device_index, stream_id);
+  ASSERT_EQ(ready_work.size(), 2);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
   // Constant ops are listed only in must_materialize, but not must_execute.
-  EXPECT_EQ(pending_snapshots[0].must_execute.size(), 0);
-  EXPECT_THAT(pending_snapshots[0].must_materialize,
+  EXPECT_TRUE(eager_execution.must_execute.empty());
+  EXPECT_THAT(eager_execution.must_materialize,
               testing::ElementsAre(empty_list));
+  EXPECT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[1]));
 }
 
 TEST_F(EventsQueueTest, MultipleSnapshotsPulled) {
@@ -652,7 +681,7 @@ TEST_F(EventsQueueTest, MultipleSnapshotsPulled) {
   auto list_a = ref_a.device_buffer_list();
   RecordDeferredOpCreated(list_a);
 
-  EventSnapshot::Record(list_a->device_index(), list_a->stream_id(), {});
+  (void)EventSnapshot::Record(list_a->device_index(), list_a->stream_id(), {});
 
   TT_ASSERT_OK_AND_ASSIGN(auto refs_b, DeviceBufferList::CreateDeferred(
                                            OpName::kAdd, DummyBuilder, {},
@@ -661,22 +690,76 @@ TEST_F(EventsQueueTest, MultipleSnapshotsPulled) {
   auto list_b = ref_b.device_buffer_list();
   RecordDeferredOpCreated(list_b);
 
-  EventSnapshot::Record(list_b->device_index(), list_b->stream_id(), {});
+  (void)EventSnapshot::Record(list_b->device_index(), list_b->stream_id(), {});
 
   // Get the pending snapshots.
-  auto pending_snapshots = PrepareSnapshotMaterializations(
-      list_a->device_index(), list_a->stream_id());
+  auto ready_work = GetReadyWork(list_a->device_index(), list_a->stream_id());
 
-  // Each snapshot request results in a pending snapshot.
-  ASSERT_EQ(pending_snapshots.size(), 2);
+  // Each snapshot request results in one pending execution and one pending
+  // snapshot.
+  ASSERT_EQ(ready_work.size(), 4);
 
   // The first pending snapshot will materialize a (only).
-  const auto& first_snapshot = pending_snapshots[0];
-  EXPECT_THAT(first_snapshot.must_execute, testing::ElementsAre(list_a));
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& first_eager_execution = std::get<EagerExecution>(ready_work[0]);
+  EXPECT_THAT(first_eager_execution.must_execute, testing::ElementsAre(list_a));
+  EXPECT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[1]));
 
   // The second pending snapshot will materialize b (only).
-  const auto& second_snapshot = pending_snapshots[1];
-  EXPECT_THAT(second_snapshot.must_execute, testing::ElementsAre(list_b));
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[2]));
+  const auto& second_eager_execution = std::get<EagerExecution>(ready_work[2]);
+  EXPECT_THAT(second_eager_execution.must_execute,
+              testing::ElementsAre(list_b));
+  EXPECT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[3]));
+}
+
+TEST_F(EventsQueueTest, MultipleEagerExecutionsPulled) {
+  ClearAllStreams();
+  ScopedPythonContextCapturer capturer(OpName::kEmpty);
+  Shape shape(Dimensions{8}, mlir::ElementType::F32);
+
+  // Enqueue a graph break and a snapshot after single ops:
+  // [a, graph_break, b, snapshot]
+  TT_ASSERT_OK_AND_ASSIGN(auto refs_a, DeviceBufferList::CreateDeferred(
+                                           OpName::kAdd, DummyBuilder, {},
+                                           OpParamCacheKeys::Empty(), {shape}));
+  auto ref_a = refs_a[0];
+  auto list_a = ref_a.device_buffer_list();
+  RecordDeferredOpCreated(list_a);
+
+  InsertGraphBreak(list_a->device_index(), list_a->stream_id(), {list_a},
+                   MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+
+  TT_ASSERT_OK_AND_ASSIGN(auto refs_b, DeviceBufferList::CreateDeferred(
+                                           OpName::kAdd, DummyBuilder, {},
+                                           OpParamCacheKeys::Empty(), {shape}));
+  auto ref_b = refs_b[0];
+  auto list_b = ref_b.device_buffer_list();
+  RecordDeferredOpCreated(list_b);
+
+  (void)EventSnapshot::Record(list_b->device_index(), list_b->stream_id(), {});
+
+  // Get the pending snapshots.
+  auto ready_work = GetReadyWork(list_a->device_index(), list_a->stream_id());
+
+  // The graph break results in separate work items for a and b, and the
+  // snapshot request is a third work item.
+  ASSERT_EQ(ready_work.size(), 3);
+
+  // The first eager execution will materialize a (only).
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& first_eager_execution = std::get<EagerExecution>(ready_work[0]);
+  EXPECT_THAT(first_eager_execution.must_execute, testing::ElementsAre(list_a));
+
+  // The second eager execution will materialize b (only).
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[1]));
+  const auto& second_eager_execution = std::get<EagerExecution>(ready_work[1]);
+  EXPECT_THAT(second_eager_execution.must_execute,
+              testing::ElementsAre(list_b));
+
+  // The third work item is the snapshot request.
+  EXPECT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[2]));
 }
 
 TEST_F(EventsQueueTest, NotPulledAfterLastSnapshot) {
@@ -692,7 +775,7 @@ TEST_F(EventsQueueTest, NotPulledAfterLastSnapshot) {
   auto list_a = ref_a.device_buffer_list();
   RecordDeferredOpCreated(list_a);
 
-  EventSnapshot::Record(list_a->device_index(), list_a->stream_id(), {});
+  (void)EventSnapshot::Record(list_a->device_index(), list_a->stream_id(), {});
 
   // Enqueue an op after the snapshot, but don't request a second snapshot.
   TT_ASSERT_OK_AND_ASSIGN(auto refs_b, DeviceBufferList::CreateDeferred(
@@ -703,13 +786,14 @@ TEST_F(EventsQueueTest, NotPulledAfterLastSnapshot) {
   RecordDeferredOpCreated(list_b);
 
   // Get the pending snapshots.
-  auto pending_snapshots = PrepareSnapshotMaterializations(
-      list_a->device_index(), list_a->stream_id());
+  auto ready_work = GetReadyWork(list_a->device_index(), list_a->stream_id());
 
   // List b is left in the queue.
-  ASSERT_EQ(pending_snapshots.size(), 1);
-  const auto& first_snapshot = pending_snapshots[0];
-  EXPECT_THAT(first_snapshot.must_execute, testing::ElementsAre(list_a));
+  ASSERT_EQ(ready_work.size(), 2);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
+  EXPECT_THAT(eager_execution.must_execute, testing::ElementsAre(list_a));
+  EXPECT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[1]));
 }
 
 TEST_F(EventsQueueTest, SingleOpFastPathAndExtraConstantFallback) {
@@ -728,13 +812,15 @@ TEST_F(EventsQueueTest, SingleOpFastPathAndExtraConstantFallback) {
   auto list_single = ref_single.device_buffer_list();
   RecordDeferredOpCreated(list_single);
 
-  EventSnapshot::Record(device_index, stream_id, {list_single});
-  auto pending_snapshots =
-      PrepareSnapshotMaterializations(device_index, stream_id);
-  ASSERT_EQ(pending_snapshots.size(), 1);
-  EXPECT_THAT(pending_snapshots[0].must_execute,
-              testing::ElementsAre(list_single));
-  EXPECT_THAT(pending_snapshots[0].must_materialize,
+  InsertGraphBreak(device_index, stream_id, {list_single},
+                   MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  auto ready_work = GetReadyWork(device_index, stream_id);
+  ASSERT_EQ(ready_work.size(), 1);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
+  EXPECT_THAT(eager_execution.must_execute, testing::ElementsAre(list_single));
+  EXPECT_THAT(eager_execution.must_materialize,
               testing::ElementsAre(list_single));
 
   // 2. Single deferred op plus an explicit deferred constant in
@@ -756,11 +842,15 @@ TEST_F(EventsQueueTest, SingleOpFastPathAndExtraConstantFallback) {
   auto empty_list = empty_ref.device_buffer_list();
   RecordDeferredOpCreated(empty_list);
 
-  EventSnapshot::Record(device_index, stream_id, {list_op, empty_list});
-  pending_snapshots = PrepareSnapshotMaterializations(device_index, stream_id);
-  ASSERT_EQ(pending_snapshots.size(), 1);
-  EXPECT_THAT(pending_snapshots[0].must_execute, testing::ElementsAre(list_op));
-  EXPECT_THAT(pending_snapshots[0].must_materialize,
+  InsertGraphBreak(device_index, stream_id, {list_op, empty_list},
+                   MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+  ready_work = GetReadyWork(device_index, stream_id);
+  ASSERT_EQ(ready_work.size(), 1);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+  const auto& eager_execution_2 = std::get<EagerExecution>(ready_work[0]);
+  EXPECT_THAT(eager_execution_2.must_execute, testing::ElementsAre(list_op));
+  EXPECT_THAT(eager_execution_2.must_materialize,
               testing::ElementsAre(list_op, empty_list));
 }
 
@@ -782,17 +872,174 @@ TEST_F(EventsQueueTest, NodeMatcherAcrossSmallAndLargeSpans) {
       nodes.push_back(refs[0].device_buffer_list());
       RecordDeferredOpCreated(refs[0].device_buffer_list());
     }
-    EventSnapshot::Record(device_index, stream_id, nodes);
-    auto pending_snapshots =
-        PrepareSnapshotMaterializations(device_index, stream_id);
-    ASSERT_EQ(pending_snapshots.size(), 1);
-    EXPECT_EQ(pending_snapshots[0].must_execute.size(), count);
-    EXPECT_EQ(pending_snapshots[0].must_materialize.size(), count);
-    EXPECT_THAT(pending_snapshots[0].must_execute,
+    (void)EventSnapshot::Record(device_index, stream_id, nodes);
+    auto ready_work = GetReadyWork(device_index, stream_id);
+    ASSERT_EQ(ready_work.size(), 2);
+    ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+    const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
+    EXPECT_EQ(eager_execution.must_execute.size(), count);
+    EXPECT_EQ(eager_execution.must_materialize.size(), count);
+    EXPECT_THAT(eager_execution.must_execute, testing::ElementsAreArray(nodes));
+    EXPECT_THAT(eager_execution.must_materialize,
                 testing::ElementsAreArray(nodes));
-    EXPECT_THAT(pending_snapshots[0].must_materialize,
-                testing::ElementsAreArray(nodes));
+    EXPECT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[1]));
   }
+}
+
+TEST_F(EventsQueueTest, GraphBreakRetainsNoOpEagerExecution) {
+  ClearAllStreams();
+  ScopedPythonContextCapturer capturer(OpName::kEmpty);
+  Shape shape(Dimensions{8}, mlir::ElementType::F32);
+  const auto [device_index, stream_id] = GetCurrentDeviceStreamId();
+  // Create an already-pending DeviceBufferList.
+  TT_ASSERT_OK_AND_ASSIGN(
+      auto pending_ref,
+      DeviceBufferList::CreatePending(shape, device_index, stream_id));
+
+  // Insert a graph break with this as "must materialize".
+  InsertGraphBreak(device_index, stream_id, {pending_ref.device_buffer_list()},
+                   MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+
+  // Add some real work and a second graph break.
+  TT_ASSERT_OK_AND_ASSIGN(auto refs_a, DeviceBufferList::CreateDeferred(
+                                           OpName::kAdd, DummyBuilder, {},
+                                           OpParamCacheKeys::Empty(), {shape}));
+  auto ref_a = refs_a[0];
+  RecordDeferredOpCreated(ref_a.device_buffer_list());
+  InsertGraphBreak(device_index, stream_id, {}, MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+
+  auto ready_work = GetReadyWork(device_index, stream_id);
+  ASSERT_EQ(ready_work.size(), 2);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+
+  // The first EagerExecution has no must_execute and the must_materialize
+  // contains the pending DeviceBufferList.
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
+  EXPECT_TRUE(eager_execution.must_execute.empty());
+  EXPECT_THAT(eager_execution.must_materialize,
+              testing::ElementsAre(pending_ref.device_buffer_list()));
+
+  // The second EagerExecution has the real work.
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[1]));
+  const auto& eager_execution2 = std::get<EagerExecution>(ready_work[1]);
+  EXPECT_THAT(eager_execution2.must_execute,
+              testing::ElementsAre(ref_a.device_buffer_list()));
+  EXPECT_TRUE(eager_execution2.must_materialize.empty());
+}
+
+TEST_F(EventsQueueTest, EventSnapshotDropsTrailingNoOpEagerExecution) {
+  ClearAllStreams();
+  ScopedPythonContextCapturer capturer(OpName::kEmpty);
+  Shape shape(Dimensions{8}, mlir::ElementType::F32);
+  const auto [device_index, stream_id] = GetCurrentDeviceStreamId();
+  // Create an already-pending DeviceBufferList.
+  TT_ASSERT_OK_AND_ASSIGN(
+      auto pending_ref,
+      DeviceBufferList::CreatePending(shape, device_index, stream_id));
+
+  // Insert a graph break with this as "must materialize".
+  InsertGraphBreak(device_index, stream_id, {pending_ref.device_buffer_list()},
+                   MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+
+  // Add some real work and a second graph break.
+  TT_ASSERT_OK_AND_ASSIGN(auto refs_a, DeviceBufferList::CreateDeferred(
+                                           OpName::kAdd, DummyBuilder, {},
+                                           OpParamCacheKeys::Empty(), {shape}));
+  auto ref_a = refs_a[0];
+  RecordDeferredOpCreated(ref_a.device_buffer_list());
+  InsertGraphBreak(device_index, stream_id, {}, MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+
+  // Add the already-pending DeviceBufferList graph break again.
+  InsertGraphBreak(device_index, stream_id, {pending_ref.device_buffer_list()},
+                   MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+
+  // Record an event snapshot.
+  (void)EventSnapshot::Record(device_index, stream_id);
+
+  auto ready_work = GetReadyWork(device_index, stream_id);
+
+  // When the snapshot is recorded, it will drop the second no-op graph break.
+  // But it will stop popping when it hits a non-no-op EagerExecution.
+  // This will retain the first no-op graph break.
+  ASSERT_EQ(ready_work.size(), 3);
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[0]));
+
+  // The first EagerExecution has no must_execute and the must_materialize
+  // contains the pending DeviceBufferList.
+  const auto& eager_execution = std::get<EagerExecution>(ready_work[0]);
+  EXPECT_TRUE(eager_execution.must_execute.empty());
+  EXPECT_THAT(eager_execution.must_materialize,
+              testing::ElementsAre(pending_ref.device_buffer_list()));
+
+  // The second EagerExecution has the real work.
+  ASSERT_TRUE(std::holds_alternative<EagerExecution>(ready_work[1]));
+  const auto& eager_execution2 = std::get<EagerExecution>(ready_work[1]);
+  EXPECT_THAT(eager_execution2.must_execute,
+              testing::ElementsAre(ref_a.device_buffer_list()));
+  EXPECT_TRUE(eager_execution2.must_materialize.empty());
+
+  // After the second eager execution is the snapshot request; the second
+  // no-op graph break is dropped.
+  ASSERT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[2]));
+}
+
+TEST_F(EventsQueueTest, DroppedNoOpExecutionsAllowSnapshotReuse) {
+  ClearAllStreams();
+  ScopedPythonContextCapturer capturer(OpName::kEmpty);
+  Shape shape(Dimensions{8}, mlir::ElementType::F32);
+  const auto [device_index, stream_id] = GetCurrentDeviceStreamId();
+
+  // Create a future we control and push it to the events queue.
+  auto [promise, future] = xla::MakePromise<void>();
+  RecordAsyncDeviceToHost(std::move(future));
+
+  // Record a snapshot. This will contain the above future.
+  auto snapshot_future = EventSnapshot::Record(device_index, stream_id);
+
+  // Create an already-pending DeviceBufferList.
+  TT_ASSERT_OK_AND_ASSIGN(
+      auto pending_ref,
+      DeviceBufferList::CreatePending(shape, device_index, stream_id));
+
+  // Insert a graph break with this as "must materialize".
+  InsertGraphBreak(device_index, stream_id, {pending_ref.device_buffer_list()},
+                   MaterializationReason::kUnknown,
+                   GraphSplitMode::kSplitGraph);
+
+  // Record a second snapshot.
+  auto snapshot_future2 = EventSnapshot::Record(device_index, stream_id);
+
+  auto ready_work = GetReadyWork(device_index, stream_id);
+
+  // Pushing the second snapshot request will drop the no-op EagerExecution
+  // and reuse the first snapshot's future.
+  EXPECT_EQ(ready_work.size(), 1);
+  EXPECT_TRUE(std::holds_alternative<SnapshotRequest>(ready_work[0]));
+  auto& snapshot_request = std::get<SnapshotRequest>(ready_work[0]);
+  EXPECT_EQ(snapshot_request.futures.size(), 1);
+
+  // When a snapshot is created, it is shared between the original request and
+  // the second request after the no-op.
+  std::shared_ptr<EventSnapshot> snapshot =
+      std::make_shared<EventSnapshot>(std::move(snapshot_request.futures[0]));
+  snapshot_request.snapshot_promise.Set(std::move(snapshot));
+  ASSERT_TRUE(snapshot_future.IsReady());
+  ASSERT_TRUE(snapshot_future2.IsReady());
+  TT_ASSERT_OK_AND_ASSIGN(auto snapshot_1, snapshot_future.Await());
+  TT_ASSERT_OK_AND_ASSIGN(auto snapshot_2, snapshot_future.Await());
+  EXPECT_EQ(snapshot_1, snapshot_2);
+
+  // Completing the original future completes the snapshot for both.
+  promise.Set(absl::OkStatus());
+  TT_ASSERT_OK_AND_ASSIGN(bool completed, snapshot_1->Query());
+  EXPECT_TRUE(completed);
+  TT_ASSERT_OK_AND_ASSIGN(completed, snapshot_2->Query());
+  EXPECT_TRUE(completed);
 }
 
 // Returns `duration` in milliseconds, the unit of EventSnapshot::ElapsedTime.
@@ -1030,7 +1277,7 @@ TEST(RepeatedOpsTest, DoesNotDetectRepetitionsOverSnapshots) {
 
   // Request an event snapshot.
   auto [device_index, stream_id] = GetCurrentDeviceStreamId();
-  EventSnapshot::Record(device_index, stream_id);
+  (void)EventSnapshot::Record(device_index, stream_id);
 
   // When we push the second repetition, it is not detected, as the state was
   // reset after the snapshot.

@@ -418,12 +418,6 @@ PerfStats CompilationCache::GetCacheStats() const {
   return stats;
 }
 
-const CacheEntry* CompilationCache::FindStaticCacheEntryOrNull(
-    const CompilationCacheKey& key) const {
-  const auto it = executable_cache_.find(key);
-  return it == executable_cache_.end() ? nullptr : &it->second;
-}
-
 const UnboundedDynamicCacheEntry*
 CompilationCache::FindUnboundedDynamicCacheEntryOrNull(
     const CompilationCacheKey& key) const {
@@ -443,8 +437,10 @@ CompilationCache::FindUnboundedDynamicCacheEntryOrNull(
 const CacheEntry* CompilationCache::FindCacheEntryOrNull(
     const CompilationCacheKey& key, const CacheEntryKind kind) const {
   switch (kind) {
-    case CacheEntryKind::kStatic:
-      return FindStaticCacheEntryOrNull(key);
+    case CacheEntryKind::kStatic: {
+      const auto it = executable_cache_.find(key);
+      return it == executable_cache_.end() ? nullptr : &it->second;
+    }
     case CacheEntryKind::kUnboundedDynamic: {
       const UnboundedDynamicCacheEntry* const entry =
           FindUnboundedDynamicCacheEntryOrNull(key);
@@ -454,8 +450,9 @@ const CacheEntry* CompilationCache::FindCacheEntryOrNull(
 }
 
 std::optional<CompilationCache::CacheLookupInternal>
-CompilationCache::GetStaticCacheEntry(const CompilationCacheKey& key) const {
-  const CacheEntry* cache_entry = FindStaticCacheEntryOrNull(key);
+CompilationCache::GetCacheEntry(const CompilationCacheKey& key,
+                                const CacheEntryKind kind) const {
+  const CacheEntry* cache_entry = FindCacheEntryOrNull(key, kind);
   if (cache_entry == nullptr) {
     return std::nullopt;
   }
@@ -463,7 +460,7 @@ CompilationCache::GetStaticCacheEntry(const CompilationCacheKey& key) const {
   perf_stats_.num_cache_hits++;
   cache_entry->stats().read_count++;
   cache_entry->stats().last_read = absl::Now();
-  ABSL_VLOG(2) << "Compilation cache STATIC HIT for key: " << key;
+  ABSL_VLOG(2) << "Compilation cache " << kind << " HIT for key: " << key;
   return CacheLookupInternal{
       .executable_promise = cache_entry->executable_promise(),
       .executable_future = cache_entry->executable_future(),
@@ -505,17 +502,7 @@ CompilationCache::GetUnboundedDynamicCacheEntry(
     const UnboundedDynamicExecutionMetadata::CompatibilityFunc is_compatible =
         entry.dynamic_meta.is_compatible;
     if (!is_compatible || is_compatible(input_shapes, output_shapes)) {
-      perf_stats_.num_cache_hits++;
-      entry.cache_entry.stats().read_count++;
-      entry.cache_entry.stats().last_read = absl::Now();
-      ABSL_VLOG(2) << "Compilation cache UNBOUNDED DYNAMIC HIT for key: "
-                   << key;
-      return CacheLookupInternal{
-          .executable_promise = entry.cache_entry.executable_promise(),
-          .executable_future = entry.cache_entry.executable_future(),
-          .needs_compilation = false,
-          .dump_on_cache_miss = false,
-      };
+      return GetCacheEntry(entry.key, CacheEntryKind::kUnboundedDynamic);
     }
   }
   return std::nullopt;
@@ -614,7 +601,7 @@ CompilationCache::GetOrCreateCacheEntry(
     ABSL_LOG(WARNING) << "CompilationCache is disabled. key: " << key;
     // We insert an entry into the cache anyway so we can keep track of it and
     // safely evict it later.
-    auto cache_lookup_or = GetStaticCacheEntry(key);
+    auto cache_lookup_or = GetCacheEntry(key, CacheEntryKind::kStatic);
     if (cache_lookup_or.has_value()) {
       return *cache_lookup_or;
     }
@@ -622,7 +609,7 @@ CompilationCache::GetOrCreateCacheEntry(
   }
 
   // 1. Try to find a static CacheEntry.
-  if (const auto cache_lookup_or = GetStaticCacheEntry(key);
+  if (const auto cache_lookup_or = GetCacheEntry(key, CacheEntryKind::kStatic);
       cache_lookup_or.has_value()) {
     return *cache_lookup_or;
   }
@@ -927,15 +914,17 @@ absl::StatusOr<CompiledKernel> CompilationCache::GetOrCompileImpl(
     absl_nullable std::unique_ptr<xla::CompileOptions> owned_compile_options,
     bool use_dynamic_adapters) {
   // Critical section for cache lookups and insertion.
-  TT_ASSIGN_OR_RETURN(
-      auto cache_lookup, [&]() -> absl::StatusOr<CacheLookupInternal> {
-        absl::MutexLock lock(cache_mutex_);
-        perf_stats_.num_cache_reqs++;
-        TT_ASSIGN_OR_RETURN(auto lookup, GetOrCreateCacheEntry(
+  TT_ASSIGN_OR_RETURN(auto cache_lookup,
+                      [&]  // REF_CAPTURE_OK=called synchronously
+                      () -> absl::StatusOr<CacheLookupInternal> {
+                        absl::MutexLock lock(cache_mutex_);
+                        perf_stats_.num_cache_reqs++;
+                        TT_ASSIGN_OR_RETURN(
+                            auto lookup, GetOrCreateCacheEntry(
                                              key, input_shapes, output_shapes));
-        lookup.dump_on_cache_miss = dump_on_cache_miss_;
-        return lookup;
-      }());
+                        lookup.dump_on_cache_miss = dump_on_cache_miss_;
+                        return lookup;
+                      }());
 
   // Everything we are recovering from the cache is a shared pointer, so it
   // is safe to access them without the lock.
@@ -1028,19 +1017,24 @@ absl::StatusOr<CompiledKernel> CompilationCache::GetOrCompile(
 void CompilationCache::EnqueueCompilation(
     const CompilationCacheKey& key, ContextedModule contexted_module,
     UniqueCompileOptions compile_options) {
-  EnsureInitialized();
   auto executable_builder = [contexted_module = std::move(contexted_module)](
                                 xla::PjRtClient& client,
                                 UniqueCompileOptions options) mutable {
-    return AdaptXlaError(
-        CompileAndLoadMaybeSubslice(
-            client, std::move(contexted_module).ToMaybeOwningMlirModule(),
-            std::move(*options)),
-        /* context= */ "failed to compile MLIR module");
+    return CompileAndLoadMlirModule(
+        client, std::move(contexted_module).ToMaybeOwningMlirModule(),
+        std::move(*options));
   };
+  EnqueueCompilation(key, CacheEntryKind::kStatic,
+                     std::move(executable_builder), std::move(compile_options));
+}
 
+void CompilationCache::EnqueueCompilation(
+    const CompilationCacheKey& key, const CacheEntryKind kind,
+    LoadedExecutableBuilder executable_builder,
+    UniqueCompileOptions compile_options) {
+  EnsureInitialized();
   compilation_pool_->Schedule(
-      [this, key, builder = std::move(executable_builder),
+      [this, key, kind, builder = std::move(executable_builder),
        compile_options = std::move(compile_options)]() mutable {
         // Prevent compilation threads from accessing thread-local context
         // states to enforce they always rely on resolved compiler options
@@ -1049,8 +1043,7 @@ void CompilationCache::EnqueueCompilation(
         // Let dispatch threads surface this thread's warnings to Python.
         RouteWarningsOnThisThreadToDispatchThread();
         torch_tpu::ScopedMemMeasuringContainer container;
-        this->GetFromTier2OrCompile(key, CacheEntryKind::kStatic,
-                                    std::move(builder),
+        this->GetFromTier2OrCompile(key, kind, std::move(builder),
                                     std::move(compile_options));
       });
 }
@@ -1064,19 +1057,7 @@ void CompilationCache::SetExecutable(
   // executable, the key may be missing. In this case, adding the key back to
   // the cache doesn't help as EvictAll() already set the executable future
   // to a failed state, so we just log and return.
-  const CacheEntry* cache_entry = nullptr;
-  const UnboundedDynamicCacheEntry* unbounded_entry = nullptr;
-  switch (kind) {
-    case CacheEntryKind::kStatic:
-      cache_entry = FindStaticCacheEntryOrNull(key);
-      break;
-    case CacheEntryKind::kUnboundedDynamic:
-      unbounded_entry = FindUnboundedDynamicCacheEntryOrNull(key);
-      if (unbounded_entry != nullptr) {
-        cache_entry = &unbounded_entry->cache_entry;
-      }
-      break;
-  }
+  const CacheEntry* cache_entry = FindCacheEntryOrNull(key, kind);
   if (cache_entry == nullptr) {
     ABSL_LOG(WARNING) << "Key already evicted when setting executable for key "
                       << key;
@@ -1096,9 +1077,12 @@ void CompilationCache::SetExecutable(
                  << " ms";
   }
 
-  if (unbounded_entry != nullptr && executable.ok()) {
+  if (kind == CacheEntryKind::kUnboundedDynamic && executable.ok()) {
     // Executables loaded from the persistent tiers carry no metadata, so it is
     // attached here for every source alike.
+    const UnboundedDynamicCacheEntry* unbounded_entry =
+        FindUnboundedDynamicCacheEntryOrNull(key);
+    ABSL_CHECK_NE(unbounded_entry, nullptr);  // CRASH_OK
     executable = LoadedExecutableWithMetadata::WithDynamicExecutionMetadata(
         *executable, unbounded_entry->dynamic_meta);
   }

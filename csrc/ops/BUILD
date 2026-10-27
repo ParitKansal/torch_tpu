@@ -171,7 +171,6 @@ torch_tpu_cc_test(
     srcs = ["op_builder_utils_test.cc"],
     deps = [
         ":op_builder_utils",
-        "//csrc/common:context_states",
         "//csrc/common:dimension_types",
         "//csrc/common:dtype",
         "//csrc/common:error_utils",
@@ -237,6 +236,7 @@ torch_tpu_cc_library(
         "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Support",
         "@stablehlo//stablehlo/integrations/cpp/builder:mlir_builder",
@@ -253,6 +253,7 @@ torch_tpu_cc_test(
         "//csrc/common:context_states",
         "//csrc/common:oss_test_main",
         "//shims/torch:torch_headers",
+        "@com_google_absl//absl/cleanup",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Support",
         "@stablehlo//stablehlo/integrations/cpp/builder:mlir_builder",
@@ -333,7 +334,6 @@ torch_tpu_cc_library(
         "@com_google_absl//absl/strings",
         "@stablehlo//stablehlo/integrations/cpp/builder:attr_type_builder_util",
         "@stablehlo//stablehlo/integrations/cpp/builder:mlir_builder",
-        "@xla//xla:xla_data_proto_cc",
     ],
 )
 
@@ -378,7 +378,6 @@ torch_tpu_cc_library(
     deps = [
         ":op_names",
         "//csrc/common:cache_key",
-        "//csrc/common:context_states",
         "//csrc/common:error_utils",
         "//csrc/common:reroute_warnings",
         "//csrc/common:thread_pool",
@@ -386,6 +385,7 @@ torch_tpu_cc_library(
         "//csrc/eager:eager_mode",
         "//csrc/eager:structured_log_buffer",
         "//csrc/eager:tensor_to_buffer",
+        "//csrc/ops/copy_from:copy_common",
         "//csrc/ops/copy_from:tpu_to_cpu",
         "//csrc/ops/macros:kernel",
         "//shims/torch:aten_headers",

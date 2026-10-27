@@ -17,25 +17,9 @@
 from absl.testing import absltest
 import torch
 from torch import distributed as dist
-import torch.multiprocessing as mp
 from torch_tpu._internal.utils import test_utils as utils
 from torch_tpu._internal.distributed import multiprocessing
-from tests import seed_test_utils
-from tests.distributed import distributed_utils
-
-
-def _warmup_then_init_pg(test_fn, *args, **kwargs):
-  warmup = torch.zeros(1, device="tpu")
-  _ = warmup.cpu()
-  torch.accelerator.synchronize()
-
-  dist.init_process_group(backend="tpu_dist")
-  try:
-    test_fn(*args, **kwargs)
-  finally:
-    if dist.is_initialized():
-      dist.barrier()
-      dist.destroy_process_group()
+from tests.distributed import continuous_test_utils
 
 
 def _run_eager_collectives():
@@ -84,17 +68,14 @@ def _run_eager_collectives():
   utils.assert_close(recv.cpu(), expected)
 
 
-class CollectiveOpsDeviceOrderTest(seed_test_utils.MultiProcessRepeatableTest):
-  _world_size = 8
+class CollectiveOpsDeviceOrderTest(
+    continuous_test_utils.TpuMultiProcContinuousTest
+):
+  world_size = 8
 
   def test_collectives_with_pre_pg_warmup(self):
-    distributed_utils.dist_run(
-        nproc_per_node=self._world_size,
-        fn=_warmup_then_init_pg,
-        test_fn=_run_eager_collectives,
-    )
+    _run_eager_collectives()
 
 
 if __name__ == "__main__":
-  mp.set_start_method("spawn")
   multiprocessing.handle_test_main(absltest.main)

@@ -21,6 +21,7 @@ from perflab import model_helpers
 from perflab import registry as registry_lib
 from perflab import step_lib
 from perflab import torch_device_ops
+from perflab.model_utils import ragged_moe
 
 
 def _load_hf_gemma(
@@ -360,3 +361,73 @@ def gemma_4_26b_a4b_6_layers_training(ctx: context_lib.Context):
       fused=True,
   )
   return model, (), inputs, opt
+
+
+# --- Gemma 4 26B A4B with ragged-dot experts (12 Layers) ---
+
+
+def _load_hf_gemma_ragged_moe(
+    ctx: context_lib.Context,
+    model_name: str,
+    seq_len: int,
+    batch_size: int,
+    num_layers: int,
+) -> tuple[torch.nn.Module, dict[str, Any]]:
+  """Loads a Gemma 4 MoE model whose experts use `torch.tpu.ops.ragged_dot`.
+
+  Replaces the HuggingFace experts (`torch._grouped_mm`) of every MoE layer
+  with `ragged_moe.RaggedExpertsGemma4`.
+
+  Args:
+    ctx: The benchmark context.
+    model_name: HuggingFace model identifier.
+    seq_len: Tokens per sequence.
+    batch_size: Number of sequences per step.
+    num_layers: Number of decoder layers.
+
+  Returns:
+    A tuple of (model, inputs dictionary).
+  """
+  model, inputs = _load_hf_gemma(
+      ctx,
+      model_name,
+      is_training=False,
+      seq_len=seq_len,
+      batch_size=batch_size,
+      num_layers=num_layers,
+  )
+  dtype = torch_device_ops.get_torch_dtype(ctx.dtype)
+  text_config = model.config.get_text_config()
+  with torch.device(ctx.device_kind.value):
+    for layer in model.model.language_model.layers:
+      if getattr(layer, "enable_moe_block", False):
+        layer.experts = ragged_moe.RaggedExpertsGemma4(text_config).to(dtype)
+  # Randomly initialized weights overflow in bfloat16 without rescaling.
+  model.apply(model_helpers.init_small_random_weights)
+  # Gemma 4 takes `mm_token_type_ids` only with image inputs.
+  inputs.pop("mm_token_type_ids", None)
+  return model, inputs
+
+
+@registry_lib.register_benchmark(
+    stepper=step_lib.StepperType.FORWARD,
+    presubmit=registry_lib.PresubmitPolicy.RUN,
+)
+def gemma_4_26b_a4b_ragged_moe_12_layers_forward(ctx: context_lib.Context):
+  """Benchmark factory for Gemma-4 26B-A4B (12 layers) ragged-dot MoE forward."""
+  if ctx.run_scope == context_lib.RunScope.PRESUBMIT:
+    batch_size = 1
+    seq_len = 128
+    num_layers = 2
+  else:
+    batch_size = 2
+    seq_len = 2048
+    num_layers = 12
+  model, inputs = _load_hf_gemma_ragged_moe(
+      ctx,
+      "google/gemma-4-26B-A4B",
+      seq_len=seq_len,
+      batch_size=batch_size,
+      num_layers=num_layers,
+  )
+  return model, (), inputs

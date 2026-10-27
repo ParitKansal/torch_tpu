@@ -33,20 +33,20 @@ namespace torch_tpu {
 
 // Allocates a TPU buffer of the given dimensions and element type, and copies
 // the data from the host buffer into it.
-// If non_blocking is true, the copy is done asynchronously and the function
-// returns immediately.
+// This is always non-blocking; the returned DeviceBufferRef can be used to
+// track the transfer's completion.
 // If backing_data is provided, it is used to keep the host data alive until the
-// transfer completes.
-// If non_blocking is true and backing_data is not provided, the caller is
-// responsible for ensuring the host data is alive until the copy completes.
+// transfer completes. If backing_data is not provided, the host data must
+// remain valid and unchanged until the transfer completes.
 absl::StatusOr<DeviceBufferRef> TpuMallocAndMemcpyHtoD(
     const void* host_data, mlir::ElementType element_type,
-    absl::Span<const int64_t> dimensions, bool non_blocking,
+    absl::Span<const int64_t> dimensions,
     std::vector<uint8_t> backing_data = {});
 
 // Copies the data from the device directly into the provided host buffer.
-absl::Status TpuMemcpyDtoHDirect(const DeviceBufferRef& buffer_ref,
-                                 void* dst_ptr, bool non_blocking = false);
+// This is always non-blocking; the future may be awaited to make this blocking.
+xla::Future<void> TpuMemcpyDtoHDirect(const DeviceBufferRef& buffer_ref,
+                                      void* dst_ptr);
 
 // Holds the completion future and RAII buffer hold for an asynchronous DMA
 // copy.

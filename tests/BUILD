@@ -1287,6 +1287,7 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//shims/torch:testing_internal",
         "//src/torch_tpu",
+        "//src/torch_tpu/_internal/compile:compiler",
         "//src/torch_tpu/_internal/compile:flex_attention_redirect",
         "//src/torch_tpu/_internal/compile:tpu_torch_compile",
         "//src/torch_tpu/_internal/dynamism",
@@ -1306,8 +1307,7 @@ torch_tpu_py_test(
     tags = [
         # Requires SparseCore accelerator, which is not available on TPU v5e and below.
         "fails-on-tpu-v5",
-        "ok-to-wait-for-v7x-in-presubmit",
-        "requires-tpu-v7x",
+        "requires-tpu-v5p",
     ],
     deps = [
         ":op_testing",
@@ -1328,8 +1328,7 @@ torch_tpu_py_test(
     tags = [
         # Requires SparseCore accelerator, which is not available on TPU v5e and below.
         "fails-on-tpu-v5",
-        "ok-to-wait-for-v7x-in-presubmit",
-        "requires-tpu-v7x",
+        "requires-tpu-v5p",
     ],
     deps = [
         ":op_testing",
@@ -1443,6 +1442,7 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//shims/torch:testing_internal",
         "//src/torch_tpu",
+        "//src/torch_tpu/_internal/compile:compiler",
         "//src/torch_tpu/_internal/compile:flex_attention_redirect",
         "//src/torch_tpu/_internal/compile:tpu_torch_compile",
         "//src/torch_tpu/_internal/dynamism",
@@ -1482,6 +1482,7 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//shims/torch:testing_internal",
         "//src/torch_tpu",
+        "//src/torch_tpu/_internal/compile:compiler",
         "//src/torch_tpu/_internal/compile:flex_attention_redirect",
         "//src/torch_tpu/_internal/compile:tpu_torch_compile",
         "//src/torch_tpu/_internal/dynamism",
@@ -1752,7 +1753,9 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/export",
         "//src/torch_tpu/_internal/pallas",
         "//src/torch_tpu/_internal/pallas:tpu_torch_pallas",  # build_cleaner: keep
+        "//src/torch_tpu/_internal/sync",
         "//src/torch_tpu/_internal/utils:hardware",
+        "//src/torch_tpu/_internal/utils:test_utils",
         "//tests/distributed:distributed_utils",
     ],
 )
@@ -1766,8 +1769,7 @@ torch_tpu_py_test(
     ],
     env = TEST_COV_ENV,
     main = "errors_test.py",
-    notap = "Run by error_coverage_test in the torch_tpu.error_coverage Guitar workflow.",
-    shard_count = 4,
+    notap = "Run as a data dep by :error_coverage_test.",
     tags = [
         "nosan",  # *san builds are low-value for error tests.
         "requires-tpu-v5lite",
@@ -1797,8 +1799,7 @@ torch_tpu_py_test(
     ],
     env = TEST_COV_ENV,
     main = "tpu_errors_test.py",
-    notap = "Run by error_coverage_test in the torch_tpu.error_coverage Guitar workflow.",
-    shard_count = 4,
+    notap = "Run as a data dep by :error_coverage_test.",
     tags = [
         "nosan",  # *san builds are low-value for error tests.
         "requires-tpu-v5lite",
@@ -1823,7 +1824,9 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/export",
         "//src/torch_tpu/_internal/pallas",
         "//src/torch_tpu/_internal/pallas:tpu_torch_pallas",  # build_cleaner: keep
+        "//src/torch_tpu/_internal/sync",
         "//src/torch_tpu/_internal/utils:hardware",
+        "//src/torch_tpu/_internal/utils:test_utils",
         "//tests/distributed:distributed_utils",
     ],
 )
@@ -2422,7 +2425,7 @@ torch_tpu_py_test(
     size = "medium",
     srcs = ["import_test.py"],
     main = "import_test.py",
-    shard_count = 4,
+    shard_count = 5,
     tags = [],
     deps = [
         "//shims/absl_py/testing:absltest",
@@ -2430,6 +2433,7 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
+        "//tests/api:wheel_py_targets",  # build_cleaner: keep
     ],
 )
 
@@ -2870,6 +2874,60 @@ torch_tpu_py_test(
         ":cpp_style_lib",
         "//shims/absl_py/testing:absltest",
         "//shims/absl_py/testing:parameterized",
+        "//src/torch_tpu",
+    ],
+)
+
+# Measures how well the error tests cover the error macros in the C++ sources.
+torch_tpu_py_library(
+    name = "error_coverage_lib",
+    testonly = True,
+    srcs = ["error_coverage_lib.py"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":repo_paths",
+        "//shims/absl_py/logging",
+        "@pypi//pyyaml",
+    ],
+)
+
+torch_tpu_py_test(
+    name = "error_coverage_lib_test",
+    srcs = ["error_coverage_lib_test.py"],
+    deps = [
+        ":error_coverage_lib",
+        ":repo_paths",
+        "//shims/absl_py/testing:absltest",
+        "//src/torch_tpu",
+    ],
+)
+
+# Fails if a change adds error macros that errors_test.py, tpu_errors_test.py or
+# distributed/collective_errors_test.py don't cover. It needs 8 chips because
+# collective_errors_test_cov runs in it.
+torch_tpu_py_test(
+    name = "error_coverage_test",
+    timeout = "long",
+    srcs = ["error_coverage_test.py"],
+    data = [
+        "error_coverage_data.yaml",
+        ":errors_test_cov",
+        ":tpu_errors_test_cov",
+        "//csrc:all_cpp_files_recursive",
+        "//tests/distributed:collective_errors_test_cov",
+    ],
+    notest_oss = True,  # NOTEST_OSS_OK=Enabled in OSS in a follow-up change.
+    tags = [
+        "nofastbuild",
+        "nosan",  # *san builds are low-value for error tests.
+        "requires-tpu-v5lite:8",
+    ],
+    deps = [
+        ":error_coverage_lib",
+        ":repo_paths",
+        "//shims/absl_py/flags",
+        "//shims/absl_py/logging",
+        "//shims/absl_py/testing:absltest",
         "//src/torch_tpu",
     ],
 )

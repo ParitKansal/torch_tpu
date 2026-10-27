@@ -17,182 +17,124 @@
 #ifndef TORCH_TPU_CSRC_OPS_SCALED_DOT_PRODUCT_ATTENTION_UTIL_H_
 #define TORCH_TPU_CSRC_OPS_SCALED_DOT_PRODUCT_ATTENTION_UTIL_H_
 
+// Kiln building blocks shared by the flash attention forward and backward
+// kernels. Everything here must be called inside a `kiln::CreateKernel` body.
+
 #include <cstdint>
 #include <optional>
-#include <string>
 
+#include "absl/status/status.h"
+#include "csrc/internal/mosaic/kiln/kiln.h"
 #include "csrc/ops/scaled_dot_product_attention/flash_attention_config.h"
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/StringRef.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Dialect/Vector/IR/VectorOps.h"
-#include "mlir/IR/Attributes.h"
-#include "mlir/IR/Builders.h"
-#include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/BuiltinTypeInterfaces.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/Operation.h"
-#include "mlir/IR/Value.h"
-#include "mlir/Support/LLVM.h"
 
-namespace mlir::torch_tpu {  // NON_TORCH_TPU_OK=TODO(willfroom): migrate this.
+namespace torch_tpu {
 
-struct KVWindowMaps {
-  DictionaryAttr k_map;
-  DictionaryAttr v_map;
-};
+// Validates the preconditions shared by all flash attention kernels.
+absl::Status ValidateFlashAttnConfig(const FlashAttnConfig& config,
+                                     const Tiling& tiling);
 
-DictionaryAttr CreateSymbolTransformIndicesAttr(
-    Builder& builder, llvm::StringRef function_name,
-    llvm::ArrayRef<int64_t> window_bounds);
+// -----------------------------------------------------------------------------
+// Block specs
+// -----------------------------------------------------------------------------
 
-// Creates the KV window maps (k_map and v_map) for MHA, GQA, or MQA.
-KVWindowMaps CreateKVWindowMaps(OpBuilder& builder, func::FuncOp fn,
-                                const FlashAttnConfig& config,
-                                const Tiling& tiling);
+// Dropout needs a single `scalar_prefetch` operand: a 4-word SMEM buffer
+// holding the Philox {seed_lo, seed_hi, offset_lo, offset_hi}. Returns
+// `std::nullopt` when dropout is disabled.
+std::optional<kiln::ScalarPrefetchSpec> DropoutSeedSpec(
+    const FlashAttnConfig& config);
 
-// Load a 2D tile from the given argument.
-TypedValue<VectorType> LoadTile(ImplicitLocOpBuilder& b, Value arg);
-// Load the [num_rows, num_cols] sub-tile of the given argument starting at
-// (row_offset, col_offset) of its trailing 2D tile.
-TypedValue<VectorType> LoadTileSlice(ImplicitLocOpBuilder& b, Value arg,
-                                     int64_t row_offset, int64_t num_rows,
-                                     int64_t col_offset, int64_t num_cols);
-// Store a 2D tile to the given argument.
-// If the value is not the same type as the argument, it will be converted.
-void StoreTile(ImplicitLocOpBuilder& b, Value value, Value arg);
-// Store a 2D value at (row_offset, col_offset) of the trailing 2D tile of the
-// given argument.
-void StoreTileSlice(ImplicitLocOpBuilder& b, Value value, Value arg,
-                    int64_t row_offset, int64_t col_offset);
+// Index map for the K / V blocks on a (batch, q_head, q_block, kv_block) grid.
+// Handles GQA / MQA (kv_head = q_head / head_group, which needs a floordiv and
+// therefore a function map) and, for causal attention, points skipped blocks
+// above the diagonal at block 0 so the pipeline prefetches what the next q row
+// will need.
+kiln::IndexMap KvBlockIndexMap(const FlashAttnConfig& config,
+                               const Tiling& tiling);
 
-// Initialize a 2D tile with zeros.
-void ZeroTile(ImplicitLocOpBuilder& b, Value arg);
+// Block shape of the bias: (1, 1, qt, kt), with 1 instead of qt / kt along a
+// broadcast query / key dim (e.g. a [B, 1, 1, S] key padding mask), which
+// `LoadBias` then broadcasts in VMEM.
+kiln::Shape BiasBlockShape(const FlashAttnConfig& config, const Tiling& tiling,
+                           kiln::DType dtype);
 
-// Initialize a 2D tile with -inf.
-void NInfTile(ImplicitLocOpBuilder& b, Value arg);
+// Input spec for the user attention bias on a (batch, q_head, q_block,
+// kv_block) grid, honouring `config.mask_broadcast_dims`. Returns
+// `std::nullopt` when there is no bias.
+std::optional<kiln::InSpec> AttnBiasSpec(const FlashAttnConfig& config,
+                                         const Tiling& tiling,
+                                         kiln::DType dtype);
+
+// -----------------------------------------------------------------------------
+// Kernel body helpers
+// -----------------------------------------------------------------------------
+
+// Loads the f32 (rows, cols) bias sub-block at (row_offset, col_offset),
+// broadcasting a size-1 query / key dim (see `BiasBlockShape`).
+kiln::Tile LoadBias(kiln::Ref bias_ref, const FlashAttnConfig& config,
+                    int64_t row_offset, int64_t rows, int64_t col_offset,
+                    int64_t cols);
 
 // Whether any sequence boundary masking is required for the given
 // configuration.
-bool NeedsPadMask(int64_t qt, int64_t kt, int64_t q_seq_len,
-                  int64_t kv_seq_len);
+bool NeedsPadMask(const FlashAttnConfig& config, const Tiling& tiling);
 
-// Apply structured masking (causal and/or sequence boundary masking) to `sij`.
-// `sij` is the sub-block of the (row_block_idx, col_block_idx) grid tile that
-// starts at the static (row_offset, col_offset) within the tile; the tile
-// itself is [qt, kt]. Callers should skip calling this on sub-blocks known not
-// to intersect a mask boundary (see CreateIntersectsDiagCondition).
-Value ApplyStructuredMask(ImplicitLocOpBuilder& b, Value sij,
-                          Value row_block_idx, Value col_block_idx, int64_t qt,
-                          int64_t kt, int64_t q_seq_len, int64_t kv_seq_len,
-                          bool is_causal, int64_t row_offset,
-                          int64_t col_offset,
-                          std::optional<int64_t> sliding_window_size);
-
-// Reduce the 2D input to a 1D across the lane dimension and then broadcast the
-// results lane dimension to the given size.
-Value ReduceBroadcastLane(ImplicitLocOpBuilder& b, Value input,
-                          vector::CombiningKind kind,
-                          int64_t broadcast_lane_size = 128);
-
-// Clamp the given value to the minimum finite value.
-Value ClampMinFinite(ImplicitLocOpBuilder& b, Value input);
-
-// Creates a constant vector with all elements set to `value`.
-Value SplatConstant(ImplicitLocOpBuilder& b, Type type, float value);
-Value SplatConstant(ImplicitLocOpBuilder& b, ShapedType type,
-                    Attribute value_attr);
-
-// Creates a constant vector with all elements set to -infinity.
-Value SplatNegInf(ImplicitLocOpBuilder& b, Type type);
-
-// Returns an i1 condition indicating whether the tile at (row_idx, col_idx)
-// is below or on the diagonal (i.e. intersects the causal mask).
-Value CreateBelowOrOnDiagCondition(ImplicitLocOpBuilder& b, Value row_idx,
-                                   Value col_idx, int64_t row_block_size,
-                                   int64_t col_block_size,
-                                   std::optional<int64_t> sliding_window_size);
-
-// Returns an i1 condition indicating whether the tile at (row_idx, col_idx)
-// contains at least one element strictly above the diagonal, i.e. whether a
-// causal mask needs to be applied to it. Tiles strictly below the diagonal
-// need no masking.
-Value CreateIntersectsDiagCondition(ImplicitLocOpBuilder& b, Value row_idx,
-                                    Value col_idx, int64_t row_block_size,
-                                    int64_t col_block_size,
-                                    std::optional<int64_t> sliding_window_size);
-
-// Create an scf.IfOp where the then block will be executed when
-// row_idx >= col_idx.
-scf::IfOp CreateCausalIfOp(ImplicitLocOpBuilder& b, Value row_idx,
-                           Value col_idx, int64_t row_block_size,
-                           int64_t col_block_size,
-                           std::optional<int64_t> sliding_window_size);
-
-// Scale the input vector by the given scale factor.
-Value ScaleValue(ImplicitLocOpBuilder& b, Value input, float scale);
-
-// Cast the input value element type to the given target type.
-// Assumes that the input is a vector type.
-// If the input is already the correct type, the input is returned unchanged.
-Value ConvertElementType(ImplicitLocOpBuilder& b, Type target_element_type,
-                         Value input);
-
-// Normalizes the lane dimension of the input vector.
-// This is intended to be used with the statistic tiles (e.g. lse, di, etc.)
-// It will slice the lane dimension if the target lane size is smaller than the
-// input lane size, and will repeat the lane dimension if the target lane
-// size is larger than the input lane size.
-// **NOTE** This will fail if the target lane size is larger and not a
-// multiple of the input lane size.
-Value NormalizeLaneDim(ImplicitLocOpBuilder& builder, Value input,
-                       int64_t target_lane_size);
-
-// Create a log2 operation.
-Value CreateLog2(ImplicitLocOpBuilder& b, Value input);
-
-// Dropout needs a single Mosaic `scalar_prefetch` operand: a 4-word SMEM buffer
-// holding the Philox {seed_lo, seed_hi, offset_lo, offset_hi}.
-//
-// The two functions below must stay in sync. Mosaic binds scalar-prefetch
-// operands immediately after the grid iteration indices, and requires the
-// `scalar_prefetch` attribute to match the number of operands appended to the
-// kernel signature *and* to every symbol-based `transform_indices` function,
-// which must take exactly `iteration_bounds.size() + scalar_prefetch` args.
-
-// Appends the `scalar_prefetch` operand types for `config` to `types`.
-void AppendScalarPrefetchTypes(MLIRContext* context,
+// True when the (row_block, col_block) tile pair touches or lies below the
+// diagonal (and within `config.sliding_window_size` when set), i.e. the tile
+// contributes to a causal softmax.
+kiln::Scalar BelowOrOnDiagonal(kiln::Scalar row_block, kiln::Scalar col_block,
                                const FlashAttnConfig& config,
-                               SmallVectorImpl<Type>& types);
+                               const Tiling& tiling);
 
-// Sets the `scalar_prefetch` attribute on `fn`, if `config` needs one.
-void SetScalarPrefetchAttr(const FlashAttnConfig& config, func::FuncOp fn,
-                           OpBuilder& builder);
+// True when the (row_block, col_block) tile contains at least one element
+// strictly above the diagonal (or outside `config.sliding_window_size` when
+// set), i.e. whether a causal mask needs to be applied to it. Tiles strictly
+// inside the valid region need no masking.
+kiln::Scalar IntersectsDiagonal(kiln::Scalar row_block, kiln::Scalar col_block,
+                                const FlashAttnConfig& config,
+                                const Tiling& tiling);
 
-// Builds a stateless, tile-size-invariant dropout mask of type
-// vector<rows x cols x i1> (true = keep, false = drop) for the sub-block of
-// the (row_block_idx, col_block_idx) grid tile that starts at the static
+// Masks out logits above the diagonal (causal), outside the sliding window, and
+// in the padded tail of either sequence for the sub-block starting at
+// (row_offset, col_offset) within the (row_block, col_block) grid tile. Returns
+// `s` untouched when no masking is required.
+kiln::Tile ApplyStructuredMask(kiln::Tile s, kiln::Scalar row_block,
+                               kiln::Scalar col_block,
+                               const FlashAttnConfig& config,
+                               const Tiling& tiling, int64_t row_offset = 0,
+                               int64_t col_offset = 0);
+
+// log2-scaled logits for one (q, k) tile pair:
+//   s = (q @ k^T) * scale * log2(e) [+ bias * log2(e)]
+// with causal / sequence-padding masking applied. Returns an f32 (qt, kt) tile.
+kiln::Tile ComputeLogits(kiln::Tile q, kiln::Tile k,
+                         std::optional<kiln::Ref> bias_ref,
+                         kiln::Scalar row_block, kiln::Scalar col_block,
+                         const FlashAttnConfig& config, const Tiling& tiling);
+
+// Builds a stateless, tile-size-invariant dropout keep mask: an i1 (rows, cols)
+// tile (true = keep, false = drop) for the sub-block starting at
 // (row_offset, col_offset) within the [qt, kt] tile. When `rows` or `cols` are
 // <= 0 they default to `qt` and `kt` respectively.
 //
-// The mask is a pure function of (batch_idx, head_idx, absolute q, absolute
-// kv) and the Philox {seed, offset} in `seed_smem` (memref<4xi32, smem>), so
-// the backward kernel regenerates it rather than storing it. It is keyed on
+// The mask is a pure function of (batch, q_head, absolute q, absolute kv) and
+// the Philox {seed, offset} in `seed_ref` (memref<4xi32, smem>), so the
+// backward kernel regenerates it rather than storing it. It is keyed on
 // absolute rather than within-tile coordinates so that the forward and
 // backward kernels agree despite their different tilings.
 //
-// `head_idx` must be the *query* head index.
-Value BuildDropoutKeepMask(ImplicitLocOpBuilder& b,
-                           const FlashAttnConfig& config, int64_t qt,
-                           int64_t kt, Value batch_idx, Value head_idx,
-                           Value row_block_idx, Value col_block_idx,
-                           Value seed_smem, int64_t row_offset = 0,
+// `q_head` must be the *query* head index.
+kiln::Tile DropoutKeepMask(const FlashAttnConfig& config, const Tiling& tiling,
+                           kiln::Scalar batch, kiln::Scalar q_head,
+                           kiln::Scalar row_block, kiln::Scalar col_block,
+                           kiln::Ref seed_ref, int64_t row_offset = 0,
                            int64_t col_offset = 0, int64_t rows = 0,
                            int64_t cols = 0);
-// Get the string representation of an operation.
-std::string GetOpString(Operation* op);
 
-}  // namespace mlir::torch_tpu
+// Inverted dropout: kept entries of `t` are rescaled by 1 / (1 - p), dropped
+// entries are zeroed.
+kiln::Tile ApplyDropout(kiln::Tile t, kiln::Tile keep,
+                        const FlashAttnConfig& config);
+
+}  // namespace torch_tpu
 
 #endif  // TORCH_TPU_CSRC_OPS_SCALED_DOT_PRODUCT_ATTENTION_UTIL_H_

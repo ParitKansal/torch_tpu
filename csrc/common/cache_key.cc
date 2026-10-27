@@ -447,12 +447,14 @@ GraphKey PadModuleCacheKey(absl::Span<const Shape> dynamic_shapes,
       padded_dimensions[dynamic_dim.dimension] = dynamic_dim.upper_bound;
     }
 
-    const int padded_tensor_index = graph.AddOp(
-        OpName::kPadUninitialized_, OpParamCacheKeys::Empty(),
-        /*donated_inputs=*/{}, [&](GraphSignature::OpSignatureBuilder& op) {
-          op.AddInput(i);
-          op.AddOutput(padded_dimensions, shape.dtype());
-        });
+    const int padded_tensor_index =
+        graph.AddOp(OpName::kPadUninitialized_, OpParamCacheKeys::Empty(),
+                    /*donated_inputs=*/{},
+                    [&]  // REF_CAPTURE_OK=called synchronously
+                    (GraphSignature::OpSignatureBuilder& op) {
+                      op.AddInput(i);
+                      op.AddOutput(padded_dimensions, shape.dtype());
+                    });
     graph.AddGraphOutput(padded_tensor_index);
 
     if (!pad_only_module) {
@@ -502,12 +504,14 @@ GraphKey SliceModuleCacheKey(
       graph.AddGraphOutput(i);
       continue;
     }
-    int op_index = graph.AddOp(
-        OpName::kSlice, OpParamCacheKeys::Empty(),
-        /*donated_inputs=*/{}, [&](GraphSignature::OpSignatureBuilder& op) {
-          op.AddInput(i);
-          op.AddOutput(target_shapes[i], element_types[i]);
-        });
+    int op_index =
+        graph.AddOp(OpName::kSlice, OpParamCacheKeys::Empty(),
+                    /*donated_inputs=*/{},
+                    [&]  // REF_CAPTURE_OK=called synchronously
+                    (GraphSignature::OpSignatureBuilder& op) {
+                      op.AddInput(i);
+                      op.AddOutput(target_shapes[i], element_types[i]);
+                    });
     graph.AddGraphOutput(op_index);
   }
   return graph.GetKey();

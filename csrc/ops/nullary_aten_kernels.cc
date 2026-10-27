@@ -49,7 +49,6 @@
 #include "torch/headeronly/core/Layout.h"
 #include "torch/headeronly/core/MemoryFormat.h"
 #include "torch/headeronly/core/ScalarType.h"
-#include "xla/xla_data.pb.h"
 
 namespace torch_tpu {
 
@@ -205,6 +204,7 @@ at::Tensor AtenEfficientZeroTensor(at::IntArrayRef size,
        IgnoreInCacheKey(device_opt, "Not needed"),
        IgnoreInCacheKey(pin_memory_opt, "Not needed")),
       {
+        CheckDeviceIsTpu(device_opt, "_efficientzerotensor");
         c10::ScalarType dtype =
             dtype_opt.value_or(c10::get_default_dtype_as_scalartype());
         auto op_builder =

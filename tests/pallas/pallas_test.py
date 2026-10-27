@@ -18,6 +18,7 @@ import enum
 import functools
 import os
 import pathlib
+import re
 import sys
 from typing import Optional, Sequence, Tuple, TypeAlias
 from unittest import mock
@@ -140,8 +141,12 @@ class TestPallasKernels(seed_test_utils.RepeatableTest):
     self.device = torch.device("tpu")
 
   def _assert_donated(self, x: torch.Tensor):
-    with self.assertRaisesRegex(
-        RuntimeError, "INVALID_ARGUMENT: Buffer has been deleted or donated"
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=verify buffer donation
+        RuntimeError,
+        re.compile(
+            r".*(Buffer has been deleted or donated|cannot start a device to"
+            r" host copy from a donated or deleted buffer).*"
+        ),
     ):
       x.cpu()
 
@@ -652,7 +657,7 @@ class TestPallasKernels(seed_test_utils.RepeatableTest):
               dynamic_sizes=[symbolic_shape.DimDynamic.DYNAMIC]
           ),
       )
-      with self.assertRaisesRegex(
+      with self.assertRaisesRegex(  # ASSERT_RAISES_OK=verify symbolic shape
           RuntimeError, "Symbolic dimensions are not supported"
       ):
         pass_through(fake_x)
@@ -716,7 +721,7 @@ class TestPallasKernels(seed_test_utils.RepeatableTest):
     test_utils.assert_close(x.to("cpu"), expected_updated_x)
 
   def test_inconsistent_donate_and_aliases_raises_error(self):
-    with self.assertRaisesRegex(
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=no jax in errors tests
         ValueError,
         "donate_argnums must be None or the same as the keys of"
         " input_output_aliases.",
@@ -997,7 +1002,7 @@ class TestPallasKernels(seed_test_utils.RepeatableTest):
     custom_call_op = pallas.jax_op("test::custom_call", custom_call_fn)
 
     # Check that it successfully reaches XLA and raises an error.
-    with self.assertRaisesRegex(
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=no jax in errors tests
         RuntimeError,
         expected_regex="""failed to compile MLIR module -- the XLA compiler failed with: custom emitter for test_custom_call not found""",
     ):
@@ -1192,8 +1197,12 @@ class TestPallasKernels(seed_test_utils.RepeatableTest):
 class TestPallasCompat(seed_test_utils.RepeatableTest):
 
   def _assert_donated(self, x: torch.Tensor):
-    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=Testing buffer donation
-        RuntimeError, "INVALID_ARGUMENT: Buffer has been deleted or donated"
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=verify buffer donation
+        RuntimeError,
+        re.compile(
+            r".*(Buffer has been deleted or donated|cannot start a device to"
+            r" host copy from a donated or deleted buffer).*"
+        ),
     ):
       x.cpu()
 
@@ -1334,7 +1343,7 @@ class TestPallasCompat(seed_test_utils.RepeatableTest):
 
     op = pallas.jax_op("repro::identity_error", fn_identity)
 
-    with self.assertRaisesRegex(
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=no jax in errors tests
         ValueError,
         "expected packed dimension of float4_e2m1fn_x2 tensor to be "
         "contiguous \\(stride 1\\)",

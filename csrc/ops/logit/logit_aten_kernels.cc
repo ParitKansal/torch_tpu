@@ -33,7 +33,6 @@
 #include "csrc/common/error_utils.h"
 #include "csrc/common/fixed_size_span.h"
 #include "csrc/common/to_string.h"
-#include "csrc/common/utils.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/tensor_to_buffer.h"
@@ -136,14 +135,14 @@ ReturnType DispatchLogit(const at::Tensor& self, PromotedScalar& promoted_eps,
 
   auto op_builder = [out_dtype](FixedSizeSpan<mlir::MlirOp, 2> inputs)
       -> absl::StatusOr<mlir::MlirOp> {
-    const auto [self_op, eps_op] = inputs;
+    auto& [self_op, eps_op] = inputs;
     return BuildLogitShlo(self_op, eps_op, out_dtype);
   };
 
   return dispatch_fn(
       std::move(op_builder), OpInputs<2>{self, eps_tensor},
       DispatchOpOptions<1>{.out_dtype = out_dtype,
-                           .out_dims = CopyIntVector(self.sizes()),
+                           .out_dims = self.sizes(),
                            .op_param_cache_keys = std::move(param_keys)});
 }
 
@@ -181,8 +180,8 @@ absl::StatusOr<mlir::MlirOp> BuildLogitBackwardShlo(
   //   grad = grad_output / (self * (1 - self))
   //
   //   If eps >= 0:
-  //     If self >= lo and self <= hi, return grad
-  //     Else return 0 (since forward pass clamped to constant)
+  //     If self < lo or self > hi, return 0 (clamped in forward pass)
+  //     Else return grad
   //   Else:
   //     If self >= 0 and self <= 1, return grad
   //     Else return NaN
@@ -225,14 +224,15 @@ absl::StatusOr<mlir::MlirOp> BuildLogitBackwardShlo(
   mlir::MlirOp lo = eps_bcst;
   mlir::MlirOp hi = mlir::stablehlo::Subtract(k_one, eps_bcst);
 
-  // Check if self is in range: lo <= self <= hi
-  mlir::MlirOp ge_lo = mlir::stablehlo::Compare(
-      self_bcst, lo, mlir::stablehlo::ComparisonDirection::GE);
-  mlir::MlirOp le_hi = mlir::stablehlo::Compare(
-      self_bcst, hi, mlir::stablehlo::ComparisonDirection::LE);
-  mlir::MlirOp in_range_eps = mlir::stablehlo::And(ge_lo, le_hi);
+  // Check if self is out of range: self < lo || self > hi
+  mlir::MlirOp lt_lo = mlir::stablehlo::Compare(
+      self_bcst, lo, mlir::stablehlo::ComparisonDirection::LT);
+  mlir::MlirOp gt_hi = mlir::stablehlo::Compare(
+      self_bcst, hi, mlir::stablehlo::ComparisonDirection::GT);
+  mlir::MlirOp out_of_range_eps = mlir::stablehlo::Or(lt_lo, gt_hi);
 
-  mlir::MlirOp res_eps = mlir::stablehlo::Select(in_range_eps, div_res, k_zero);
+  mlir::MlirOp res_eps =
+      mlir::stablehlo::Select(out_of_range_eps, k_zero, div_res);
 
   // eps < 0 case
   mlir::MlirOp ge_zero = mlir::stablehlo::Compare(
@@ -300,6 +300,11 @@ at::Tensor& AtenLogitBackwardGradInput(const at::Tensor& grad_output,
         TT_CHECK_THROW(!c10::isComplexType(self_dtype),
                        error::kPythonNotImplementedError)
             << "expected non-complex dtype, got " << ToString(self_dtype);
+        const c10::ScalarType grad_output_dtype = grad_output.scalar_type();
+        TT_CHECK_THROW(!c10::isComplexType(grad_output_dtype),
+                       error::kPythonNotImplementedError)
+            << "expected non-complex dtype, got "
+            << ToString(grad_output_dtype);
         TT_THROW_IF_ERROR(ValidateOutDtype(grad_input, InferOutputDtype(self)));
         const c10::ScalarType out_type = grad_input.scalar_type();
 
@@ -312,7 +317,7 @@ at::Tensor& AtenLogitBackwardGradInput(const at::Tensor& grad_output,
 
         auto op_builder = [out_dtype](FixedSizeSpan<mlir::MlirOp, 3> inputs)
             -> absl::StatusOr<mlir::MlirOp> {
-          const auto [grad_output_op, self_op, eps_op] = inputs;
+          auto& [grad_output_op, self_op, eps_op] = inputs;
           return BuildLogitBackwardShlo(grad_output_op, self_op, eps_op,
                                         out_dtype);
         };
@@ -320,7 +325,7 @@ at::Tensor& AtenLogitBackwardGradInput(const at::Tensor& grad_output,
         TT_THROW_IF_ERROR(DispatchOpOut<3>(
             std::move(op_builder), {grad_output, self, eps_tensor}, grad_input,
             {.out_dtype = out_dtype,
-             .out_dims = CopyIntVector(self.sizes()),
+             .out_dims = self.sizes(),
              .op_param_cache_keys = std::move(param_keys)}));
         return grad_input;
       });

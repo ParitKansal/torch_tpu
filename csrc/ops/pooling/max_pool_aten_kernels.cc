@@ -173,7 +173,7 @@ absl::StatusOr<std::vector<mlir::MlirOp>> ComputeMaxPoolWithIndices(
       /*inputs=*/{batch_input, iota},
       /*init_values=*/{init_value, init_invalid_iota},
       /*body=*/
-      [&](mlir::RegionBuilder& body) {
+      [&](mlir::RegionBuilder& body) {  // REF_CAPTURE_OK=called synchronously
         mlir::stablehlo::buildMaxAndArgmaxBody(
             element_type, index_type, body.getRegion(), body.getOpBuilder());
       },
@@ -216,7 +216,7 @@ absl::StatusOr<mlir::MlirOp> ComputeMaxPool(
       /*inputs=*/{batch_input},
       /*init_values=*/{init_value},
       /*body=*/
-      [&](mlir::RegionBuilder& rb) {
+      [&](mlir::RegionBuilder& rb) {  // REF_CAPTURE_OK=called synchronously
         mlir::stablehlo::buildReduceBody<mlir::stablehlo::MaxOp>(
             element_type, rb.getRegion(), rb.getOpBuilder());
       },

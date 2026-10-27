@@ -158,9 +158,10 @@ class LoadedExecutableWithMetadata {
   }
 
   const std::vector<Shape>& output_shapes() const { return output_shapes_; }
-  // The on-device shapes the executable's parameters were compiled for, or
-  // nullopt for dynamic parameters. Empty if the executable doesn't report
-  // them.
+  // For each argument buffer the executable takes, the on-device shape it was
+  // compiled for, or nullopt for dynamic parameters. Tuple parameters take one
+  // buffer per element and can't be nested. Empty if the executable doesn't
+  // report them.
   const std::vector<std::optional<xla::Shape>>& parameter_device_shapes()
       const {
     return parameter_device_shapes_;
@@ -295,6 +296,16 @@ class ContextedModule {
 absl::StatusOr<LoadedExecutableBuilder>
 MlirComputationBuilderToExecutableBuilder(
     const MlirComputationBuilder& computation_builder);
+
+// Compiles and loads `module` with `options` on `client`.
+//
+// On TPU, if the main function of `module` takes many arguments, the program is
+// compiled to take them as a single tuple. Callers still pass one buffer per
+// argument.
+absl::StatusOr<std::unique_ptr<xla::PjRtLoadedExecutable>>
+CompileAndLoadMlirModule(xla::PjRtClient& client,
+                         xla::MaybeOwningMlirModule module,
+                         xla::CompileOptions options);
 
 // Creates an MLIR context and registers all required TPU dialects.
 absl_nonnull std::unique_ptr<mlir::MLIRContext> MakeMlirContext();

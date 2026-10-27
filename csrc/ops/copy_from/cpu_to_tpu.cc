@@ -16,7 +16,9 @@
 
 #include "csrc/ops/copy_from/cpu_to_tpu.h"
 
+#include <memory>
 #include <optional>
+#include <utility>
 
 #include "ATen/core/ATen_fwd.h"
 #include "ATen/core/TensorBody.h"
@@ -27,7 +29,11 @@
 #include "csrc/common/layout_utils.h"
 #include "csrc/common/to_string.h"
 #include "csrc/eager/device_buffer.h"
+#include "csrc/eager/events_queue.h"
+#include "csrc/eager/materialize.h"
+#include "csrc/eager/structured_log_buffer.h"
 #include "csrc/eager/tensor_to_buffer.h"
+#include "csrc/ops/copy_from/copy_common.h"
 #include "csrc/pjrt/pjrt_transfer.h"
 #include "torch/headeronly/core/MemoryFormat.h"
 #include "xla/xla_data.pb.h"
@@ -35,7 +41,7 @@
 namespace torch_tpu {
 
 absl::Status CopyCpuToTpu(const at::Tensor& src, const at::Tensor& dest,
-                          bool non_blocking) {
+                          TransferSyncMode transfer_sync_mode) {
   ABSL_VLOG(1) << "[AtenCopyFrom] CPU -> TPU copy path for "
                << ToString(src, "src");
   if (src.numel() == 0) {
@@ -51,12 +57,13 @@ absl::Status CopyCpuToTpu(const at::Tensor& src, const at::Tensor& dest,
                                .memory_format(at::MemoryFormat::Contiguous),
                            /*non_blocking=*/false, /*copy=*/true);
   }
-  if (non_blocking && effective_src.data_ptr() != src.data_ptr()) {
+  if (transfer_sync_mode == TransferSyncMode::kEagerNonBlocking &&
+      effective_src.data_ptr() != src.data_ptr()) {
     // If to() created a copy, then effective_src will be
     // dropped at the end of this function, invalidating the non-blocking
     // copy. We must do a blocking copy to avoid this.
     // TODO(bawilson): implement a non-blocking copy using a CPU->TPU->TPU path
-    non_blocking = false;
+    transfer_sync_mode = TransferSyncMode::kEagerBlocking;
   }
 
   TT_ASSIGN_OR_RETURN(TpuLayout tpu_layout, ResolveTpuLayout(effective_src));
@@ -68,8 +75,29 @@ absl::Status CopyCpuToTpu(const at::Tensor& src, const at::Tensor& dest,
   TT_ASSIGN_OR_RETURN(
       DeviceBufferRef tpu_buf,
       TpuMallocAndMemcpyHtoD(effective_src.data_ptr(), tpu_layout.element_type,
-                             tpu_layout.sizes, non_blocking));
-  TT_RETURN_IF_ERROR(AssignBufferToAtTensor(tpu_buf, dest));
+                             tpu_layout.sizes));
+  if (transfer_sync_mode == TransferSyncMode::kIsolated) {
+    // Block until the transfer completes, assign the buffer, and return without
+    // touching any streams.
+    TT_RETURN_IF_ERROR(AdaptXlaError(
+        tpu_buf.Synchronize(),
+        /* context= */ "failed to copy buffer from host to device"));
+    TT_RETURN_IF_ERROR(AssignBufferToAtTensor(std::move(tpu_buf), dest));
+    return absl::OkStatus();
+  }
+
+  // Record the transfer on the stream in either kEagerBlocking or
+  // kEagerNonBlocking mode, but only block if kEagerBlocking.
+  RecordAsyncHostToDevice(tpu_buf);
+  TT_RETURN_IF_ERROR(AssignBufferToAtTensor(std::move(tpu_buf), dest));
+
+  if (transfer_sync_mode == TransferSyncMode::kEagerBlocking) {
+    TT_ASSIGN_OR_RETURN(
+        std::shared_ptr<EventSnapshot> snapshot,
+        MaterializeCurrentStream(MaterializationReason::kCpuTransfer).Await());
+    TT_RETURN_IF_ERROR(snapshot->Synchronize());
+    TT_RETURN_IF_ERROR(SyncAndReturnStickyError());
+  }
   return absl::OkStatus();
 }
 

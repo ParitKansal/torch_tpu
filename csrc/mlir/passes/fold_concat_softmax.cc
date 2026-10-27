@@ -203,7 +203,7 @@ void EraseTriviallyDeadOps(mlir::func::FuncOp func) {
   while (changed) {
     changed = false;
     llvm::SmallVector<mlir::Operation*> dead_ops;
-    func.walk([&](mlir::Operation* op) {
+    func.walk([&](mlir::Operation* op) {  // REF_CAPTURE_OK=called synchronously
       if (mlir::isOpTriviallyDead(op)) {
         dead_ops.push_back(op);
       }
@@ -327,7 +327,8 @@ bool TryFoldShiftInvariantPreSubtractionAlongDim(
 // the downstream softmax and drop the redundant reduction.
 void FoldShiftInvariantPreSubtraction(mlir::func::FuncOp func) {
   llvm::SmallVector<mlir::stablehlo::SubtractOp> sub_ops;
-  func.walk([&](mlir::stablehlo::SubtractOp op) { sub_ops.push_back(op); });
+  func.walk([&]  // REF_CAPTURE_OK=called synchronously
+            (mlir::stablehlo::SubtractOp op) { sub_ops.push_back(op); });
 
   for (mlir::stablehlo::SubtractOp shifted_outer : sub_ops) {
     auto outer_type =
@@ -589,7 +590,10 @@ void TryPartitionSmallTailConcatSoftmax(mlir::stablehlo::DivOp div_op) {
 // concatenated intermediate tensor or intermediate activations.
 void PartitionSmallTailConcatSoftmax(mlir::func::FuncOp func) {
   llvm::SmallVector<mlir::stablehlo::DivOp> div_ops;
-  func.walk([&](mlir::stablehlo::DivOp op) { div_ops.push_back(op); });
+  func.walk(
+      [&](mlir::stablehlo::DivOp op) {  // REF_CAPTURE_OK=called synchronously
+        div_ops.push_back(op);
+      });
   for (mlir::stablehlo::DivOp div_op : div_ops) {
     TryPartitionSmallTailConcatSoftmax(div_op);
   }

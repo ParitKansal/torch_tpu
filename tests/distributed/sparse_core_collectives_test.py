@@ -23,13 +23,11 @@ with a collective over the world, whose devices follow the world rank order.
 from absl.testing import absltest
 import torch
 from torch import distributed as dist
-import torch.multiprocessing as mp
 from torch_tpu._internal.distributed import spmd_util
 from torch_tpu._internal.utils import test_utils as utils
 from torch_tpu._internal.distributed import multiprocessing
 from tests import oss_utils
-from tests import seed_test_utils
-from tests.distributed import distributed_utils
+from tests.distributed import continuous_test_utils
 
 _WORLD = 8
 
@@ -157,7 +155,6 @@ def _lookup(
 
 def run_sparse_dense_matmul_lookup() -> None:
   """A compiled lookup into a table sharded across all devices."""
-  dist.init_process_group(backend="tpu_dist")
   rank = dist.get_rank()
   assert dist.get_world_size() == _WORLD
 
@@ -170,7 +167,6 @@ def run_sparse_dense_matmul_lookup() -> None:
 
 def run_sparse_dense_matmul_with_world_all_reduce() -> None:
   """A lookup and a world all-reduce of its activations share one program."""
-  dist.init_process_group(backend="tpu_dist")
   rank = dist.get_rank()
   assert dist.get_world_size() == _WORLD
 
@@ -201,7 +197,6 @@ def run_sparse_dense_matmul_with_world_all_reduce() -> None:
 
 def run_sparse_gather_with_world_all_reduce() -> None:
   """A SparseCore gather and a world all-reduce share one program."""
-  dist.init_process_group(backend="tpu_dist")
   rank = dist.get_rank()
   assert dist.get_world_size() == _WORLD
 
@@ -240,12 +235,13 @@ def run_sparse_gather_with_world_all_reduce() -> None:
   utils.assert_close(out, expected)
 
 
-class SparseCoreCollectivesTest(seed_test_utils.MultiProcessRepeatableTest):
+class SparseCoreCollectivesTest(
+    continuous_test_utils.TpuMultiProcContinuousTest
+):
+  world_size = _WORLD
 
   def test_sparse_dense_matmul_lookup(self):
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD, fn=run_sparse_dense_matmul_lookup
-    )
+    run_sparse_dense_matmul_lookup()
 
   @oss_utils.skip_if_libtpu_version(
       lambda v: v < (0, 0, 50),
@@ -253,16 +249,11 @@ class SparseCoreCollectivesTest(seed_test_utils.MultiProcessRepeatableTest):
       " operands flattened by partitioning.",
   )
   def test_sparse_gather_with_world_all_reduce(self):
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD, fn=run_sparse_gather_with_world_all_reduce
-    )
+    run_sparse_gather_with_world_all_reduce()
 
   def test_sparse_dense_matmul_with_world_all_reduce(self):
-    distributed_utils.dist_run(
-        nproc_per_node=_WORLD, fn=run_sparse_dense_matmul_with_world_all_reduce
-    )
+    run_sparse_dense_matmul_with_world_all_reduce()
 
 
 if __name__ == "__main__":
-  mp.set_start_method("spawn")
   multiprocessing.handle_test_main(absltest.main)

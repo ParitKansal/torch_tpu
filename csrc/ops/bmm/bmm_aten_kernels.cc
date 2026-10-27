@@ -124,7 +124,8 @@ absl::StatusOr<DeviceBufferRef> Bmm(const at::Tensor& self,
                                     OpParamCacheKeys param_keys) {
   return DispatchBmm<absl::StatusOr<DeviceBufferRef>>(
       self, mat2, out_dtype, std::move(param_keys),
-      [&](auto op_builder, auto config) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, auto config) {
         return DispatchOp<2>(std::move(op_builder), {self, mat2},
                              std::move(config));
       });
@@ -136,7 +137,8 @@ absl::Status BmmOut(const at::Tensor& self, const at::Tensor& mat2,
   TT_RETURN_IF_ERROR(ValidateBmmInputs(self, mat2));
   TT_RETURN_IF_ERROR(ValidateBmmOut(out, out_dtype));
   return DispatchBmm<absl::Status>(self, mat2, out_dtype, std::move(param_keys),
-                                   [&](auto op_builder, auto config) {
+                                   [&]  // REF_CAPTURE_OK=called synchronously
+                                   (auto op_builder, auto config) {
                                      return DispatchOpOut<2>(
                                          std::move(op_builder), {self, mat2},
                                          out, std::move(config));

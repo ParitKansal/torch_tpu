@@ -1433,6 +1433,47 @@ register_extension_info(
     label_regex_for_dep = "{extension_name}",
 )
 
+_RUN_DOC_COMMANDS = "//ci/tools:run_doc_commands.py"
+
+def torch_tpu_oss_doc_test(name, doc, deps, data = None, size = "medium", **kwargs):
+    """Creates an OSS-only test that a documented direct run of an example works.
+
+    Runs the command block marked with `<!-- doc-test: <name> -->` in `doc`
+    from the example's directory, outside of Bazel's import path for
+    examples/; see oss/ci/tools/run_doc_commands.py. Only meaningful in OSS,
+    where the examples aren't part of the torch_tpu package.
+
+    Args:
+        name: The name of the test, which is also the ID of the command block
+            in `doc`.
+        doc: The markdown file with the marked command block.
+        deps: The Python dependencies of the scripts that the commands run,
+            including //src/torch_tpu.
+        data: Additional data files. All .py files in the package are included.
+        size: The size of the test.
+        **kwargs: Additional arguments passed to torch_tpu_py_test.
+
+    Returns:
+        The test target in OSS, None internally.
+    """
+    return oss_target(
+        torch_tpu_py_test,
+        name = name,
+        srcs = [_RUN_DOC_COMMANDS],
+        main = _RUN_DOC_COMMANDS,
+        args = ["$(rootpath %s)" % doc, name],
+        data = [doc] + native.glob(["**/*.py"]) + (data or []),
+        shuffle_tests = False,
+        size = size,
+        deps = deps,
+        **kwargs
+    )
+
+register_extension_info(
+    extension = torch_tpu_oss_doc_test,
+    label_regex_for_dep = "{extension_name}",
+)
+
 def _get_subpackage_targets_named(name):
     """Gets targets with the given name from all direct subpackages.
 

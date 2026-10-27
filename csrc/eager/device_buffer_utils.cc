@@ -34,7 +34,6 @@
 #include "absl/types/span.h"
 #include "c10/util/accumulate.h"
 #include "csrc/common/cache_key.h"
-#include "csrc/common/context_states.h"
 #include "csrc/common/dimension_types.h"
 #include "csrc/common/dtype.h"
 #include "csrc/common/env_vars.h"
@@ -159,17 +158,20 @@ absl::Status DeferNeverDispatch(absl::Span<const DeviceBufferRef> results,
 
   // materialize.cc and events_queue.h will respect OpSplitMode, even with
   // GraphSplitMode::kFullGraph.
-  // In DeferNever, we don't block on materialization, we initiate and continue.
-  // In DeferNeverAndLaunchBlocking, we first block until the materialization is
-  // started, and then block on its completion.
-  const MaterializationBlockMode block_mode =
-      block ? MaterializationBlockMode::kBlockUntilStarted
-            : MaterializationBlockMode::kNonBlocking;
-  TT_RETURN_IF_ERROR(Materialize(device_buffer_list,
-                                 MaterializationReason::kDebugMode,
-                                 GraphSplitMode::kFullGraph, block_mode));
+  const MaterializationReason reason = MaterializationReason::kDebugMode;
+  const GraphSplitMode graph_split_mode = GraphSplitMode::kFullGraph;
+  absl::Span<const SharedDeviceBufferList> must_materialize(&device_buffer_list,
+                                                            1);
   if (block) {
-    return device_buffer_list->Synchronize();
+    // In DeferNeverAndLaunchBlocking, we do a full stream sync after every op.
+    auto snapshot_future =
+        MaterializeCurrentStream(reason, graph_split_mode, must_materialize);
+    TT_ASSIGN_OR_RETURN(auto snapshot, snapshot_future.Await());
+    TT_RETURN_IF_ERROR(snapshot->Synchronize());
+    TT_RETURN_IF_ERROR(SyncAndReturnStickyError());
+  } else {
+    // In DeferNever, we don't block at all, we initiate and continue.
+    EagerlyExecuteCurrentStream(reason, graph_split_mode, must_materialize);
   }
   return absl::OkStatus();
 }
@@ -207,8 +209,9 @@ absl::Status DeferAndFuseDispatch(absl::Span<const DeviceBufferRef> results,
         allow_materialization) {
       // Start a background materialization of the current stream; don't
       // wait for it to complete.
-      MaterializeCurrentStream(MaterializationReason::kRepeatedOpDetection,
-                               GetRepeatedOpsGraphSplitMode());
+      (void)EagerlyExecuteCurrentStream(
+          MaterializationReason::kRepeatedOpDetection,
+          GetRepeatedOpsGraphSplitMode());
     }
   } else {
     RecordDeferredOpCreated(device_buffer_list);

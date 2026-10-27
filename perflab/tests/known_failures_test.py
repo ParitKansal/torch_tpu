@@ -127,37 +127,5 @@ class GetKnownFailureReasonTest(seed_test_utils.RepeatableTest):
     )
 
 
-class Synthetic4096KnownFailuresTest(seed_test_utils.RepeatableTest):
-
-  def test_tpu_and_cuda_skipped_modes(self):
-    expected_tpu_modes = {
-        common.RunMode.EAGER_DEFAULT,
-        common.RunMode.EAGER_OPTIMIZED,
-        common.RunMode.COMPILED,
-    }
-    for run_mode in common.RunMode:
-      with self.subTest(run_mode=run_mode):
-        tpu_reason = known_failures.get_known_failure_reason(
-            "synthetic_4096_params_training",
-            framework=mode_lib.Framework.TORCH,
-            device_kind=target_lib.DeviceKind.TPU,
-            run_mode=run_mode,
-        )
-        self.assertEqual(
-            tpu_reason is not None,
-            run_mode in expected_tpu_modes,
-        )
-        cuda_reason = known_failures.get_known_failure_reason(
-            "synthetic_4096_params_training",
-            framework=mode_lib.Framework.TORCH,
-            device_kind=target_lib.DeviceKind.CUDA,
-            run_mode=run_mode,
-        )
-        self.assertEqual(
-            cuda_reason is not None,
-            run_mode == common.RunMode.COMPILED,
-        )
-
-
 if __name__ == "__main__":
   absltest.main()

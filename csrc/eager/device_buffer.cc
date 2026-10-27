@@ -73,6 +73,10 @@ DeviceBufferList::Data::Data(bool placeholder)
     auto [promise, future] = xla::MakePromise<void>();
     materialization_promise_ = std::move(promise);
     materialization_future_ = std::move(future);
+  } else {
+    materialization_future_ =
+        xla::Future<>(TT_ERROR(error::kFailedPrecondition)
+                      << "placeholders cannot be materialized");
   }
 }
 
@@ -153,7 +157,8 @@ absl::Status DeviceBufferList::Data::SetMaterializationStarted(
   TT_RETURN_IF_ERROR(SetAsPendingMaterialization());
 
   const bool already_started = materialization_started_.exchange(true);
-  TT_RET_CHECK(!already_started, error::kFailedPrecondition)
+  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=unreachable from Python
+      !already_started, error::kFailedPrecondition)
       << "attempted to set materialized buffers after materialization was "
          "already started";
 
@@ -751,13 +756,18 @@ xla::Future<void> DeviceBufferRef::GetReadyFuture() const {
     }
     auto ready_future = buffer_or.value()->GetReadyFuture();
     if (ready_future.IsKnownReady()) {
+      absl::Status status = ready_future.Await();
+      if (!status.ok()) {
+        return AdaptXlaError(status, "buffer failed to execute");
+      }
       return ready_future;
     }
     auto [promise, future] = xla::MakePromise<void>();
-    ready_future.OnReady(
-        [promise = std::move(promise),
-         device_buffer_list = device_buffer_list_](
-            absl::Status status) mutable { promise.Set(status); });
+    ready_future.OnReady([promise = std::move(promise),
+                          device_buffer_list = device_buffer_list_](
+                             const absl::Status& status) mutable {
+      promise.Set(AdaptXlaError(status, "buffer failed to execute"));
+    });
     return future;
   }
 
@@ -781,8 +791,8 @@ xla::Future<void> DeviceBufferRef::GetReadyFuture() const {
     auto ready_future = buffer_or.value()->GetReadyFuture();
     ready_future.OnReady([promise = std::move(promise),
                           device_buffer_list = std::move(device_buffer_list)](
-                             absl::Status status) mutable {
-      promise.Set(std::move(status));
+                             const absl::Status& status) mutable {
+      promise.Set(AdaptXlaError(status, "buffer failed to execute"));
       device_buffer_list.reset();
     });
   });

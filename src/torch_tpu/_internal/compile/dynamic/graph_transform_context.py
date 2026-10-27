@@ -19,9 +19,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+import sympy
 import torch
 from torch_tpu._internal.compile.dynamic import sym_utils
-from torch_tpu._internal.compile.dynamic.symbol_bounds import SymbolBounds
+from torch_tpu._internal.compile.dynamic import symbol_bounds
+
+SymbolBounds = symbol_bounds.SymbolBounds
 
 
 class GraphTransformContext:
@@ -83,6 +86,16 @@ class GraphTransformContext:
   def get_upper_bound(self, val: Any) -> int:
     """Gets the upper bound for an int, SymInt, or SymInt FX node."""
     return self._symbol_bounds.get_upper_bound(val)
+
+  def get_user_upper_bound(self, val: Any) -> int | sympy.Expr:
+    """Gets the user-provided/ShapeEnv upper bound for an int, SymInt, or SymInt FX node."""
+    if sym_utils.is_symint(val):
+      symint = val.meta["val"] if sym_utils.is_symint_node(val) else val
+      _, upper = symbol_bounds.get_symint_bounds(symint)
+      return upper
+    if isinstance(val, int):
+      return val
+    raise ValueError(f"Unexpected type for upper bound extraction: {type(val)}")
 
   def _get_or_create_tensor_node(
       self,

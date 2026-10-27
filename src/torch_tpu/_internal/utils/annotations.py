@@ -170,7 +170,7 @@ def _safe_setattr(target: Any, name: str, value: Any) -> None:
     value: The attribute value to assign.
   """
   try:
-    setattr(target, name, value)  # pylint: disable=protected-access
+    setattr(target, name, value)
   except (AttributeError, TypeError):
     pass
 
@@ -370,7 +370,7 @@ def _annotate_target(
     if stage.warning_category is not None:
       target.__init__ = _create_warning_wrapper(
           target.__init__, target, stage, reason, version, strict
-      )  # pylint: disable=protected-access
+      )
     _wrap_class_getattribute_for_stages(target)
     return target
 

@@ -120,15 +120,17 @@ enum class DirListing { kListed, kMissing, kUnlistable };
 // directory exists but cannot be listed.
 [[nodiscard]] bool HasVfioNodes(std::string_view vfio_dir) {
   bool has_vfio_node = false;
-  if (ForEachDirEntry(vfio_dir,
-                      [&](std::string_view name) {
-                        has_vfio_node |= IsVfioGroupNodeName(name);
-                      }) == DirListing::kUnlistable ||
+  if (ForEachDirEntry(
+          vfio_dir,
+          [&](std::string_view name) {  // REF_CAPTURE_OK=called synchronously
+            has_vfio_node |= IsVfioGroupNodeName(name);
+          }) == DirListing::kUnlistable ||
       has_vfio_node) {
     return true;
   }
   return ForEachDirEntry(absl::StrCat(vfio_dir, "/devices"),
-                         [&](std::string_view name) {
+                         [&]  // REF_CAPTURE_OK=called synchronously
+                         (std::string_view name) {
                            has_vfio_node |= IsRealEntryName(name);
                          }) == DirListing::kUnlistable ||
          has_vfio_node;
@@ -141,16 +143,17 @@ enum class DirListing { kListed, kMissing, kUnlistable };
     std::string_view dir,
     absl::FunctionRef<bool(std::string_view)> is_candidate,
     std::vector<int>& majors) {
-  return ForEachDirEntry(dir, [&](std::string_view name) {
-    if (!is_candidate(name)) {
-      return;
-    }
-    struct stat st;
-    if (stat(absl::StrCat(dir, "/", name).c_str(), &st) == 0 &&
-        S_ISCHR(st.st_mode)) {
-      majors.push_back(static_cast<int>(major(st.st_rdev)));
-    }
-  });
+  return ForEachDirEntry(
+      dir, [&](std::string_view name) {  // REF_CAPTURE_OK=called synchronously
+        if (!is_candidate(name)) {
+          return;
+        }
+        struct stat st;
+        if (stat(absl::StrCat(dir, "/", name).c_str(), &st) == 0 &&
+            S_ISCHR(st.st_mode)) {
+          majors.push_back(static_cast<int>(major(st.st_rdev)));
+        }
+      });
 }
 
 }  // namespace
@@ -183,9 +186,11 @@ bool HasTpuDeviceNodes(std::string_view dev_dir, std::string_view dev_borg_dir,
   if (!registered_majors.has_value()) {
     return true;
   }
-  return absl::c_any_of(accel_majors, [&](const int accel_major) {
-    return absl::c_linear_search(*registered_majors, accel_major);
-  });
+  return absl::c_any_of(
+      accel_majors,
+      [&](const int accel_major) {  // REF_CAPTURE_OK=called synchronously
+        return absl::c_linear_search(*registered_majors, accel_major);
+      });
 }
 
 }  // namespace torch_tpu

@@ -484,7 +484,7 @@ class AnnotationsTest(seed_test_utils.RepeatableTest):
 
       # Internal access via _get_generator must not emit a warning or cache
       # default_generators onto TpuDeviceModule.__dict__.
-      gen = _device_module.TpuDeviceModule._get_generator(  # pylint: disable=protected-access
+      gen = _device_module.TpuDeviceModule._get_generator(
           torch.device("tpu", 0)
       )
       self.assertEqual(gen, "mock_generator")
@@ -1117,7 +1117,7 @@ class AnnotationsTest(seed_test_utils.RepeatableTest):
     # `fullgraph=True` raises on any graph break in the wrapper. The caller
     # isn't checked while compiling, so the user caller doesn't raise either.
     for fn in (framework_fn, lambda x: sample_func(x) + 1):
-      torch._dynamo.reset()  # pylint: disable=protected-access
+      torch._dynamo.reset()
       compiled = torch.compile(fn, backend="eager", fullgraph=True)
       self.assertEqual(compiled(torch.ones(3)).tolist(), [3.0, 3.0, 3.0])
 

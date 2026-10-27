@@ -337,6 +337,13 @@ class HandleSliceLikeOpsPass:
 
     inp_dim_ub = ub_shape[dim]
     start_ub = max(0, self._transform_context.get_upper_bound(start))
+    # `get_upper_bound` uses the aligned bucket capacity, which can exceed the
+    # user-provided range in ShapeEnv and cause unnecessary padding. Clamp
+    # `start_ub` back to the user-provided range when finite (`int_oo` when
+    # unbounded).
+    user_start_ub = self._transform_context.get_user_upper_bound(start)
+    if isinstance(user_start_ub, int):
+      start_ub = min(start_ub, max(0, user_start_ub))
     extra = start_ub + slice_extent - inp_dim_ub
     if slice_extent == 0 or extra <= 0:
       return curr

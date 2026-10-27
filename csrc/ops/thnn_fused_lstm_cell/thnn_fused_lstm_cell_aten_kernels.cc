@@ -346,11 +346,13 @@ absl::Status ThnnFusedLstmCellOutImpl(
   return DispatchThnnFusedLstmCellCommon<absl::Status>(
       input_gates, hidden_gates, cx, input_bias, hidden_bias,
       std::move(param_keys),
-      [&](auto op_builder, auto inputs, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, auto inputs, auto options) {
         return DispatchOpOut<5, 3>(std::move(op_builder), inputs,
                                    {out0, out1, out2}, std::move(options));
       },
-      [&](auto op_builder, auto inputs, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, auto inputs, auto options) {
         return DispatchOpOut<3, 3>(std::move(op_builder), inputs,
                                    {out0, out1, out2}, std::move(options));
       });

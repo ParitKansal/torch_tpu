@@ -297,7 +297,8 @@ absl::StatusOr<DeviceBufferRef> ResolveAndRunBaddbmm(
   return ResolveAndDispatchBaddbmm<absl::StatusOr<DeviceBufferRef>>(
       self, batch1, batch2, std::move(beta), std::move(alpha), out_dtype,
       param_keys, op_name_override,
-      [&](auto op_builder, auto inputs, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, auto inputs, auto options) {
         return DispatchOp<kDynamicSize>(std::move(op_builder), inputs,
                                         std::move(options));
       });
@@ -311,7 +312,8 @@ absl::Status ResolveAndRunBaddbmmOut(
   return ResolveAndDispatchBaddbmm<absl::Status>(
       self, batch1, batch2, std::move(beta), std::move(alpha), out_dtype,
       param_keys, op_name_override,
-      [&](auto op_builder, auto inputs, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, auto inputs, auto options) {
         return DispatchOpOut<kDynamicSize>(std::move(op_builder), inputs, out,
                                            std::move(options));
       });

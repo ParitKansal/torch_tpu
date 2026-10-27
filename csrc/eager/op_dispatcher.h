@@ -33,7 +33,6 @@
 #include "absl/types/span.h"
 #include "c10/util/Optional.h"
 #include "csrc/common/cache_key.h"
-#include "csrc/common/context_states.h"
 #include "csrc/common/dimension_types.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/fixed_size_span.h"
@@ -491,11 +490,15 @@ absl::Status DispatchOpOut(NAryMlirOpBuilder<kArity, kNumOutputs> op_builder,
         outputs_span, absl::MakeSpan(result_bufs), output_donated));
   }
   if (autodonated) {
-    auto snapshot_future = MaterializeCurrentStream(
-        MaterializationReason::kDebugMode, GraphSplitMode::kFullGraph);
     if (GetEagerMode() == EagerMode::kDeferNeverAndLaunchBlocking) {
+      auto snapshot_future = MaterializeCurrentStream(
+          MaterializationReason::kDebugMode, GraphSplitMode::kFullGraph);
       TT_ASSIGN_OR_RETURN(auto snapshot, snapshot_future.Await());
       TT_RETURN_IF_ERROR(snapshot->Synchronize());
+      TT_RETURN_IF_ERROR(SyncAndReturnStickyError());
+    } else {
+      EagerlyExecuteCurrentStream(MaterializationReason::kDebugMode,
+                                  GraphSplitMode::kFullGraph);
     }
   }
   return absl::OkStatus();

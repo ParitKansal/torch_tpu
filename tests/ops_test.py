@@ -935,14 +935,14 @@ ACCURACY_OVERRIDES_GRAD_VS_GPU: dict[
             torch.float32: {"rtol": 6.5e-6, "atol": 5e-5},
         },
         "clamp": {
-            torch.bfloat16: {"atol": 0.6},
-            torch.float16: {"atol": 0.6},
+            torch.bfloat16: {"atol": 6e-1},
+            torch.float16: {"atol": 6e-1},
         },
         "clamp_max": {
-            torch.bfloat16: {"atol": 0.6},
+            torch.bfloat16: {"atol": 6e-1},
         },
         "clamp_min": {
-            torch.bfloat16: {"atol": 0.6},
+            torch.bfloat16: {"atol": 6e-1},
         },
         "cumprod": {
             torch.bfloat16: {"rtol": 1.7e-1, "atol": 1.2e-2},
@@ -960,10 +960,10 @@ ACCURACY_OVERRIDES_GRAD_VS_GPU: dict[
             torch.float32: {"rtol": 5e-5, "atol": 3.1e-3},
         },
         "fmax": {
-            torch.bfloat16: {"atol": 0.6},
+            torch.bfloat16: {"atol": 6e-1},
         },
         "fmin": {
-            torch.bfloat16: {"atol": 0.6},
+            torch.bfloat16: {"atol": 6e-1},
         },
         "kron": {
             torch.float16: {"rtol": 2.8e-3, "atol": 6.3e-2},
@@ -3309,6 +3309,25 @@ class TestOps(op_testing.OpInfoTestBase):
         max_samples_per_op_dtype=5,
     )
 
+  # CUDA's _f8_f8_bf16_rowwise_grouped_mm CUTLASS kernel is Hopper SM90-only.
+  @op_testing.record_gpu_goldens_on(op_testing.GPU_SM90)
+  def test_scaled_grouped_mm_v2(self):
+    self.do_test_op(
+        "torch._scaled_grouped_mm_v2",
+        exclude_dtypes=(
+            *UNQUANTIZED_NUMERIC_DTYPES,
+            # TODO(amainz): Enable float8_e4m3fn once Hopper GPU goldens are
+            # recorded and cl/995189060 lands rowwise scale lowering on TPU.
+            torch.float8_e4m3fn,
+            torch.float8_e5m2,
+            *quantize_utils.ROCM_ONLY_FLOAT8_DTYPES,
+        ),
+        check_out_variant=False,
+        check_grad=False,
+        check_dynamism=False,
+        max_samples_per_op_dtype=5,
+    )
+
   def test_scaled_mm_v2(self):
     self.do_test_op(
         "torch._scaled_mm_v2",
@@ -3677,7 +3696,10 @@ class TestOps(op_testing.OpInfoTestBase):
             not op_testing._CHECK_DYNAMISM_USING_SEED.value
             and (
                 op_testing.is_compiled_mode()
-                or not op_input.kwargs.get("sorted", True)
+                or (
+                    not op_input.kwargs.get("sorted", True)
+                    and op_input.kwargs.get("dim") is None
+                )
                 or (
                     op_input.input_value.ndim == 0
                     and op_input.kwargs.get("return_inverse", False)
@@ -3686,7 +3708,7 @@ class TestOps(op_testing.OpInfoTestBase):
         ),
         # Override _OSS_SAMPLE_LIMIT (5) since the first 13 golden samples have
         # sorted=False and are filtered out by skip_if.
-        max_samples_per_op_dtype=16,
+        max_samples_per_op_dtype=20,
     )
 
   def test_unique_consecutive(self):

@@ -28,6 +28,7 @@
 #include "absl/status/status.h"
 #include "csrc/common/dimension_types.h"
 #include "csrc/common/error_utils.h"
+#include "csrc/eager/eager_mode.h"
 #include "csrc/ops/as_strided/as_strided_aten_kernels.h"
 
 namespace torch_tpu {
@@ -115,6 +116,18 @@ absl::Status BroadcastAndTranspose(at::Tensor& src, at::Tensor& dest) {
   TT_RETURN_IF_ERROR(BroadcastToDest(src, dest));
   TT_RETURN_IF_ERROR(TransposeToRowMajorDest(src, dest));
   return absl::OkStatus();
+}
+
+TransferSyncMode GetTransferSyncMode(bool non_blocking) {
+  const EagerMode eager_mode = GetEagerMode();
+  if (eager_mode == EagerMode::kInternalCompileFxGraph) {
+    return TransferSyncMode::kIsolated;
+  }
+  if (eager_mode == EagerMode::kDeferNeverAndLaunchBlocking) {
+    return TransferSyncMode::kEagerBlocking;
+  }
+  return non_blocking ? TransferSyncMode::kEagerNonBlocking
+                      : TransferSyncMode::kEagerBlocking;
 }
 
 }  // namespace torch_tpu

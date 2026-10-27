@@ -85,10 +85,11 @@ absl_nullable std::unique_ptr<at::ObserverContext> OnFunctionEnter(
   if (!tsl::profiler::TraceMe::Active() || !IsProfilerEnabled()) {
     return nullptr;
   }
-  return std::make_unique<XProfObserverContext>(tsl::profiler::TraceMe([&] {
-    return tsl::profiler::TraceMeEncode(
-        fn.name(), {{"pt_correlation_id", std::to_string(fn.handle())}});
-  }));
+  return std::make_unique<XProfObserverContext>(
+      tsl::profiler::TraceMe([&] {  // REF_CAPTURE_OK=called synchronously
+        return tsl::profiler::TraceMeEncode(
+            fn.name(), {{"pt_correlation_id", std::to_string(fn.handle())}});
+      }));
 }
 
 // The callback function that is called when a RecordFunction is popped.

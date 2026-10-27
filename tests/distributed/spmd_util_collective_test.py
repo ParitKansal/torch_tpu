@@ -80,6 +80,7 @@ def run_uncoordinated_op_stream_test():
   """Repro test for interaction of SPMD safe and repeated ops heuristic."""
   rank = dist.get_rank()
   x = torch.ones((2, 2), device="cpu").to("tpu")
+  torch.accelerator.synchronize()
 
   with execution_mode.set_eager_mode(EagerMode.DEFER_AND_FUSE):
     for i in range(10):
@@ -162,6 +163,15 @@ class SpmdSafeDecoratorTest(continuous_test_utils.TpuMultiProcContinuousTest):
 
   @classmethod
   def _run_test_given_id(cls, test_id: str, **kwargs: Any) -> None:
+    if dist.is_initialized():
+      # Warm up `dist.barrier()` so its 1-element int64 all_reduce is cached in
+      # the C++ compilation cache before clearing `_DUMP_DIR`. Otherwise, when
+      # non-zero ranks finish a test and enter `finally: dist.barrier()` while
+      # rank 0 is still inspecting `_DUMP_DIR`, `dist.barrier()` compiles and
+      # dumps an extra `all_reduce` MLIR module on those ranks.
+      torch.accelerator.synchronize()
+      dist.barrier()
+      torch.accelerator.synchronize()
     # Clear compiler MLIR dumps from previous tests on this worker rank.
     shutil.rmtree(f"{_DUMP_DIR}/rank_{cls.rank}", ignore_errors=True)
     # Flush Dynamo cache so subsequent tests trigger fresh compilation passes.

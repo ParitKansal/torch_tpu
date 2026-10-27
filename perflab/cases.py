@@ -31,55 +31,23 @@ from perflab import flags as flags_lib
 from perflab import known_failures
 from perflab import mode as mode_lib
 from perflab import registry as registry_lib
-from perflab import step_lib
 from perflab import target as target_lib
 
 CaseParams = tuple[registry_lib.BenchmarkSpec, common.RunMode]
 
 _MAX_ABSLTEST_SEED = 4294967295
 
-_HEAVY_MODEL_PREFIXES = (
-    "audio_flamingo",
-    "bge_multilingual_gemma2",
-    "colpali",
-    "colqwen2",
-    "deepseek",
-    "dinov2_giant",
-    "dse_qwen2",
-    "e5_omni",
-    "flux",
-    "gemma",
-    "glm",
-    "gpt_oss",
-    "granite_speech",
-    "higgs_tts",
-    "hunyuan",
-    "if_i_xl",
-    "janus",
-    "llama",
-    "llava",
-    "metaclip",
-    "mistral",
-    "mixtral",
-    "muse",
-    "music_flamingo",
-    "nemotron",
-    "qwen",
-    "sam2",
-    "stable_diffusion",
-    "swin_large",
-    "vibevoice",
-    "vit_giant",
-    "vjepa2",
-    "wan",
-    "whisper",
-)
-
 
 def _case_order_key(name: str, seed: str) -> str:
   """Returns a deterministic hash key for ordering benchmark cases."""
   payload = f"{seed}:{name}" if seed else name
   return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _stable_shard_hash(name: str) -> int:
+  """Returns a hash of `name` that never changes across commits or processes."""
+  digest = hashlib.sha256(name.encode("utf-8")).digest()
+  return int.from_bytes(digest[:8], "big")
 
 
 def _get_order_seed(env: Mapping[str, str] | None = None) -> str:
@@ -165,68 +133,8 @@ def normalize_randomize_ordering_seed(
   return normalized
 
 
-def estimate_case_cost(
-    spec: registry_lib.BenchmarkSpec,
-    mode: common.RunMode,
-    *,
-    framework: mode_lib.Framework,
-    device_kind: target_lib.DeviceKind,
-    skip_behavior: str | None = None,
-) -> float:
-  """Estimates relative execution weight for LPT shard load balancing.
-
-  Cases that are statically skipped in the parent process receive zero weight so
-  they do not displace active benchmarks during shard assignment.
-
-  Args:
-    spec: Benchmark specification.
-    mode: Execution mode (e.g. compiled or eager).
-    framework: Execution framework (e.g. TORCH or TORCHAX).
-    device_kind: Target device kind.
-    skip_behavior: Skip behavior mode ('skip', 'run_skipped', 'ignore', or
-      'assert_raise'). Defaults to `--skip_behavior` when parsed, else 'skip'.
-
-  Returns:
-    Estimated non-negative relative cost weight.
-  """
-  if (
-      framework == mode_lib.Framework.TORCHAX
-      and spec.stepper == step_lib.StepperType.DECODER_ONLY_DECODE
-  ):
-    return 0.0
-
-  if skip_behavior is None:
-    skip_behavior = (
-        flags_lib.SKIP_BEHAVIOR.value if flags.FLAGS.is_parsed() else "skip"
-    )
-
-  skip_reason = get_skip_reason(
-      spec, mode, framework=framework, device_kind=device_kind
-  )
-  if skip_behavior == "skip" and skip_reason is not None:
-    return 0.0
-  if skip_behavior == "run_skipped" and skip_reason is None:
-    return 0.0
-
-  cost = 3.0 if mode == common.RunMode.COMPILED else 1.0
-  if spec.stepper == step_lib.StepperType.DECODER_ONLY_DECODE:
-    cost *= 2.0
-  elif spec.stepper in (
-      step_lib.StepperType.TRAINING,
-      step_lib.StepperType.SINGLE_TRACE_TRAINING,
-  ):
-    cost *= 1.5
-  if spec.name.startswith(_HEAVY_MODEL_PREFIXES):
-    cost *= 2.0
-  return cost
-
-
 class BenchmarkTestLoader(absltest.TestLoader):
-  """TestLoader with deterministic hash ordering and LPT cost-balanced sharding."""
-
-  _last_test_case_class: (
-      type[unittest.TestCase] | None  # UNITTEST_OK=type annotation
-  ) = None
+  """TestLoader with deterministic hash ordering and stable name-hash sharding."""
 
   def __init__(self, *args: Any, **kwargs: Any):
     self._seed_initialized: bool = False
@@ -235,7 +143,6 @@ class BenchmarkTestLoader(absltest.TestLoader):
     normalize_randomize_ordering_seed()
     super().__init__(*args, **kwargs)
     self._ensure_randomize_ordering_seed()
-    self._last_test_case_class = None
 
   def _ensure_randomize_ordering_seed(self) -> None:
     """Lazily resolves and normalizes randomize ordering seed after flag parsing."""
@@ -278,7 +185,6 @@ class BenchmarkTestLoader(absltest.TestLoader):
   ) -> list[str]:
     """Returns test case names ordered by `case_params` before optional shuffle."""
     self._ensure_randomize_ordering_seed()
-    self._last_test_case_class = testCaseClass
     names = list(super().getTestCaseNames(testCaseClass))
     class_case_params: Mapping[str, CaseParams] = getattr(
         testCaseClass, "case_params", {}
@@ -297,104 +203,53 @@ class BenchmarkTestLoader(absltest.TestLoader):
         names.sort(key=lambda name: 1 if name in class_case_params else 0)
     return names
 
-  def _estimate_method_cost(
-      self,
-      method_name: str,
-      class_case_params: Mapping[str, CaseParams],
-      framework: mode_lib.Framework | None,
-      device_kind: target_lib.DeviceKind | None,
-      skip_behavior: str,
-  ) -> float:
-    params = class_case_params.get(method_name)
-    if params is None or framework is None or device_kind is None:
-      return 0.1
-    spec, mode = params
-    return estimate_case_cost(
-        spec,
-        mode,
-        framework=framework,
-        device_kind=device_kind,
-        skip_behavior=skip_behavior,
-    )
-
   def shardTestCaseNames(  # pylint: disable=invalid-name
       self,
       iterator: Iterator[int],
       ordered_names: Sequence[str],
       shard_index: int,
   ) -> Sequence[str]:
-    """Partitions `ordered_names` across shards using LPT greedy load balancing."""
+    """Partitions `ordered_names` across shards by a stable hash of each name.
+
+    Auto-bisect reruns a single shard (e.g.
+    `torch_benchmarks_shard_05_of_16_tpu-v7`) at each candidate commit, so a
+    case must stay in the same shard across commits. A case's shard therefore
+    depends only on its own name and the shard count, not on the ordering seed
+    (the commit SHA in CI), estimated costs, known failures, the order of the
+    names, or which other cases exist.
+
+    Args:
+      iterator: absltest's cyclic iterator over the shard indices.
+      ordered_names: Test case names, in the order they should run.
+      shard_index: The index of the current shard.
+
+    Returns:
+      The names in `ordered_names` assigned to `shard_index`, in order.
+    """
     if not ordered_names:
       return []
 
-    buckets: list[int] = []
+    # TODO: b/578163611 - Balance shards by runtime without breaking bisect
+    # stability, either with a checked-in shard map (falling back to the name
+    # hash) or, once MLCompass can bisect a single test, by rebalancing on
+    # every run. cl/998158472 has the previous cost-balanced loader.
+
+    # absltest shares one `itertools.cycle(range(total_shards))` across all
+    # test classes, so it may be mid-cycle; read one full cycle and sort it.
     seen_buckets: set[int] = set()
-    for _ in range(len(ordered_names)):
-      bucket = next(iterator)
+    for bucket in iterator:
       if bucket in seen_buckets:
         break
       seen_buckets.add(bucket)
-      buckets.append(bucket)
-
-    if not buckets or shard_index not in seen_buckets:
+    if shard_index not in seen_buckets:
       return []
+    buckets = sorted(seen_buckets)
 
-    test_cls = self._last_test_case_class
-    class_case_params: Mapping[str, CaseParams] = (
-        getattr(test_cls, "case_params", {}) if test_cls is not None else {}
-    )
-    framework: mode_lib.Framework | None = (
-        getattr(test_cls, "framework", None) if test_cls is not None else None
-    )
-    platform: target_lib.Platform | None = (
-        getattr(test_cls, "platform", None) if test_cls is not None else None
-    )
-    device_kind = (
-        target_lib.make_target(platform).device_kind
-        if platform is not None
-        else None
-    )
-    order_seed = _get_order_seed()
-    skip_behavior = (
-        flags_lib.SKIP_BEHAVIOR.value if flags.FLAGS.is_parsed() else "skip"
-    )
-
-    costs = {
-        name: self._estimate_method_cost(
-            name, class_case_params, framework, device_kind, skip_behavior
-        )
+    return [
+        name
         for name in ordered_names
-    }
-    lpt_ordered = sorted(
-        ordered_names,
-        key=lambda name: (
-            -costs[name],
-            _case_order_key(name, order_seed),
-            name,
-        ),
-    )
-
-    shard_load = {b: 0.0 for b in buckets}
-    shard_count = {b: 0 for b in buckets}
-    assigned_to_shard: set[str] = set()
-    for testcase in lpt_ordered:
-      cost = costs[testcase]
-      if cost > 0.0:
-        target_bucket = min(
-            buckets,
-            key=lambda b: (shard_load[b], shard_count[b], b),
-        )
-      else:
-        target_bucket = min(
-            buckets,
-            key=lambda b: (shard_count[b], shard_load[b], b),
-        )
-      shard_load[target_bucket] += cost
-      shard_count[target_bucket] += 1
-      if target_bucket == shard_index:
-        assigned_to_shard.add(testcase)
-
-    return [x for x in ordered_names if x in assigned_to_shard]
+        if buckets[_stable_shard_hash(name) % len(buckets)] == shard_index
+    ]
 
 
 def get_cases(

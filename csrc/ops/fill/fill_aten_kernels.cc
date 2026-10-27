@@ -57,10 +57,8 @@ absl::Status FillTensorHelper(at::Tensor& self, const at::Tensor& fill_value,
       << "expected value to be a 0-D tensor, got " << fill_value_dims_size
       << "-D";
 
-  auto target_sizes = self.sizes();
-
   auto op_builder =
-      [sizes = CopyIntVector(target_sizes), out_mlir_element_type](
+      [sizes = CopyIntVector(self.sizes()), out_mlir_element_type](
           mlir::MlirOp fill_value_op) -> absl::StatusOr<mlir::MlirOp> {
     TT_ASSIGN_OR_RETURN(auto result_op,
                         CastIfNeeded(fill_value_op, out_mlir_element_type));
@@ -73,7 +71,7 @@ absl::Status FillTensorHelper(at::Tensor& self, const at::Tensor& fill_value,
       DispatchOp<1>(std::move(op_builder),
                     /*inputs=*/{fill_value},
                     {.out_dtype = out_mlir_element_type,
-                     .out_dims = target_sizes,
+                     .out_dims = self.sizes(),
                      .op_param_cache_keys = std::move(param_keys)}));
   return AssignBufferToAtTensor(std::move(result_buf), self);
 }

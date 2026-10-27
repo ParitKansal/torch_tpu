@@ -77,3 +77,71 @@ def clip_base_forward(ctx: context_lib.Context):
       ctx, "openai/clip-vit-base-patch16", batch_size=batch_size, seq_len=77
   )
   return model, (), inputs
+
+
+@registry_lib.register_benchmark(
+    stepper=step_lib.StepperType.FORWARD,
+    presubmit=registry_lib.PresubmitPolicy.RUN,
+)
+def vit_base_forward(ctx: context_lib.Context):
+  """Benchmark factory for ViT-B/16 (google/vit-base-patch16-224) forward."""
+  batch_size = 1 if ctx.run_scope == context_lib.RunScope.PRESUBMIT else 32
+  model, inputs = _load_hf_vision_model(
+      ctx, "google/vit-base-patch16-224", batch_size=batch_size
+  )
+  return model, (), inputs
+
+
+@registry_lib.register_benchmark(
+    stepper=step_lib.StepperType.FORWARD,
+    presubmit=registry_lib.PresubmitPolicy.RUN,
+)
+def siglip_base_forward(ctx: context_lib.Context):
+  """Benchmark factory for SigLIP-B/16 (google/siglip-base-patch16-224) forward."""
+  batch_size = 1 if ctx.run_scope == context_lib.RunScope.PRESUBMIT else 32
+  # 64 is the maximum number of SigLIP text positions.
+  model, inputs = _load_hf_vision_model(
+      ctx, "google/siglip-base-patch16-224", batch_size=batch_size, seq_len=64
+  )
+  return model, (), inputs
+
+
+@registry_lib.register_benchmark(
+    stepper=step_lib.StepperType.FORWARD,
+    presubmit=registry_lib.PresubmitPolicy.RUN,
+)
+def dinov2_base_forward(ctx: context_lib.Context):
+  """Benchmark factory for DINOv2-B (facebook/dinov2-base) forward."""
+  batch_size = 1 if ctx.run_scope == context_lib.RunScope.PRESUBMIT else 16
+  model, inputs = _load_hf_vision_model(
+      ctx, "facebook/dinov2-base", batch_size=batch_size
+  )
+  return model, (), inputs
+
+
+@registry_lib.register_benchmark(
+    stepper=step_lib.StepperType.FORWARD,
+    presubmit=registry_lib.PresubmitPolicy.RUN,
+)
+def deit_tiny_forward(ctx: context_lib.Context):
+  """Benchmark factory for DeiT-Ti (facebook/deit-tiny-patch16-224) forward."""
+  batch_size = 1 if ctx.run_scope == context_lib.RunScope.PRESUBMIT else 64
+  model, inputs = _load_hf_vision_model(
+      ctx, "facebook/deit-tiny-patch16-224", batch_size=batch_size
+  )
+  return model, (), inputs
+
+
+@registry_lib.register_benchmark(
+    stepper=step_lib.StepperType.FORWARD,
+    presubmit=registry_lib.PresubmitPolicy.RUN,
+)
+def segformer_b2_forward(ctx: context_lib.Context):
+  """Benchmark factory for SegFormer-B2 (ADE20K, 512x512) forward."""
+  batch_size = 1 if ctx.run_scope == context_lib.RunScope.PRESUBMIT else 32
+  model, inputs = _load_hf_vision_model(
+      ctx,
+      "nvidia/segformer-b2-finetuned-ade-512-512",
+      batch_size=batch_size,
+  )
+  return model, (), inputs

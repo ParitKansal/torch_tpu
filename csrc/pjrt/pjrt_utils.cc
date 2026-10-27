@@ -16,6 +16,8 @@
 
 #include "csrc/pjrt/pjrt_utils.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -25,8 +27,12 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
+#include "csrc/common/dimension_types.h"
+#include "csrc/common/dtype.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/pjrt/pjrt_state.h"
+#include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
 #include "xla/layout.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_executable.h"
@@ -74,6 +80,36 @@ bool TpuDeviceSupportsSparseCore() {
       kind == "TPU v4 lite" || kind == "TPU v3" || kind == "TPU v2" ||
       kind == "cpu" || kind.empty()) {
     return false;
+  }
+  return true;
+}
+
+bool IsDefaultDeviceLayout(const CustomLayout& layout,
+                           const mlir::ElementType element_type,
+                           const absl::Span<const int64_t> dimensions) {
+  const absl::StatusOr<xla::PjRtClient* absl_nonnull> client = GetPjRtClient();
+  if (!client.ok()) {
+    ABSL_LOG_FIRST_N(WARNING, 1)
+        << "IsDefaultDeviceLayout: PjRt backend unavailable: "
+        << client.status();
+    return false;
+  }
+  const absl::StatusOr<xla::Layout> default_layout =
+      (*client)->GetDefaultLayout(ConvertTo<xla::PrimitiveType>(element_type),
+                                  dimensions);
+  if (!default_layout.ok()) {
+    return false;
+  }
+  if (layout.minor_to_major != default_layout->minor_to_major()) {
+    return false;
+  }
+  if (layout.tiles.size() != default_layout->tiles().size()) {
+    return false;
+  }
+  for (size_t i = 0; i < layout.tiles.size(); ++i) {
+    if (layout.tiles[i] != default_layout->tiles()[i].dimensions()) {
+      return false;
+    }
   }
   return true;
 }

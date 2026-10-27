@@ -175,5 +175,20 @@ TEST(CompileOptionsKeyDeathTest, LibtpuInitArgsAffectsFingerprint) {
          "fingerprinted.";
 }
 
+TEST_F(CompileOptionsKeyTest, TupledArgumentsAffectFingerprint) {
+  xla::CompileOptions options;
+  options.executable_build_options.mutable_debug_options();
+  const CompileOptionsKey flat_key = MakeCompileOptionsKey(options);
+
+  options.parameter_is_tupled_arguments = true;
+
+  const CompileOptionsKey key = MakeCompileOptionsKey(options);
+  EXPECT_NE(key.key(), flat_key.key());
+  EXPECT_EQ(key.key(), 7188732421518920687ULL)
+      << "Fingerprint stability is vital for the compilation cache "
+         "correctness. Do not change the expected value to make the test pass "
+         "unless the code changes how `xla::CompileOptions` is fingerprinted.";
+}
+
 }  // namespace
 }  // namespace torch_tpu

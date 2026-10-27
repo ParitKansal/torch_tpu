@@ -40,9 +40,10 @@ aligning flat values buffers to hardware microarchitectural boundaries:
 
 4. **Zero-Sync Device-to-Host (D2H) Pipeline Dispatch**:
    `strip_jagged_padding` provides zero-copy slicing of trailing padding
-   rows before loss computation or cross-node communication. Passing host-known
-   `valid_tokens` eliminates the blocking `.item()` PCIe synchronization barrier
-   that would otherwise stall host dispatch and create TPU execution bubbles.
+   tokens along the ragged dim before loss computation or cross-node
+   communication. Passing host-known `valid_tokens` eliminates the blocking
+   `.item()` PCIe synchronization barrier that would otherwise stall host
+   dispatch and create TPU execution bubbles.
 """
 
 import typing
@@ -56,6 +57,43 @@ __all__ = [
 ]
 
 
+def _ragged_values_dim(nt: torch.Tensor) -> int:
+  """Returns the dim of `nt.values()` that holds the ragged tokens."""
+  # `values()` has no batch dim, so the ragged dim of `nt` is one dim earlier
+  # in `values()`. It is dim 0 unless the ragged dim was moved, e.g. by
+  # `nt.transpose(1, 2)`.
+  return nt._ragged_idx - 1  # pylint: disable=protected-access
+
+
+def _with_values(nt: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+  """Returns a jagged view of `values` that keeps all of `nt`'s metadata.
+
+  Like `extract_kwargs` in `torch.nested._internal.ops`, this keeps the offsets,
+  lengths, ragged dim and cached min/max sequence lengths. Keeping the cached
+  sequence lengths avoids a device-to-host sync to compute them again.
+
+  Args:
+    nt: The `torch.jagged` NestedTensor whose metadata is kept.
+    values: The new values buffer. Its ragged dim may only differ from
+      `nt.values()` in trailing tokens that no sequence covers.
+
+  Returns:
+    A `torch.jagged` NestedTensor view of `values` with the same sequences as
+    `nt`.
+  """
+  # pylint: disable=protected-access
+  # `_maybe_min_seqlen` and `_maybe_max_seqlen` only read the cache and return
+  # None when it is empty, so they never compute the values or sync.
+  return nt_internal.nested_view_from_values_offsets_lengths(
+      values,
+      nt.offsets(),
+      nt.lengths(),
+      ragged_idx=nt._ragged_idx,
+      min_seqlen=nt._maybe_min_seqlen,
+      max_seqlen=nt._maybe_max_seqlen,
+  )
+
+
 @_annotations.experimental(
     "align_jagged_to_multiple is experimental and subject to change."
 )
@@ -64,11 +102,13 @@ def align_jagged_to_multiple(
     multiple: int = 128,
     padding_value: typing.Union[float, int, bool] = 0.0,
 ) -> torch.Tensor:
-  """Pads a jagged tensor's flat values buffer to a multiple of `multiple`.
+  """Pads a jagged tensor's values buffer to a multiple of `multiple`.
 
   This optimizes TPU matrix multiplication throughput by aligning sequence
   token dimensions to native 128x128 MXU systolic array tiles and 128-element
-  vector registers. Sequence offsets and valid elements remain unchanged.
+  vector registers. Padding is added along the ragged dim of `nt.values()`.
+  Sequence `offsets`, `lengths`, `ragged_idx`, cached `min_seqlen`/`max_seqlen`,
+  and valid elements are preserved.
 
   Args:
     nt: A `torch.jagged` NestedTensor on TPU.
@@ -76,27 +116,29 @@ def align_jagged_to_multiple(
     padding_value: Fill value for the padded trailing tokens (default 0.0).
 
   Returns:
-    A new `torch.jagged` NestedTensor with its values buffer padded to a
-    multiple of `multiple`, sharing the original sequence offsets.
+    A `torch.jagged` NestedTensor with `nt.values()` padded along the ragged
+    dim to a multiple of `multiple`, preserving `offsets`, `lengths`,
+    `ragged_idx`, and cached `min_seqlen`/`max_seqlen`.
   """
   values = nt.values()
-  total_l = values.size(0)
+  dim = _ragged_values_dim(nt)
+  total_l = values.size(dim)
   remainder = total_l % multiple
   if remainder == 0:
     return nt
 
   pad_amount = multiple - remainder
-  pad_shape = (pad_amount,) + tuple(values.shape[1:])
+  # Same shape as `values` except along the ragged dim.
+  pad_shape = list(values.shape)
+  pad_shape[dim] = pad_amount
   padding = torch.full(
       pad_shape,
       padding_value,
       dtype=values.dtype,
       device=values.device,
   )
-  padded_values = torch.cat([values, padding], dim=0)
-  return nt_internal.nested_view_from_values_offsets(
-      padded_values, nt.offsets()
-  )
+  padded_values = torch.cat([values, padding], dim=dim)
+  return _with_values(nt, padded_values)
 
 
 @_annotations.experimental(
@@ -106,28 +148,35 @@ def strip_jagged_padding(
     nt: torch.Tensor,
     valid_tokens: typing.Optional[int] = None,
 ) -> torch.Tensor:
-  """Removes trailing padding rows from a padded jagged values buffer.
+  """Removes trailing padding tokens along the ragged dim of `nt.values()`.
 
-  If `nt.values()` has trailing dummy tokens beyond `nt.offsets()[-1]` (e.g.
-  from `align_jagged_to_multiple`), this function returns a zero-copy slice view
-  matching the exact valid token count.
+  If `nt.values()` has trailing dummy tokens along the ragged dim beyond
+  `nt.offsets()[-1]` (e.g. from `align_jagged_to_multiple`), this function
+  returns a zero-copy slice view of `nt.values()` with `valid_tokens` tokens
+  along the ragged dim, preserving `offsets`, `lengths`, `ragged_idx`, and
+  cached `min_seqlen`/`max_seqlen`.
 
   Args:
     nt: A `torch.jagged` NestedTensor on TPU.
-    valid_tokens: Optional host-known integer count of valid tokens in the
-      batch. If omitted, computed from `nt.offsets()[-1].item()`. Note: passing
-      a host-known integer avoids the blocking PCIe Device-to-Host (D2H)
-      synchronization caused by `.item()`, eliminating TPU pipeline stalls.
+    valid_tokens: Optional host-known integer size of `nt.values()` along the
+      ragged dim before trailing padding. If omitted, computed from
+      `nt.offsets()[-1].item()`. Note: passing a host-known integer avoids the
+      blocking PCIe Device-to-Host (D2H) synchronization caused by `.item()`,
+      eliminating TPU pipeline stalls.
 
   Returns:
-    A `torch.jagged` NestedTensor containing only the valid sequence tokens.
+    A `torch.jagged` NestedTensor with `nt.values()` sliced along the ragged
+    dim to `valid_tokens` tokens, preserving `offsets`, `lengths`,
+    `ragged_idx`, and cached `min_seqlen`/`max_seqlen`.
   """
   offsets = nt.offsets()
   if valid_tokens is None:
     valid_tokens = int(offsets[-1].item()) if offsets.numel() > 0 else 0
 
-  if nt.values().size(0) == valid_tokens:
+  dim = _ragged_values_dim(nt)
+  if nt.values().size(dim) == valid_tokens:
     return nt
 
-  compact_values = nt.values()[:valid_tokens]
-  return nt_internal.nested_view_from_values_offsets(compact_values, offsets)
+  # Zero-copy slice of the valid tokens along the ragged dim.
+  compact_values = nt.values().narrow(dim, 0, valid_tokens)
+  return _with_values(nt, compact_values)

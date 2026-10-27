@@ -139,6 +139,38 @@ class SynchronizeTest(seed_test_utils.RepeatableTest):
     expected = torch.full((256, 256), 256.0, dtype=torch.float32, device='cpu')
     utils.assert_close(y.cpu(), expected)
 
+  def test_blocking_to_tpu_synchronizes_stream(self):
+    execution_mode.eager_mode = EagerMode.DEFER_AND_FUSE
+    # Create a deferred op on the current stream.
+    x = torch.ones(10, device='tpu')
+    self.assertFalse(sync.is_materializing(x))
+
+    # Do a blocking CPU-to-TPU copy.
+    y = torch.ones(11, device='cpu')
+    y_tpu = y.to('tpu')
+
+    # When the copy completes, the strem is fully synchronized.
+    self.assertTrue(sync.is_materialized(x))
+    self.assertTrue(sync.is_materialized(y_tpu))
+
+  def test_blocking_to_cpu_synchronizes_stream(self):
+    execution_mode.eager_mode = EagerMode.DEFER_AND_FUSE
+    # Create a materialized tensor on TPU.
+    x = torch.ones(10, device='tpu')
+    torch.accelerator.current_stream().synchronize()
+    self.assertTrue(sync.is_materialized(x))
+
+    # Create a deferred op on the current stream.
+    y = torch.ones(11, device='tpu')
+    self.assertFalse(sync.is_materializing(y))
+
+    # Do a blocking TPU-to-CPU copy, but only of the tensor that is already
+    # materialized.
+    x.cpu()
+
+    # When the copy completes, the stream is fully synchronized.
+    self.assertTrue(sync.is_materialized(y))
+
 
 if __name__ == '__main__':
   absltest.main()

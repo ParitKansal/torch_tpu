@@ -70,24 +70,6 @@ class KnownFailure:
 KNOWN_FAILURES: tuple[KnownFailure, ...] = (
     # TorchTPU.
     #
-    # TODO(b/571695076): Remove once the 4096 parameter training step fits.
-    #
-    # The eager-default, eager-optimized and compiled training steps exceed the
-    # XLA:TPU entry computation parameter limit.
-    KnownFailure(
-        benchmark="synthetic_4096_params_training",
-        framework=mode_lib.Framework.TORCH,
-        device_kind=target_lib.DeviceKind.TPU,
-        run_modes=frozenset({
-            common.RunMode.EAGER_DEFAULT,
-            common.RunMode.EAGER_OPTIMIZED,
-            common.RunMode.COMPILED,
-        }),
-        reason=(
-            "the fused forward, backward and AdamW step needs more XLA"
-            " parameters (~20.5k) than supported (~16.3k)"
-        ),
-    ),
     # TODO(b/574632209): Remove once XLA:TPU cl/1001433059 lands. It fixes
     # `TpuConvolutionRewriter` for non-`f0b_i0o->0bf` dimension orders.
     # Repro: //perflab:distributed_dev_benchmarks_ws8
@@ -102,31 +84,6 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
             " instruction to have shape equal to bf16[2048,2048,2048], actual"
             " shape is bf16[2048,2048,1] on multiply(%slice, %silu_backward)"
             " (b/574632209)"
-        ),
-    ),
-    # TODO(b/574560944): Remove once XLA:TPU cl/1000409835 lands. It fixes the
-    # HloDeduplicationKey hash collision from cl/999454734 (b/573904712).
-    #
-    # The ragged-dot custom fusions of the MoE experts fail to compile on v7
-    # with a `program_name_collision` RET_CHECK.
-    KnownFailure(
-        benchmark="gemma_4_26b_a4b_6_layers_training",
-        framework=mode_lib.Framework.TORCH,
-        device_kind=target_lib.DeviceKind.TPU,
-        run_modes=frozenset({common.RunMode.COMPILED}),
-        reason=(
-            "XLA:TPU program_name_collision: HloDeduplicationKey hash collision"
-            " between ragged-dot fusions"
-        ),
-    ),
-    KnownFailure(
-        benchmark="gpt_oss_20b_4_layers_training",
-        framework=mode_lib.Framework.TORCH,
-        device_kind=target_lib.DeviceKind.TPU,
-        run_modes=frozenset({common.RunMode.COMPILED}),
-        reason=(
-            "XLA:TPU program_name_collision: HloDeduplicationKey hash collision"
-            " between ragged-dot fusions"
         ),
     ),
     # TODO(b/568037427): Remove the TorchAX entries as their failures are fixed.
@@ -181,6 +138,13 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
         framework=mode_lib.Framework.TORCHAX,
         reason="aten::_grouped_mm has no lowering",
     ),
+    # `torch.tpu.ops.ragged_dot` is a TorchTPU custom op without a TorchAX
+    # lowering.
+    KnownFailure(
+        benchmark="gemma_4_26b_a4b_ragged_moe_12_layers_forward",
+        framework=mode_lib.Framework.TORCHAX,
+        reason="torch.tpu.ops.ragged_dot has no TorchAX lowering",
+    ),
     # The model forward needs a concrete value from a traced tensor (for a
     # shape or Python control flow), which fails under `jax.jit`.
     KnownFailure(
@@ -220,6 +184,14 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
         benchmark="lahja_sa_ahmad_v1_forward_gen",
         framework=mode_lib.Framework.TORCHAX,
         reason="torch.arange(predicted_lengths.max()) in modeling_vits.py",
+    ),
+    KnownFailure(
+        benchmark="llava_1_5_7b_forward",
+        framework=mode_lib.Framework.TORCHAX,
+        reason=(
+            "aten::_is_all_true in torch_compilable_check on a traced image"
+            " token count in modeling_llava.py"
+        ),
     ),
     KnownFailure(
         benchmark="llava_1_5_7b_hf_forward_gen",
@@ -278,6 +250,13 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
     # ),
     # KnownFailure(
         # benchmark="conformer_training",
+        # framework=mode_lib.Framework.TORCH,
+        # device_kind=target_lib.DeviceKind.CUDA,
+        # run_modes=frozenset({common.RunMode.COMPILED}),
+        # reason="LLVM cannot select v2i16 [su]mul_lohi in a Triton kernel",
+    # ),
+    # KnownFailure(
+        # benchmark="deit_tiny_forward",
         # framework=mode_lib.Framework.TORCH,
         # device_kind=target_lib.DeviceKind.CUDA,
         # run_modes=frozenset({common.RunMode.COMPILED}),
@@ -347,6 +326,13 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
         # reason="LLVM cannot select v2i16 [su]mul_lohi in a Triton kernel",
     # ),
     # KnownFailure(
+        # benchmark="mllama_11b_forward",
+        # framework=mode_lib.Framework.TORCH,
+        # device_kind=target_lib.DeviceKind.CUDA,
+        # run_modes=frozenset({common.RunMode.COMPILED}),
+        # reason="LLVM cannot select v2i16 [su]mul_lohi in a Triton kernel",
+    # ),
+    # KnownFailure(
         # benchmark="qwen3_8_27b_4_layers_simple_fsdp_training",
         # framework=mode_lib.Framework.TORCH,
         # device_kind=target_lib.DeviceKind.CUDA,
@@ -355,6 +341,13 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
     # ),
     # KnownFailure(
         # benchmark="sam3_litetext_s0_forward_gen",
+        # framework=mode_lib.Framework.TORCH,
+        # device_kind=target_lib.DeviceKind.CUDA,
+        # run_modes=frozenset({common.RunMode.COMPILED}),
+        # reason="LLVM cannot select v2i16 [su]mul_lohi in a Triton kernel",
+    # ),
+    # KnownFailure(
+        # benchmark="siglip_base_forward",
         # framework=mode_lib.Framework.TORCH,
         # device_kind=target_lib.DeviceKind.CUDA,
         # run_modes=frozenset({common.RunMode.COMPILED}),

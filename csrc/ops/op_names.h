@@ -733,6 +733,8 @@ enum class OpName {
   kScaledDotProductFusedAttentionOverrideable,
   kScaledDotProductFusedAttentionOverrideableBackward,
   kScaledGroupedMm,
+  kScaledGroupedMmV2,
+  kScaledGroupedMmV2Out,
   kScaledMm,
   kScaledMmOut,
   kScaledMmV2,
@@ -834,6 +836,7 @@ enum class OpName {
   kUniform_,
   kUnique2,
   kUniqueConsecutive,
+  kUniqueDim,
   kUniqueDimConsecutive,
   kUnsqueeze,
   kUnsqueezeCopy,
@@ -2313,6 +2316,10 @@ ToString(  // NOLINT(google-readability-function-size)
       return "_scaled_dot_product_fused_attention_overrideable_backward";
     case OpName::kScaledGroupedMm:
       return "_scaled_grouped_mm";
+    case OpName::kScaledGroupedMmV2:
+      return "_scaled_grouped_mm_v2";
+    case OpName::kScaledGroupedMmV2Out:
+      return "_scaled_grouped_mm_v2.out";
     case OpName::kScaledMm:
       return "_scaled_mm";
     case OpName::kScaledMmOut:
@@ -2515,6 +2522,8 @@ ToString(  // NOLINT(google-readability-function-size)
       return "_unique2";
     case OpName::kUniqueConsecutive:
       return "unique_consecutive";
+    case OpName::kUniqueDim:
+      return "unique_dim";
     case OpName::kUniqueDimConsecutive:
       return "unique_dim_consecutive";
     case OpName::kUnsqueeze:

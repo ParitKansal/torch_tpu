@@ -1643,6 +1643,372 @@ class JaggedTensorTest(seed_test_utils.RepeatableTest):
     # Calling on already compact tensor returns original tensor
     self.assertIs(jagged_ops.strip_jagged_padding(nt), nt)
 
+  def test_align_and_strip_preserve_lengths(self):
+    """Tests that align and strip keep the lengths of a jagged tensor."""
+    # Two slots of 4 and 6 tokens that hold sequences of 2 and 3 tokens, so
+    # the valid sequences are [0, 1] and [4, 5, 6].
+    values = torch.arange(10.0, device="tpu").reshape(10, 1)
+    offsets = torch.tensor([0, 4, 10], dtype=torch.int64, device="tpu")
+    lengths = torch.tensor([2, 3], dtype=torch.int64, device="tpu")
+    nt = torch.nested.nested_tensor_from_jagged(
+        values, offsets, lengths=lengths
+    )
+    expected = [t.cpu() for t in nt.unbind()]
+
+    # Already-compact / already-aligned tensor with holes is returned as-is
+    self.assertIs(jagged_ops.align_jagged_to_multiple(nt, multiple=5), nt)
+    self.assertIs(jagged_ops.strip_jagged_padding(nt), nt)
+    self.assertIs(jagged_ops.strip_jagged_padding(nt, valid_tokens=10), nt)
+
+    # Align 10 tokens to 12; nested shape, offsets, lengths and sequences kept
+    aligned_nt = jagged_ops.align_jagged_to_multiple(nt, multiple=4)
+    self.assertEqual(aligned_nt.shape, nt.shape)
+    self.assertEqual(aligned_nt.values().shape, (12, 1))
+    utils.assert_close(aligned_nt.offsets().cpu(), offsets.cpu())
+    utils.assert_close(aligned_nt.lengths().cpu(), lengths.cpu())
+    for got, want in zip(aligned_nt.unbind(), expected, strict=True):
+      utils.assert_close(got.cpu(), want)
+
+    # Strip back to 10 tokens with both automatic and explicit valid_tokens
+    for valid_tokens in (None, 10):
+      with self.subTest(valid_tokens=valid_tokens):
+        stripped_nt = jagged_ops.strip_jagged_padding(
+            aligned_nt, valid_tokens=valid_tokens
+        )
+        self.assertEqual(stripped_nt.shape, nt.shape)
+        self.assertEqual(stripped_nt.values().shape, (10, 1))
+        utils.assert_close(stripped_nt.offsets().cpu(), offsets.cpu())
+        utils.assert_close(stripped_nt.lengths().cpu(), lengths.cpu())
+        for got, want in zip(stripped_nt.unbind(), expected, strict=True):
+          utils.assert_close(got.cpu(), want)
+
+    # Jagged tensor with holes built via torch.nested.narrow where
+    # offsets[-1] (9) < values.size(0) (10).
+    base = torch.arange(30.0, device="tpu").reshape(2, 5, 3)
+    nt_narrow = torch.nested.narrow(
+        base,
+        dim=1,
+        start=torch.tensor([0, 1], dtype=torch.int64, device="tpu"),
+        length=torch.tensor([2, 3], dtype=torch.int64, device="tpu"),
+        layout=torch.jagged,
+    )
+    expected_narrow = [t.cpu() for t in nt_narrow.unbind()]
+    aligned_narrow = jagged_ops.align_jagged_to_multiple(nt_narrow, multiple=4)
+    self.assertEqual(aligned_narrow.shape, nt_narrow.shape)
+    self.assertEqual(aligned_narrow.values().shape, (12, 3))
+    for got, want in zip(aligned_narrow.unbind(), expected_narrow, strict=True):
+      utils.assert_close(got.cpu(), want)
+
+    # With valid_tokens=None, strip trims to offsets[-1] (9) while keeping
+    # lengths, cached seqlens, and sequence contents.
+    stripped_narrow = jagged_ops.strip_jagged_padding(aligned_narrow)
+    self.assertEqual(stripped_narrow.shape, nt_narrow.shape)
+    self.assertEqual(stripped_narrow.values().shape, (9, 3))
+    utils.assert_close(
+        stripped_narrow.lengths().cpu(), nt_narrow.lengths().cpu()
+    )
+    # pylint: disable=protected-access
+    self.assertEqual(
+        stripped_narrow._maybe_min_seqlen, nt_narrow._maybe_min_seqlen
+    )
+    self.assertEqual(
+        stripped_narrow._maybe_max_seqlen, nt_narrow._maybe_max_seqlen
+    )
+    # pylint: enable=protected-access
+    for got, want in zip(
+        stripped_narrow.unbind(), expected_narrow, strict=True
+    ):
+      utils.assert_close(got.cpu(), want)
+
+  def test_align_and_strip_preserve_cached_seqlens(self):
+    """Tests that align and strip keep full, partial, or empty seqlen caches."""
+    values = torch.randn(7, 2, device="tpu")
+    offsets = torch.tensor([0, 3, 7], dtype=torch.int64, device="tpu")
+
+    for cache_kwargs in (
+        {"min_seqlen": 3, "max_seqlen": 4},
+        {"min_seqlen": 3},
+        {"max_seqlen": 4},
+        {},
+    ):
+      with self.subTest(cache_kwargs=cache_kwargs):
+        nt = torch.nested.nested_tensor_from_jagged(
+            values, offsets, **cache_kwargs
+        )
+        aligned_nt = jagged_ops.align_jagged_to_multiple(nt, multiple=4)
+        stripped_nt = jagged_ops.strip_jagged_padding(
+            aligned_nt, valid_tokens=7
+        )
+
+        # `_maybe_*` reads the cache without computing or syncing; None stays
+        # None and the input's cache is not populated as a side effect.
+        # pylint: disable=protected-access
+        for tensor in (nt, aligned_nt, stripped_nt):
+          self.assertEqual(
+              tensor._maybe_min_seqlen, cache_kwargs.get("min_seqlen")
+          )
+          self.assertEqual(
+              tensor._maybe_max_seqlen, cache_kwargs.get("max_seqlen")
+          )
+        # pylint: enable=protected-access
+
+  def test_align_and_strip_transposed_ragged_dim(self):
+    """Tests align and strip when the ragged dim is not the first values dim."""
+    # pylint: disable=protected-access
+    # With 2 features, values dims 0 and 1 differ in size, so padding the
+    # wrong dim is caught. With 7 features, both dims match the 7 tokens, so
+    # a size check on the wrong dim would find nothing to strip.
+    for features in [2, 7]:
+      with self.subTest(features=features):
+        t1 = torch.randn(3, features, device="tpu")
+        t2 = torch.randn(4, features, device="tpu")
+        nt = torch.nested.nested_tensor([t1, t2], layout=torch.jagged)
+        nt_t = nt.transpose(1, 2)  # Values (features, 7), ragged_idx 2.
+        self.assertEqual(nt_t._ragged_idx, 2)
+
+        # Align 7 tokens to 8 along values dim 1; nested shape and ragged_idx
+        # are kept and the padded slice equals padding_value.
+        aligned_nt = jagged_ops.align_jagged_to_multiple(
+            nt_t, multiple=4, padding_value=-1.5
+        )
+        self.assertEqual(aligned_nt._ragged_idx, 2)
+        self.assertEqual(aligned_nt.shape, nt_t.shape)
+        self.assertEqual(aligned_nt.values().shape, (features, 8))
+        utils.assert_close(
+            aligned_nt.values()[:, :7].cpu(), nt_t.values().cpu()
+        )
+        utils.assert_close(
+            aligned_nt.values()[:, 7:].cpu(),
+            torch.full((features, 1), -1.5),
+        )
+
+        # Strip back to 7 tokens; each sequence matches its input again
+        stripped_nt = jagged_ops.strip_jagged_padding(aligned_nt)
+        self.assertEqual(stripped_nt._ragged_idx, 2)
+        self.assertEqual(stripped_nt.shape, nt_t.shape)
+        self.assertEqual(stripped_nt.values().shape, (features, 7))
+        for got, want in zip(
+            stripped_nt.transpose(1, 2).unbind(), [t1, t2], strict=True
+        ):
+          utils.assert_close(got.cpu(), want.cpu())
+
+    # No-op identity when _ragged_idx != 1 and ragged dim is already aligned /
+    # compact (8 tokens with 2 features -> values shape (2, 8)).
+    nt_aligned = torch.nested.nested_tensor(
+        [
+            torch.randn(3, 2, device="tpu"),
+            torch.randn(5, 2, device="tpu"),
+        ],
+        layout=torch.jagged,
+    ).transpose(1, 2)
+    self.assertEqual(nt_aligned._ragged_idx, 2)
+    self.assertIs(
+        jagged_ops.align_jagged_to_multiple(nt_aligned, multiple=4), nt_aligned
+    )
+    self.assertIs(jagged_ops.strip_jagged_padding(nt_aligned), nt_aligned)
+    self.assertIs(
+        jagged_ops.strip_jagged_padding(nt_aligned, valid_tokens=8), nt_aligned
+    )
+    # pylint: enable=protected-access
+
+  def test_align_and_strip_higher_rank(self):
+    """Tests align and strip on higher-rank jagged tensors."""
+    # pylint: disable=protected-access
+    # Higher rank: jagged_dim=2 with 3D values (H=2, total=7, D=3) pads the
+    # middle dim of values.
+    values_3d = torch.randn(2, 7, 3, device="tpu")
+    offsets_3d = torch.tensor([0, 3, 7], dtype=torch.int64, device="tpu")
+    nt_mid = torch.nested.nested_tensor_from_jagged(
+        values_3d, offsets_3d, jagged_dim=2, min_seqlen=3, max_seqlen=4
+    )
+    expected_mid = [t.cpu() for t in nt_mid.unbind()]
+    aligned_mid = jagged_ops.align_jagged_to_multiple(
+        nt_mid, multiple=4, padding_value=-2.0
+    )
+    self.assertEqual(aligned_mid._ragged_idx, 2)
+    self.assertEqual(aligned_mid.shape, nt_mid.shape)
+    self.assertEqual(aligned_mid.values().shape, (2, 8, 3))
+    utils.assert_close(aligned_mid.values()[:, :7, :].cpu(), values_3d.cpu())
+    utils.assert_close(
+        aligned_mid.values()[:, 7:, :].cpu(),
+        torch.full((2, 1, 3), -2.0),
+    )
+    stripped_mid = jagged_ops.strip_jagged_padding(aligned_mid)
+    self.assertEqual(stripped_mid._ragged_idx, 2)
+    self.assertEqual(stripped_mid.shape, nt_mid.shape)
+    self.assertEqual(stripped_mid.values().shape, (2, 7, 3))
+    for got, want in zip(stripped_mid.unbind(), expected_mid, strict=True):
+      utils.assert_close(got.cpu(), want)
+
+    # Higher rank: ragged_idx=3 via transpose(1, 3) on a 4D (B, j, H, D) NT.
+    t1_4d = torch.randn(3, 2, 5, device="tpu")
+    t2_4d = torch.randn(4, 2, 5, device="tpu")
+    nt_4d = torch.nested.nested_tensor(
+        [t1_4d, t2_4d], layout=torch.jagged
+    ).transpose(1, 3)
+    self.assertEqual(nt_4d._ragged_idx, 3)
+    aligned_4d = jagged_ops.align_jagged_to_multiple(
+        nt_4d, multiple=4, padding_value=3.5
+    )
+    self.assertEqual(aligned_4d._ragged_idx, 3)
+    self.assertEqual(aligned_4d.shape, nt_4d.shape)
+    self.assertEqual(aligned_4d.values().shape, (5, 2, 8))
+    utils.assert_close(
+        aligned_4d.values()[:, :, :7].cpu(), nt_4d.values().cpu()
+    )
+    utils.assert_close(
+        aligned_4d.values()[:, :, 7:].cpu(),
+        torch.full((5, 2, 1), 3.5),
+    )
+    for valid_tokens in (None, 7):
+      stripped_4d = jagged_ops.strip_jagged_padding(
+          aligned_4d, valid_tokens=valid_tokens
+      )
+      self.assertEqual(stripped_4d._ragged_idx, 3)
+      self.assertEqual(stripped_4d.shape, nt_4d.shape)
+      self.assertEqual(stripped_4d.values().shape, (5, 2, 7))
+      for got, want in zip(
+          stripped_4d.transpose(1, 3).unbind(),
+          [t1_4d, t2_4d],
+          strict=True,
+      ):
+        utils.assert_close(got.cpu(), want.cpu())
+    # pylint: enable=protected-access
+
+  def test_align_and_strip_combined_metadata_and_dtypes(self):
+    """Tests align and strip with combined metadata across dtypes."""
+    # pylint: disable=protected-access
+    offsets = torch.tensor([0, 4, 10], dtype=torch.int64, device="tpu")
+    lengths = torch.tensor([2, 3], dtype=torch.int64, device="tpu")
+
+    for dtype, pad_val in (
+        (torch.float32, -1.0),
+        (torch.bfloat16, 0.0),
+        (torch.int64, 7),
+        (torch.bool, False),
+    ):
+      with self.subTest(dtype=dtype):
+        if dtype == torch.bool:
+          values = (torch.arange(30, device="tpu") % 2 == 0).reshape(10, 3)
+        else:
+          values = torch.arange(30, dtype=dtype, device="tpu").reshape(10, 3)
+
+        nt_t = torch.nested.nested_tensor_from_jagged(
+            values,
+            offsets,
+            lengths=lengths,
+            min_seqlen=2,
+            max_seqlen=3,
+        ).transpose(1, 2)
+        expected = [t.cpu() for t in nt_t.unbind()]
+
+        aligned_nt = jagged_ops.align_jagged_to_multiple(
+            nt_t, multiple=4, padding_value=pad_val
+        )
+        self.assertEqual(aligned_nt.values().dtype, dtype)
+        self.assertEqual(aligned_nt.values().shape, (3, 12))
+        self.assertEqual(aligned_nt._ragged_idx, 2)
+        self.assertEqual(aligned_nt.shape, nt_t.shape)
+        utils.assert_close(aligned_nt.offsets().cpu(), offsets.cpu())
+        utils.assert_close(aligned_nt.lengths().cpu(), lengths.cpu())
+        self.assertEqual(aligned_nt._maybe_min_seqlen, 2)
+        self.assertEqual(aligned_nt._maybe_max_seqlen, 3)
+        utils.assert_close(
+            aligned_nt.values()[:, 10:].cpu(),
+            torch.full((3, 2), pad_val, dtype=dtype),
+        )
+        for got, want in zip(aligned_nt.unbind(), expected, strict=True):
+          utils.assert_close(got.cpu(), want)
+
+        for valid_tokens in (None, 10):
+          stripped_nt = jagged_ops.strip_jagged_padding(
+              aligned_nt, valid_tokens=valid_tokens
+          )
+          self.assertEqual(stripped_nt.values().dtype, dtype)
+          self.assertEqual(stripped_nt.values().shape, (3, 10))
+          self.assertEqual(stripped_nt._ragged_idx, 2)
+          self.assertEqual(stripped_nt.shape, nt_t.shape)
+          utils.assert_close(stripped_nt.offsets().cpu(), offsets.cpu())
+          utils.assert_close(stripped_nt.lengths().cpu(), lengths.cpu())
+          self.assertEqual(stripped_nt._maybe_min_seqlen, 2)
+          self.assertEqual(stripped_nt._maybe_max_seqlen, 3)
+          for got, want in zip(stripped_nt.unbind(), expected, strict=True):
+            utils.assert_close(got.cpu(), want)
+    # pylint: enable=protected-access
+
+  def test_align_and_strip_autograd(self):
+    """Tests autograd through align and strip with holes and transposed dim."""
+    # Leaf values buffer -> holes + transposed ragged dim -> align -> strip ->
+    # unbind loss. Valid tokens receive exact upstream weights; holes and
+    # stripped padding receive zero gradient.
+    values = torch.randn(10, 3, device="tpu", requires_grad=True)
+    offsets = torch.tensor([0, 4, 10], dtype=torch.int64, device="tpu")
+    lengths = torch.tensor([2, 3], dtype=torch.int64, device="tpu")
+    nt_t = torch.nested.nested_tensor_from_jagged(
+        values, offsets, lengths=lengths, min_seqlen=2, max_seqlen=3
+    ).transpose(1, 2)
+
+    aligned_nt = jagged_ops.align_jagged_to_multiple(nt_t, multiple=4)
+    stripped_nt = jagged_ops.strip_jagged_padding(aligned_nt, valid_tokens=10)
+    self.assertTrue(aligned_nt.requires_grad)
+    self.assertTrue(stripped_nt.requires_grad)
+
+    weights = torch.arange(1.0, 4.0, device="tpu").reshape(3, 1)
+    loss = sum((seq * weights).sum() for seq in stripped_nt.unbind())
+    loss.backward()
+
+    expected_grad = torch.zeros(10, 3)
+    expected_grad[0:2] = torch.arange(1.0, 4.0)
+    expected_grad[4:7] = torch.arange(1.0, 4.0)
+    self.assertIsNotNone(values.grad)
+    utils.assert_close(values.grad.cpu(), expected_grad)
+
+    # NestedTensor leaf with requires_grad=True and transposed ragged dim
+    nt_leaf = torch.nested.nested_tensor(
+        [
+            torch.randn(3, 2, device="tpu"),
+            torch.randn(4, 2, device="tpu"),
+        ],
+        layout=torch.jagged,
+        requires_grad=True,
+    )
+    nt_leaf_t = nt_leaf.transpose(1, 2)
+    aligned_leaf = jagged_ops.align_jagged_to_multiple(nt_leaf_t, multiple=4)
+    stripped_leaf = jagged_ops.strip_jagged_padding(aligned_leaf)
+    out = stripped_leaf * 2.0
+    # pylint: disable=protected-access
+    grad_out = torch.nested.nested_tensor_from_jagged(
+        torch.ones_like(stripped_leaf.values()),
+        stripped_leaf.offsets(),
+        jagged_dim=stripped_leaf._ragged_idx,
+    )
+    # pylint: enable=protected-access
+    out.backward(grad_out)
+    self.assertIsNotNone(nt_leaf.grad)
+    self.assertTrue(nt_leaf.grad.is_nested)
+    utils.assert_close(nt_leaf.grad.values().cpu(), torch.full((7, 2), 2.0))
+
+  def test_strip_jagged_padding_invalid_valid_tokens(self):
+    """Tests that strip_jagged_padding fails on out-of-bounds valid_tokens."""
+    # pylint: disable=protected-access
+    nt = torch.nested.nested_tensor_from_jagged(
+        torch.randn(8, 2, device="tpu"),
+        torch.tensor([0, 3, 7], dtype=torch.int64, device="tpu"),
+    )
+    for candidate in (nt, nt.transpose(1, 2)):
+      for invalid_tokens in (-1, 9):
+        with self.subTest(
+            ragged_idx=candidate._ragged_idx,
+            valid_tokens=invalid_tokens,
+        ):
+          with self.assertRaises(  # ASSERT_RAISES_OK=Python utility check.
+              RuntimeError
+          ):
+            jagged_ops.strip_jagged_padding(
+                candidate, valid_tokens=invalid_tokens
+            )
+    # pylint: enable=protected-access
+
   def test_inplace_residual_accumulation(self):
     """Verifies that in-place residual addition (add_) operates zero-copy and matches out-of-place add."""
     t1_x = torch.randn(3, 16, device="tpu")

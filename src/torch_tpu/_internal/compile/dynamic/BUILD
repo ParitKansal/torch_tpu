@@ -79,6 +79,7 @@ torch_tpu_py_library(
         ":sym_utils",
         ":symbol_bounds",
         "//shims/torch:pytorch",
+        "@pypi//sympy",
     ],
 )
 

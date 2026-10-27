@@ -426,16 +426,28 @@ essential:
 
 ### 1. From the Command Line (TPU VM or Container Shell)
 
-From this directory, run the verification test suites:
+From this directory, run the verification test suites. Run the RoPE mathematical
+and module-level parity tests:
+
+<!-- doc-test: flux_rope_parity_doc_test -->
 
 ```bash
-# Run RoPE mathematical and module-level parity tests:
 python3 ./flux_rope_parity_test.py
+```
 
-# Run custom Pallas SplashAttention kernel parity tests:
+Run the custom Pallas SplashAttention kernel parity tests:
+
+<!-- doc-test: splash_attention_doc_test -->
+
+```bash
 python3 ./splash_attention_test.py
+```
 
-# Run layout parity, compilation parity, and baseline speed test:
+Run the layout parity, compilation parity, and baseline speed test:
+
+<!-- doc-test: flux_doc_test -->
+
+```bash
 python3 ./flux_test.py
 ```
 

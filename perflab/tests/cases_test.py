@@ -14,6 +14,7 @@
 
 """Tests for perflab/cases.py."""
 
+from collections.abc import Mapping, Sequence
 import itertools
 import os
 import random
@@ -350,171 +351,103 @@ class GetSkipReasonTest(seed_test_utils.RepeatableTest):
       flags.FLAGS.test_randomize_ordering_seed = ""
       flags.FLAGS["test_randomize_ordering_seed"].present = False
 
-  def test_estimate_case_cost_and_lpt_shard_balancing(self):
-    skipped_cost = cases.estimate_case_cost(
-        _make_spec("known_bad"),
-        common.RunMode.COMPILED,
-        framework=mode_lib.Framework.TORCH,
-        device_kind=target_lib.DeviceKind.TPU,
+  def _shard_assignment(
+      self,
+      case_names: Sequence[str],
+      total_shards: int,
+      env: Mapping[str, str],
+  ) -> dict[str, int]:
+    """Returns the shard each case of a fake benchmark class runs in."""
+    params = cases.case_params(
+        (name, _make_spec(name), common.RunMode.COMPILED) for name in case_names
     )
-    self.assertEqual(skipped_cost, 0.0)
-
-    run_skipped_cost = cases.estimate_case_cost(
-        _make_spec("known_bad"),
-        common.RunMode.COMPILED,
-        framework=mode_lib.Framework.TORCH,
-        device_kind=target_lib.DeviceKind.TPU,
-        skip_behavior="run_skipped",
+    test_cls = type(
+        "FakeBenchmarkTest",
+        (seed_test_utils.RepeatableTest,),
+        {
+            "framework": mode_lib.Framework.TORCH,
+            "platform": target_lib.Platform.V7_1X1X1,
+            "case_params": params,
+            **{name: lambda self: None for name in params},
+        },
     )
-    self.assertGreater(run_skipped_cost, 0.0)
-
-    torchax_decode_cost = cases.estimate_case_cost(
-        _make_spec(
-            "llama_1b_decode",
-            stepper=step_lib.StepperType.DECODER_ONLY_DECODE,
-        ),
-        common.RunMode.COMPILED,
-        framework=mode_lib.Framework.TORCHAX,
-        device_kind=target_lib.DeviceKind.TPU,
-    )
-    self.assertEqual(torchax_decode_cost, 0.0)
-
-    eager_cnn_cost = cases.estimate_case_cost(
-        _make_spec("resnet50"),
-        common.RunMode.EAGER_DEFAULT,
-        framework=mode_lib.Framework.TORCH,
-        device_kind=target_lib.DeviceKind.TPU,
-    )
-    compiled_llm_decode_cost = cases.estimate_case_cost(
-        _make_spec(
-            "llama_1b_decode",
-            stepper=step_lib.StepperType.DECODER_ONLY_DECODE,
-        ),
-        common.RunMode.COMPILED,
-        framework=mode_lib.Framework.TORCH,
-        device_kind=target_lib.DeviceKind.TPU,
-    )
-    self.assertGreater(compiled_llm_decode_cost, eager_cnn_cost)
-
-    case_triples = [
-        (
-            "llama_1b_decode_compiled",
-            _make_spec(
-                "llama_1b_decode",
-                stepper=step_lib.StepperType.DECODER_ONLY_DECODE,
-            ),
-            common.RunMode.COMPILED,
-        ),
-        (
-            "qwen3_decode_compiled",
-            _make_spec(
-                "qwen3_decode",
-                stepper=step_lib.StepperType.DECODER_ONLY_DECODE,
-            ),
-            common.RunMode.COMPILED,
-        ),
-        (
-            "resnet18_eager_default",
-            _make_spec("resnet18"),
-            common.RunMode.EAGER_DEFAULT,
-        ),
-        (
-            "mobilenet_compiled",
-            _make_spec("mobilenet"),
-            common.RunMode.COMPILED,
-        ),
-        (
-            "skipped_a_compiled",
-            _make_spec("skipped_a", skipped_run_modes=frozenset({"compiled"})),
-            common.RunMode.COMPILED,
-        ),
-        (
-            "skipped_b_compiled",
-            _make_spec("skipped_b", skipped_run_modes=frozenset({"compiled"})),
-            common.RunMode.COMPILED,
-        ),
-        (
-            "skipped_c_compiled",
-            _make_spec("skipped_c", skipped_run_modes=frozenset({"compiled"})),
-            common.RunMode.COMPILED,
-        ),
-        (
-            "skipped_d_compiled",
-            _make_spec("skipped_d", skipped_run_modes=frozenset({"compiled"})),
-            common.RunMode.COMPILED,
-        ),
-    ]
-
-    class FakeBenchmarkTest(seed_test_utils.RepeatableTest):
-      framework = mode_lib.Framework.TORCH
-      platform = target_lib.Platform.V7_1X1X1
-      case_params = cases.case_params(case_triples)
-
-      def test_benchmark_imports(self):
-        pass
-
-      def test_benchmark_llama_1b_decode_compiled(self):
-        pass
-
-      def test_benchmark_qwen3_decode_compiled(self):
-        pass
-
-      def test_benchmark_resnet18_eager_default(self):
-        pass
-
-      def test_benchmark_mobilenet_compiled(self):
-        pass
-
-      def test_benchmark_skipped_a_compiled(self):
-        pass
-
-      def test_benchmark_skipped_b_compiled(self):
-        pass
-
-      def test_benchmark_skipped_c_compiled(self):
-        pass
-
-      def test_benchmark_skipped_d_compiled(self):
-        pass
-
+    assignment = {}
     with mock.patch.dict(
         os.environ,  # PY_ENVIRON_OK=test
-        {
-            "TEST_RANDOMIZE_ORDERING_SEED": "0",
-            "TORCH_TPU_BENCHMARK_ORDER_SEED": "",
-        },
+        env,
         clear=False,
     ):
-      loader = cases.BenchmarkTestLoader()
-      self.assertIsNone(loader._randomize_ordering_seed)
-      ordered_names = loader.getTestCaseNames(FakeBenchmarkTest)
-      self.assertEqual(ordered_names[0], "test_benchmark_imports")
-      shard_0 = loader.shardTestCaseNames(
-          itertools.cycle(range(2)), ordered_names, 0
+      for shard_index in range(total_shards):
+        loader = cases.BenchmarkTestLoader()
+        names = loader.getTestCaseNames(test_cls)
+        for name in loader.shardTestCaseNames(
+            itertools.cycle(range(total_shards)), names, shard_index
+        ):
+          self.assertNotIn(name, assignment)
+          assignment[name] = shard_index
+    self.assertCountEqual(assignment, params)
+    return assignment
+
+  def test_shard_assignment_does_not_depend_on_ordering_seeds(self):
+    # CI seeds the ordering with the commit SHA, and auto-bisect reruns one
+    # shard at each candidate commit, so a case must stay in the same shard
+    # whatever the seeds are.
+    case_names = [f"model_{i}_compiled" for i in range(40)]
+    first = self._shard_assignment(
+        case_names,
+        total_shards=4,
+        env={
+            "TEST_RANDOMIZE_ORDERING_SEED": "12345",
+            "TORCH_TPU_BENCHMARK_ORDER_SEED": (
+                "adac8863c4f1d05b3f53a53aab84c8e77490766f"
+            ),
+        },
+    )
+    second = self._shard_assignment(
+        case_names,
+        total_shards=4,
+        env={
+            "TEST_RANDOMIZE_ORDERING_SEED": "67890",
+            "TORCH_TPU_BENCHMARK_ORDER_SEED": (
+                "0123abcd4567ef890123abcd4567ef8901234567"
+            ),
+        },
+    )
+    self.assertEqual(first, second)
+    self.assertLen(set(first.values()), 4)
+
+  def test_adding_a_case_does_not_move_other_cases(self):
+    env = {
+        "TEST_RANDOMIZE_ORDERING_SEED": "0",
+        "TORCH_TPU_BENCHMARK_ORDER_SEED": "0123abcd",
+    }
+    case_names = [f"model_{i}_compiled" for i in range(40)]
+    before = self._shard_assignment(case_names, total_shards=4, env=env)
+    after = self._shard_assignment(
+        case_names + ["new_model_compiled"], total_shards=4, env=env
+    )
+    del after["test_benchmark_new_model_compiled"]
+    self.assertEqual(before, after)
+
+  def test_shard_assignment_does_not_depend_on_iterator_position(self):
+    # absltest shares one cyclic shard iterator across all test classes, so a
+    # later class can see it mid-cycle.
+    names = [f"test_benchmark_model_{i}_compiled" for i in range(20)]
+    loader = cases.BenchmarkTestLoader()
+    total_shards = 4
+    for shard_index in range(total_shards):
+      expected = loader.shardTestCaseNames(
+          itertools.cycle(range(total_shards)), names, shard_index
       )
-      shard_1 = loader.shardTestCaseNames(
-          itertools.cycle(range(2)), ordered_names, 1
-      )
-      self.assertCountEqual(list(shard_0) + list(shard_1), ordered_names)
-      self.assertEmpty(set(shard_0) & set(shard_1))
-      # The two heavy decode compiled benchmarks must be split across the two
-      # shards rather than assigned to the same shard.
-      heavy_cases = {
-          "test_benchmark_llama_1b_decode_compiled",
-          "test_benchmark_qwen3_decode_compiled",
-      }
-      self.assertEqual(len(set(shard_0) & heavy_cases), 1)
-      self.assertEqual(len(set(shard_1) & heavy_cases), 1)
-      # Zero-cost skipped cases must also be balanced across shards rather than
-      # collapsing onto the shard with slightly lower active load.
-      skipped_cases = {
-          "test_benchmark_skipped_a_compiled",
-          "test_benchmark_skipped_b_compiled",
-          "test_benchmark_skipped_c_compiled",
-          "test_benchmark_skipped_d_compiled",
-      }
-      self.assertEqual(len(set(shard_0) & skipped_cases), 2)
-      self.assertEqual(len(set(shard_1) & skipped_cases), 2)
+      for offset in range(1, total_shards):
+        iterator = itertools.cycle(range(total_shards))
+        for _ in range(offset):
+          next(iterator)
+        self.assertEqual(
+            loader.shardTestCaseNames(iterator, names, shard_index),
+            expected,
+            msg=f"shard {shard_index}, iterator offset {offset}",
+        )
 
   def test_each_case_runs_in_exactly_one_shard_whatever_the_name_order(self):
     # Each shard is a separate process with its own loader, which can see the

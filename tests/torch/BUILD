@@ -188,7 +188,6 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "distributed_pipelining_microbatch_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "distributed/pipelining/test_microbatch",
 )
 
@@ -348,7 +347,6 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "dynamo_streams_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "dynamo/test_streams",
 )
 
@@ -368,6 +366,12 @@ torch_tpu_torch_test(
 )
 
 torch_tpu_torch_test(
+    name = "export_converter_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "export/test_converter",
+)
+
+torch_tpu_torch_test(
     name = "export_hop_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "export/test_hop",
@@ -380,6 +384,12 @@ torch_tpu_torch_test(
 )
 
 torch_tpu_torch_test(
+    name = "export_passes_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "export/test_passes",
+)
+
+torch_tpu_torch_test(
     name = "export_serialize_test",
     torch_test_module = "export/test_serialize",
 )
@@ -388,6 +398,12 @@ torch_tpu_torch_test(
     name = "export_torchbind_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "export/test_torchbind",
+)
+
+torch_tpu_torch_test(
+    name = "functorch_dim_split_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "functorch/dim/test_split",
 )
 
 torch_tpu_torch_test(
@@ -418,7 +434,7 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "functorch_eager_transforms_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
+    shard_count = 2,
     torch_test_module = "functorch/test_eager_transforms",
 )
 
@@ -475,6 +491,18 @@ torch_tpu_torch_test(
 )
 
 torch_tpu_torch_test(
+    name = "inductor_custom_lowering_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "inductor/test_custom_lowering",
+)
+
+torch_tpu_torch_test(
+    name = "inductor_decompose_mem_bound_mm_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "inductor/test_decompose_mem_bound_mm",
+)
+
+torch_tpu_torch_test(
     name = "inductor_flex_attention_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "inductor/test_flex_attention",
@@ -490,6 +518,12 @@ torch_tpu_torch_test(
     name = "inductor_fp8_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "inductor/test_fp8",
+)
+
+torch_tpu_torch_test(
+    name = "inductor_fused_attention_test",
+    notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "inductor/test_fused_attention",
 )
 
 torch_tpu_torch_test(
@@ -567,27 +601,23 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "nn_convolution_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     shard_count = 8,
     torch_test_module = "nn/test_convolution",
 )
 
 torch_tpu_torch_test(
     name = "nn_dropout_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "nn/test_dropout",
 )
 
 torch_tpu_torch_test(
     name = "nn_embedding_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
-    shard_count = 2,
+    shard_count = 8,
     torch_test_module = "nn/test_embedding",
 )
 
 torch_tpu_torch_test(
     name = "nn_init_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "nn/test_init",
 )
 
@@ -599,7 +629,6 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "nn_multihead_attention_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "nn/test_multihead_attention",
 )
 
@@ -615,14 +644,12 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "nn_pooling_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     shard_count = 4,
     torch_test_module = "nn/test_pooling",
 )
 
 torch_tpu_torch_test(
     name = "profiler_execution_trace_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "profiler/test_execution_trace",
 )
 
@@ -634,7 +661,6 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "profiler_profiler_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     shard_count = 4,
     torch_test_module = "profiler/test_profiler",
 )
@@ -645,26 +671,28 @@ torch_tpu_torch_test(
 )
 
 torch_tpu_torch_test(
-    name = "quantization_core_experimental_bits_test",
+    name = "python_native_tensor_utils_test",
     notap = "b/563402379",  # NOTAP_OK=torch tests
+    torch_test_module = "python_native/test_tensor_utils",
+)
+
+torch_tpu_torch_test(
+    name = "quantization_core_experimental_bits_test",
     torch_test_module = "quantization/core/experimental/test_bits",
 )
 
 torch_tpu_torch_test(
     name = "quantization_core_experimental_floatx_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "quantization/core/experimental/test_floatx",
 )
 
 torch_tpu_torch_test(
     name = "accelerator_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_accelerator",
 )
 
 torch_tpu_torch_test(
     name = "ao_sparsity_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_ao_sparsity",
 )
 
@@ -688,7 +716,6 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "bmm_outer_product_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_bmm_outer_product",
 )
 
@@ -732,7 +759,6 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "dlpack_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_dlpack",
 )
 
@@ -743,7 +769,7 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "expanded_weights_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
+    shard_count = 2,
     torch_test_module = "test_expanded_weights",
 )
 
@@ -772,14 +798,12 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "indexing_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
-    shard_count = 4,
+    shard_count = 8,
     torch_test_module = "test_indexing",
 )
 
 torch_tpu_torch_test(
     name = "legacy_vmap_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_legacy_vmap",
 )
 
@@ -804,7 +828,6 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "matmul_cuda_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_matmul_cuda",
 )
 
@@ -830,7 +853,6 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "native_mha_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_native_mha",
 )
 
@@ -850,13 +872,11 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "numpy_interop_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_numpy_interop",
 )
 
 torch_tpu_torch_test(
     name = "opaque_obj_v2_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_opaque_obj_v2",
 )
 
@@ -896,7 +916,6 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "optim_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     shard_count = 2,
     torch_test_module = "test_optim",
 )
@@ -915,13 +934,11 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "precompile_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_precompile",
 )
 
 torch_tpu_torch_test(
     name = "prims_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_prims",
 )
 
@@ -944,7 +961,6 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "scaled_matmul_cuda_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_scaled_matmul_cuda",
 )
 
@@ -969,20 +985,17 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "serialization_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_serialization",
 )
 
 torch_tpu_torch_test(
     name = "shape_ops_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_shape_ops",
 )
 
 torch_tpu_torch_test(
     name = "sort_and_select_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
-    shard_count = 2,
+    shard_count = 4,
     torch_test_module = "test_sort_and_select",
 )
 
@@ -1039,7 +1052,6 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "testing_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     shard_count = 4,
     torch_test_module = "test_testing",
 )
@@ -1053,13 +1065,11 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "transformers_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_transformers",
 )
 
 torch_tpu_torch_test(
     name = "type_promotion_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     shard_count = 4,
     torch_test_module = "test_type_promotion",
 )
@@ -1073,13 +1083,11 @@ torch_tpu_torch_test(
 
 torch_tpu_torch_test(
     name = "utils_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     torch_test_module = "test_utils",
 )
 
 torch_tpu_torch_test(
     name = "view_ops_test",
-    notap = "b/563402379",  # NOTAP_OK=torch tests
     shard_count = 4,
     torch_test_module = "test_view_ops",
 )

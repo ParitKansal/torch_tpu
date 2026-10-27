@@ -41,6 +41,7 @@
 #include "absl/log/absl_log.h"
 #include "absl/log/log.h"
 #include "c10/core/ScalarType.h"
+#include "c10/core/SymInt.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/to_string.h"
 #include "csrc/common/warnings.h"
@@ -1007,6 +1008,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   ImplStable<OpName::kScaledDotProductFusedAttentionOverrideableBackward>(
       m, AtenScaledDotProductFusedAttentionOverrideableBackward);
   ImplStable<OpName::kScaledGroupedMm>(m, AtenScaledGroupedMm);
+  ImplStable<OpName::kScaledGroupedMmV2>(m, AtenScaledGroupedMmV2);
+  ImplStable<OpName::kScaledGroupedMmV2Out>(m, AtenScaledGroupedMmV2Out);
   ImplStable<OpName::kScaledMm>(m, AtenScaledMm);
   ImplStable<OpName::kScaledMmOut>(m, AtenScaledMmOut);
   ImplStable<OpName::kScaledMmV2>(m, AtenScaledMmV2);
@@ -1086,6 +1089,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
   ImplStable<OpName::kUniform_>(m, AtenUniform_);
   ImplStable<OpName::kUnique2>(m, AtenUnique2);
   ImplStable<OpName::kUniqueConsecutive>(m, AtenUniqueConsecutive);
+  ImplStable<OpName::kUniqueDim>(m, AtenUniqueDim);
   ImplStable<OpName::kUniqueDimConsecutive>(m, AtenUniqueDimConsecutive);
   ImplStable<OpName::kUpsampleBicubic2dAaOut>(m, AtenUpsampleBicubic2dAaOut);
   ImplStable<OpName::kUpsampleBicubic2dBackwardGradInput>(
@@ -1443,28 +1447,31 @@ TORCH_LIBRARY(tpu, m) {
       "_sparse_dense_matmul(Tensor row_pointers, Tensor embedding_ids, Tensor "
       "sample_ids, Tensor gains, Tensor embedding_table, int "
       "device_batch_size, int max_ids_per_partition, int "
-      "max_unique_ids_per_partition) -> Tensor");
+      "max_unique_ids_per_partition, bool enable_minibatching=False) -> "
+      "Tensor");
   m.def(
       "_sparse_dense_matmul_grad_with_adagrad(Tensor row_pointers, Tensor "
       "embedding_ids, Tensor sample_ids, Tensor gains, Tensor embedding_table, "
       "Tensor accumulator, Tensor activations_grad, Tensor learning_rate, "
       "float epsilon, int "
       "device_batch_size, int max_ids_per_partition, int "
-      "max_unique_ids_per_partition, str computation_name) -> (Tensor, "
+      "max_unique_ids_per_partition, str computation_name, bool "
+      "enable_minibatching=False) -> (Tensor, "
       "Tensor)");
   m.def(
       "_sparse_dense_matmul_grad_with_sgd(Tensor row_pointers, Tensor "
       "embedding_ids, Tensor sample_ids, Tensor gains, Tensor embedding_table, "
       "Tensor activations_grad, Tensor learning_rate, int device_batch_size, "
       "int max_ids_per_partition, int max_unique_ids_per_partition, str "
-      "computation_name) -> Tensor");
+      "computation_name, bool enable_minibatching=False) -> Tensor");
   m.def(
       "_sparse_dense_matmul_grad_with_adam(Tensor row_pointers, Tensor "
       "embedding_ids, Tensor sample_ids, Tensor gains, Tensor embedding_table, "
       "Tensor momentum, Tensor velocity, Tensor activations_grad, Tensor "
       "alpha_t, float beta_1, float beta_2, float epsilon, int "
       "device_batch_size, int max_ids_per_partition, int "
-      "max_unique_ids_per_partition, str computation_name) -> (Tensor, Tensor, "
+      "max_unique_ids_per_partition, str computation_name, bool "
+      "enable_minibatching=False) -> (Tensor, Tensor, "
       "Tensor)");
   m.def(
       "_sparse_gather(Tensor row_pointers, Tensor indices, Tensor operand, int "
@@ -1480,8 +1487,8 @@ TORCH_LIBRARY(tpu, m) {
       "int[] "
       "per_feature_batch_sizes, int[] per_feature_dims) -> Tensor[]");
   m.def(
-      "_sparse_dense_matmul_gradient_stack(Tensor[] unstacked_gradients, int "
-      "stacked_batch_size, int stacked_feature_dim) -> Tensor");
+      "_sparse_dense_matmul_gradient_stack(Tensor[] unstacked_gradients, "
+      "SymInt stacked_batch_size, SymInt stacked_feature_dim) -> Tensor");
   m.def(
       "_sparse_map_row(Tensor[] csr_tensors, int[] csr_lengths, Tensor[] "
       "dense_args, str body_mlir, Tensor[] dummy_outputs, int "
@@ -1574,14 +1581,15 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
       +[](const at::Tensor& row_pointers, const at::Tensor& embedding_ids,
           const at::Tensor& sample_ids, const at::Tensor& gains,
           const at::Tensor& embedding_table, int64_t device_batch_size,
-          int64_t max_ids_per_partition,
-          int64_t max_unique_ids_per_partition) -> at::Tensor {
+          int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition,
+          bool /*enable_minibatching*/) -> at::Tensor {
         TT_CHECK_THROW(embedding_table.dim() == 2, error::kInvalidArgument)
             << "expected embedding_table to be a 2D tensor, got a "
             << embedding_table.dim() << "D tensor of shape "
             << ToString(embedding_table.sizes());
-        return at::empty({device_batch_size, embedding_table.size(1)},
-                         embedding_table.options());
+        return at::empty_symint(
+            {c10::SymInt(device_batch_size), embedding_table.sym_size(1)},
+            embedding_table.options());
       });
   ImplInternal<OpName::kSparseGather>(
       m,
@@ -1590,7 +1598,8 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
           int64_t max_non_zeroes_per_row) -> at::Tensor {
         TT_THROW_IF_ERROR(ValidateSparseGatherInputs(
             row_pointers, indices, operand, max_non_zeroes_per_row));
-        return at::empty({indices.size(0), operand.size(1)}, operand.options());
+        return at::empty_symint({indices.sym_size(0), operand.sym_size(1)},
+                                operand.options());
       });
   ImplInternal<OpName::kSparseGatherBackward>(
       m,
@@ -1625,12 +1634,12 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
       });
   ImplInternal<OpName::kSparseDenseMatmulGradientStack>(
       m,
-      +[](at::TensorList unstacked_gradients, int64_t stacked_batch_size,
-          int64_t stacked_feature_dim) -> at::Tensor {
+      +[](at::TensorList unstacked_gradients, c10::SymInt stacked_batch_size,
+          c10::SymInt stacked_feature_dim) -> at::Tensor {
         TT_THROW_IF_ERROR(ValidateSparseDenseMatmulGradientStackInputs(
             unstacked_gradients, stacked_batch_size, stacked_feature_dim));
-        return at::empty({stacked_batch_size, stacked_feature_dim},
-                         unstacked_gradients[0].options());
+        return at::empty_symint({stacked_batch_size, stacked_feature_dim},
+                                unstacked_gradients[0].options());
       });
   ImplInternal<OpName::kSparseMapRow>(
       m,
@@ -1647,9 +1656,9 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
         std::vector<at::Tensor> results;
         results.reserve(dummy_outputs.size());
         for (const auto& dummy : dummy_outputs) {
-          results.push_back(
-              at::empty(dummy.sizes(),
-                        csr_tensors[0].options().dtype(dummy.scalar_type())));
+          results.push_back(at::empty_symint(
+              dummy.sym_sizes(),
+              csr_tensors[0].options().dtype(dummy.scalar_type())));
         }
         return results;
       });
@@ -1660,7 +1669,7 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
           const at::Tensor& embedding_table, const at::Tensor& activations_grad,
           const at::Tensor& learning_rate, int64_t device_batch_size,
           int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition,
-          std::string_view computation_name) {
+          std::string_view computation_name, bool /*enable_minibatching*/) {
         return at::empty_like(embedding_table);
       });
   ImplInternal<OpName::kSparseDenseMatmulGradWithAdagrad>(
@@ -1671,7 +1680,7 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
           const at::Tensor& activations_grad, const at::Tensor& learning_rate,
           double epsilon, int64_t device_batch_size,
           int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition,
-          std::string_view computation_name) {
+          std::string_view computation_name, bool /*enable_minibatching*/) {
         return std::make_tuple(at::empty_like(embedding_table),
                                at::empty_like(accumulator));
       });
@@ -1684,7 +1693,7 @@ TORCH_LIBRARY_IMPL(tpu, Meta, m) {
           const at::Tensor& alpha_t, double beta_1, double beta_2,
           double epsilon, int64_t device_batch_size,
           int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition,
-          std::string_view computation_name) {
+          std::string_view computation_name, bool /*enable_minibatching*/) {
         return std::make_tuple(at::empty_like(embedding_table),
                                at::empty_like(momentum),
                                at::empty_like(velocity));

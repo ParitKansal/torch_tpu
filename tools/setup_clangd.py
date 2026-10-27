@@ -23,6 +23,7 @@ run performs the following steps:
      symlink is in place.
   2. Regenerate compile_commands.json in the repository root.
   3. Build the C++ targets so generated files (e.g. proto headers) exist.
+  4. Set up the clangd extension for VSCode if the `code` CLI is available.
 In cases where users have run `bazel build` on targets of interest recently,
 generated files may already exist on disk. Users can use `--no-build` option to
 skip the build step.
@@ -49,6 +50,7 @@ import dataclasses
 import json
 import logging  # PYTHON_LOGGING_OK=tool setup
 import pathlib
+import shutil
 import subprocess
 import sys
 from typing import Any, Final
@@ -60,6 +62,10 @@ _UNSUPPORTED_ARGS: Final[frozenset[str]] = frozenset([
 
 _DEFAULT_TARGET_PATTERN: Final[str] = "//..."
 _REPO_ROOT: Final[pathlib.Path] = pathlib.Path(__file__).resolve().parents[1]
+
+_CLANGD_EXTENSION: Final[str] = "llvm-vs-code-extensions.vscode-clangd"
+# The Microsoft C++ extension, whose IntelliSense conflicts with clangd.
+_MS_CPPTOOLS_EXTENSION: Final[str] = "ms-vscode.cpptools"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -255,23 +261,70 @@ def _bazel_build(target_patterns: Iterable[str]) -> None:
     )
 
 
+def _setup_vscode_extensions() -> None:
+  """Sets up the clangd extension for VSCode if the `code` CLI is available.
+
+  Also warns if the conflicting Microsoft C++ extension is installed.
+  """
+  if shutil.which("code") is None:
+    logging.info(
+        "VSCode CLI `code` not found. Install the clangd extension via UI: "
+        "https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-clangd",
+    )
+    return
+
+  # Extension IDs are case-insensitive.
+  installed = (
+      subprocess.run(
+          ["code", "--list-extensions"],
+          stdout=subprocess.PIPE,
+          check=False,
+          text=True,
+      )
+      .stdout.lower()
+      .split()
+  )
+  if _MS_CPPTOOLS_EXTENSION in installed:
+    logging.warning(
+        "The Microsoft C++ extension interferes with clangd. Uninstall it"
+        " with:\n"
+        "  code --uninstall-extension %s",
+        _MS_CPPTOOLS_EXTENSION,
+    )
+  if _CLANGD_EXTENSION in installed:
+    logging.info("The VSCode clangd extension is already installed.")
+    return
+
+  command = ["code", "--install-extension", _CLANGD_EXTENSION]
+  if subprocess.run(command, check=False).returncode != 0:
+    logging.warning(
+        "Failed to install the VSCode clangd extension. Try installing it "
+        "manually with:\n"
+        "  %s",
+        " ".join(command),
+    )
+
+
 def _setup_clangd(args: argparse.Namespace) -> None:
   """Sets up clangd configurations following the given arguments."""
-  logging.info("[1/3] Setting up the external directory symlink...")
+  logging.info("[1/4] Setting up the external directory symlink...")
   _setup_external_dir_symlink()
 
-  logging.info("[2/3] Generating compile_commands.json...")
+  logging.info("[2/4] Generating compile_commands.json...")
   _generate_compile_commands(args.target_patterns)
 
   if args.no_build:
-    logging.info("[3/3] Skipping the Bazel build (--no-build is specified)...")
+    logging.info("[3/4] Skipping the Bazel build (--no-build is specified)...")
   else:
     logging.info(
-        "[3/3] Building %s so generated files exist (pass --no-build to"
+        "[3/4] Building %s so generated files exist (pass --no-build to"
         " skip)...",
         " ".join(args.target_patterns),
     )
     _bazel_build(args.target_patterns)
+
+  logging.info("[4/4] Setting up the clangd extension for VSCode...")
+  _setup_vscode_extensions()
 
 
 def main() -> None:

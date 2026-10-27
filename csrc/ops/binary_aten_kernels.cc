@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "ATen/OpMathType.h"
 #include "ATen/core/ATen_fwd.h"
 #include "ATen/ops/result_type.h"
 #include "absl/log/absl_log.h"
@@ -69,15 +70,19 @@ namespace internal {
 
 // When PyTorch executes mixed-device operations (e.g., `tpu_tensor +
 // cpu_scalar`), the dispatcher bypasses the standard backend device guards. We
-// must manually move 1-element CPU tensors to the TPU to avoid crashes when we
-// later try to extract their TPU buffers.
+// must manually move 0-D CPU scalar tensors to the TPU when paired with a TPU
+// tensor to avoid crashes when we later try to extract their TPU buffers.
 absl::StatusOr<std::vector<at::Tensor>> MoveCpuScalarsToTpu(
     absl::Span<const at::Tensor> tensors) {
+  const bool has_tpu_input =
+      tensors.size() >= 2 &&
+      (IsPrivateUse1Device(tensors[0]) || IsPrivateUse1Device(tensors[1]));
   std::vector<at::Tensor> tpu_tensors;
   tpu_tensors.reserve(tensors.size());
   for (const auto& tensor : tensors) {
     // MakeTensor uses a cache to deduplicate scalar tensors.
-    if (tensor.device().type() == c10::DeviceType::CPU && tensor.numel() == 1) {
+    if (has_tpu_input && tensor.device().type() == c10::DeviceType::CPU &&
+        tensor.dim() == 0) {
       TT_ASSIGN_OR_RETURN(at::Tensor tpu_tensor, MakeTensor(tensor.item()));
       tpu_tensors.push_back(std::move(tpu_tensor));
     } else {
@@ -225,6 +230,24 @@ absl::Status DispatchBinaryOpOut(const at::Tensor& self,
       << "expected out tensor to be on " << GetPrivateUse1DeviceDebugName()
       << ", got " << out.device();
 
+  at::ScalarType expected_result_type;
+  if (opts.result_dtype.has_value()) {
+    expected_result_type = ConvertTo<at::ScalarType>(*opts.result_dtype);
+  } else {
+    expected_result_type = at::result_type(self, other);
+    // For operations that require floating-point computation (e.g., true
+    // division or ldexp), PyTorch promotes integral inputs to the default
+    // float dtype. The expected mathematical result dtype is therefore the
+    // default float dtype rather than the integral promoted type, ensuring
+    // ValidateOutDtype catches invalid downcasts to `out`.
+    if (opts.force_float_inputs &&
+        c10::isIntegralType(expected_result_type, /*includeBool=*/true)) {
+      expected_result_type = c10::get_default_dtype_as_scalartype();
+    }
+  }
+  TT_RETURN_IF_ERROR(
+      ValidateOutDtype(out, expected_result_type, opts.allow_out_dtype_cast));
+
   TT_ASSIGN_OR_RETURN(auto tpu_tensors, MoveCpuScalarsToTpu({self, other}));
   const at::Tensor& self_tpu = tpu_tensors[0];
   const at::Tensor& other_tpu = tpu_tensors[1];
@@ -277,8 +300,8 @@ absl::Status TernaryOpOut(const at::Tensor& self, const at::Tensor& other,
                           MlirTernaryOpBuilder op_builder,
                           TernaryOpOptions opts) {
   TT_RET_CHECK(IsPrivateUse1Device(out), error::kInvalidArgument)
-      << "expected output tensor to be on 'tpu' device, got '" << out.device()
-      << "'";
+      << "expected out tensor to be on " << GetPrivateUse1DeviceDebugName()
+      << ", got " << out.device();
 
   at::ScalarType expected_result_type;
   if (opts.result_dtype.has_value()) {
@@ -325,8 +348,10 @@ absl::Status TernaryOpOut(const at::Tensor& self, const at::Tensor& other,
       promoted_scalar_type = c10::get_default_dtype_as_scalartype();
     }
   }
-  TT_ASSIGN_OR_RETURN(mlir::ElementType computation_dtype,
+  TT_ASSIGN_OR_RETURN(mlir::ElementType promoted_dtype,
                       internal::ToElementType(promoted_scalar_type));
+  TT_ASSIGN_OR_RETURN(mlir::ElementType computation_dtype,
+                      InferComputationDtype(promoted_dtype));
   TT_ASSIGN_OR_RETURN(const auto out_element_type,
                       ConvertTo<mlir::ElementType>(out.scalar_type()));
 
@@ -362,6 +387,34 @@ absl::Status ValidateAlphaTypeSupported(const at::Scalar& alpha) {
            << ToString(alpha_element_type)
            << " alpha value is not yet supported";
   }
+  return absl::OkStatus();
+}
+
+absl::Status ValidateAddAlphaInputs(at::ScalarType promoted_scalar_type,
+                                    const at::Scalar& alpha,
+                                    at::ScalarType opmath_type) {
+  TT_RET_CHECK(
+      !alpha.isBoolean() || promoted_scalar_type == at::ScalarType::Bool,
+      error::kInvalidArgument)
+      << "boolean alpha only supported for boolean results";
+  TT_RET_CHECK(c10::isFloatingType(promoted_scalar_type) ||
+                   c10::isComplexType(promoted_scalar_type) ||
+                   alpha.isIntegral(/*includeBool=*/true),
+               error::kInvalidArgument)
+      << "for integral input tensors, argument alpha must not be a floating "
+         "point number";
+  TT_RET_CHECK(c10::isComplexType(promoted_scalar_type) || !alpha.isComplex(),
+               error::kInvalidArgument)
+      << "for non-complex input tensors, argument alpha must not be a "
+         "complex number";
+
+  TT_RETURN_IF_ERROR(ValidateAlphaTypeSupported(alpha));
+
+  TT_ASSIGN_OR_RETURN(const bool can_cast_alpha,
+                      CanCastScalarWithoutOverflow(alpha, opmath_type));
+  TT_RET_CHECK(can_cast_alpha, error::kInvalidArgument)
+      << "value cannot be converted to type " << ToString(opmath_type)
+      << " without overflow";
   return absl::OkStatus();
 }
 
@@ -589,11 +642,18 @@ absl::Status ValidateBitwiseOpsInputs(const at::Tensor& self,
 
 absl::Status ValidateBitwiseShiftInputs(const at::Tensor& self,
                                         const at::Tensor& other) {
-  TT_RET_CHECK(IsInteger(self), error::kInvalidArgument)
+  const bool self_is_int = IsInteger(self);
+  const bool other_is_int = IsInteger(other);
+  const bool self_is_bool = IsBool(self);
+  const bool other_is_bool = IsBool(other);
+
+  TT_RET_CHECK(self_is_int || (self_is_bool && other_is_int),
+               error::kInvalidArgument)
       << "expected the dtype of the first argument to be integer, got "
       << ToString(self.scalar_type());
 
-  TT_RET_CHECK(IsInteger(other), error::kInvalidArgument)
+  TT_RET_CHECK(other_is_int || (other_is_bool && self_is_int),
+               error::kInvalidArgument)
       << "expected the dtype of the second argument to be integer, got "
       << ToString(other.scalar_type());
 
@@ -649,6 +709,14 @@ absl::Status ValidatePowInputs(const T& self, const U& exponent) {
     TT_RET_CHECK(!IsBool(result_type), error::kInvalidArgument)
         << "expected non-boolean first argument, got "
         << ToString(GetScalarType(self));
+  }
+  if constexpr (std::is_same_v<T, at::Tensor> &&
+                std::is_same_v<U, at::Scalar>) {
+    TT_RET_CHECK(
+        !(c10::isIntegralType(self.scalar_type(), /*includeBool=*/true) &&
+          exponent.isIntegral(/*includeBool=*/true) && exponent.toLong() < 0),
+        error::kInvalidArgument)
+        << "integers to negative integer powers are not allowed";
   }
   return absl::OkStatus();
 }
@@ -1080,9 +1148,10 @@ at::Tensor& AtenAddOut(const at::Tensor& self, const at::Tensor& other,
                        const at::Scalar& alpha, at::Tensor& out) {
   auto promoted_alpha = PromoteScalar(alpha).AvoidPromoting(ScalarValue::kOne);
   TT_KERNEL(OpName::kAddOut, param_keys, (self, other, promoted_alpha, out), {
-    TT_THROW_IF_ERROR(ValidateAlphaTypeSupported(alpha));
-
     const at::ScalarType promoted_scalar_type = at::result_type(self, other);
+    const at::ScalarType opmath_type = at::toOpMathType(promoted_scalar_type);
+    TT_THROW_IF_ERROR(
+        ValidateAddAlphaInputs(promoted_scalar_type, alpha, opmath_type));
 
     // As an optimization, skip the scaling if alpha is 1.
     if (promoted_alpha.IsOne()) {
@@ -1093,7 +1162,7 @@ at::Tensor& AtenAddOut(const at::Tensor& self, const at::Tensor& other,
     }
 
     TT_ASSIGN_OR_THROW(const at::Tensor alpha_tensor,
-                       promoted_alpha.GetTensor(promoted_scalar_type));
+                       promoted_alpha.GetTensor(opmath_type));
 
     auto op_builder =
         [](mlir::MlirOp self_op, mlir::MlirOp other_op,

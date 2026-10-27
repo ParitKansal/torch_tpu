@@ -6803,7 +6803,8 @@ std::tuple<at::Tensor, at::Tensor> AtenGruInputForward(
               const std::vector<DeviceBufferRef> result_buffers,
               DispatchRngOpGeneral(
                   /*generator=*/std::nullopt,
-                  [&](at::Tensor rng_state)
+                  [&]  // REF_CAPTURE_OK=called synchronously
+                  (at::Tensor rng_state)
                       -> absl::StatusOr<std::vector<DeviceBufferRef>> {
                     return GruInputImpl(input, hx, params, has_biases,
                                         num_layers, dropout, train,
@@ -6867,7 +6868,8 @@ AtenGruInputForwardCached(const at::Tensor& input, const at::Tensor& hx,
           TT_ASSIGN_OR_THROW(const std::vector<DeviceBufferRef> result_buffers,
                              DispatchRngOpGeneral(
                                  /*generator=*/std::nullopt,
-                                 [&](at::Tensor rng_state) {
+                                 [&]  // REF_CAPTURE_OK=called synchronously
+                                 (at::Tensor rng_state) {
                                    saved_rng_state = rng_state;
                                    return GruInputImpl(
                                        input, hx, params, has_biases,

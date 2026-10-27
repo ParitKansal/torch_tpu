@@ -1,0 +1,59 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The daily staleness workflow (`daily_project_management.yml`) only clears
+# the `stale` label on its next scheduled run, so an item that just received a
+# comment could still look stale for up to a day. This workflow removes the
+# label as soon as someone comments on an issue or pull request.
+name: Remove Stale Label on Comment
+
+"on":
+  # `issue_comment` fires for comments on both issues and pull requests, and
+  # gets a write token even for pull requests from forks. Safe because the
+  # job checks out no code and never reads the comment body.
+  issue_comment:  # zizmor: ignore[dangerous-triggers]
+    types: [created]
+
+permissions: {}
+
+jobs:
+  remove-stale-label:
+    # Comments posted with `GITHUB_TOKEN` (e.g. the staleness notice itself)
+    # never trigger workflows, but skip other bots too: only human activity
+    # should take an item out of the `stale` state.
+    if: >-
+      contains(github.event.issue.labels.*.name, 'stale') &&
+      github.event.comment.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write        # Remove labels from issues.
+      pull-requests: write # Remove labels from PRs.
+    steps:
+      - name: Remove the stale label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+        # The issues API also serves pull requests. A 404 means the label was
+        # already removed, e.g. by a concurrent run.
+        run: |
+          if ! output="$(gh api --method DELETE \
+              "repos/${GH_REPO}/issues/${NUMBER}/labels/stale" 2>&1)"; then
+            if [[ "${output}" == *"HTTP 404"* ]]; then
+              echo "The stale label was already removed from #${NUMBER}."
+            else
+              echo "${output}" >&2
+              exit 1
+            fi
+          fi

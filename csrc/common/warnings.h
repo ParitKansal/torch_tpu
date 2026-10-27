@@ -101,16 +101,17 @@ constexpr bool IsDeprecationWarning(WarningCategory category) {
 // process, unless `c10::WarningUtils::set_warnAlways(true)` (e.g.
 // `torch.set_warn_always(True)`) is in effect, like `TORCH_WARN_ONCE`. Each
 // expansion has its own block scope, so the once-state is per call site.
-#define TT_WARN_ONCE(category, ...)                                \
-  do {                                                             \
-    if (::c10::WarningUtils::get_warnAlways()) {                   \
-      TT_WARN(category, __VA_ARGS__);                              \
-    } else {                                                       \
-      [[maybe_unused]] static const bool tt_warn_once_done = [&] { \
-        TT_WARN(category, __VA_ARGS__);                            \
-        return true;                                               \
-      }();                                                         \
-    }                                                              \
+#define TT_WARN_ONCE(category, ...)                          \
+  do {                                                       \
+    if (::c10::WarningUtils::get_warnAlways()) {             \
+      TT_WARN(category, __VA_ARGS__);                        \
+    } else {                                                 \
+      [[maybe_unused]] static const bool tt_warn_once_done = \
+          [&] { /* REF_CAPTURE_OK=called locally */          \
+                TT_WARN(category, __VA_ARGS__);              \
+                return true;                                 \
+          }();                                               \
+    }                                                        \
   } while (false)
 
 #endif  // TORCH_TPU_CSRC_COMMON_WARNINGS_H_

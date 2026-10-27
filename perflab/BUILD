@@ -268,7 +268,6 @@ torch_tpu_py_library(
         ":known_failures",
         ":mode",
         ":registry",
-        ":step_lib",
         ":target",
         "//shims/absl_py/flags",
         "//shims/absl_py/logging",
@@ -330,8 +329,17 @@ torch_tpu_py_test(
         "requires-net:external",
         "requires-tpu-v5lite",
     ],
+    # The torchtitan dep (via models:qwen3_8) exceeds the Forge input file limit
+    # with precompiled .pyc inputs.
+    use_precompile = False,
     use_tcmalloc = True,
-    deps = [
+    deps = if_oss(
+        [],
+        [
+            "//perflab/models:muse_glimmer",
+            "//perflab/models:qwen3_8",
+        ],
+    ) + [
         ":base_test",
         ":cases",
         ":common",
@@ -392,8 +400,17 @@ torch_tpu_py_test(
         "nofastbuild",  # Runs in the .opt presubmit.
         "nosan",  # *san tests provide no benefit for benchmarks.
     ],
+    # The torchtitan dep (via models:qwen3_8) exceeds the Forge input file limit
+    # with precompiled .pyc inputs.
+    use_precompile = False,
     use_tcmalloc = True,
-    deps = [
+    deps = if_oss(
+        [],
+        [
+            "//perflab/models:muse_glimmer",
+            "//perflab/models:qwen3_8",
+        ],
+    ) + [
         ":base_test",
         ":cases",
         ":common",
@@ -453,8 +470,17 @@ torch_tpu_py_test(
         "nofastbuild",
         "nosan",  # *san tests provide no benefit for benchmarks.
     ],
+    # The torchtitan dep (via models:qwen3_8) exceeds the Forge input file limit
+    # with precompiled .pyc inputs.
+    use_precompile = False,
     use_tcmalloc = True,
-    deps = [
+    deps = if_oss(
+        [],
+        [
+            "//perflab/models:muse_glimmer",
+            "//perflab/models:qwen3_8",
+        ],
+    ) + [
         ":base_test",
         ":cases",
         ":common",

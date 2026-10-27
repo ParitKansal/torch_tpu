@@ -305,7 +305,7 @@ absl::StatusOr<MlirOpResults<2>> BuildAdaptiveMaxPool2dShlo(
         /*inputs=*/{batch_input, iota_broadcast},
         /*init_values=*/{init_value, init_invalid_iota},
         /*body=*/
-        [&](mlir::RegionBuilder& body) {
+        [&](mlir::RegionBuilder& body) {  // REF_CAPTURE_OK=called synchronously
           mlir::stablehlo::buildMaxAndArgmaxBody(
               element_type, index_type, body.getRegion(), body.getOpBuilder());
         },

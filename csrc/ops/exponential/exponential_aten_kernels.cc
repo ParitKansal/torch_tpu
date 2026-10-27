@@ -110,7 +110,8 @@ at::Tensor& AtenExponential_(at::Tensor& self, double lambd,
 
         TT_THROW_IF_ERROR(DispatchRngOp(
             self, generator,
-            [&](at::Tensor rng_input_state)
+            [&]  // REF_CAPTURE_OK=called synchronously
+            (at::Tensor rng_input_state)
                 -> absl::StatusOr<std::vector<DeviceBufferRef>> {
               TT_ASSIGN_OR_RETURN(
                   auto buf,

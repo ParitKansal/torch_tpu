@@ -146,7 +146,7 @@ mlir::MlirOp ConvolutionResultSize(const ConvolutionWindow& window,
                                    mlir::MlirOp size) {
   mlir::MlirBuilder& builder = size.getBuilder();
   const mlir::Type type = GetElementTypeOrSelf(size);
-  auto constant = [&](const int64_t value) {
+  auto constant = [&](const int64_t value) {  // REF_CAPTURE_OK=called locally
     return MakeScalarConstant(builder, value, type);
   };
   if (window.lhs_dilation != 1) {
@@ -1219,8 +1219,9 @@ std::string BuildModuleNameFromPyContext(
   // until we hit a viable user frame of the form
   //   NameLoc(funcname, FileLineColLoc(filename, line, col));
   // See `torch_tpu::MakeMlirLocation` for more details on this format.
-  auto result =
-      location->walk([&](mlir::Location child_loc) -> mlir::WalkResult {
+  auto result = location->walk(
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (mlir::Location child_loc) -> mlir::WalkResult {
         ABSL_VLOG(1) << "[BuildModuleNameFromPyContext] childLoc: "
                      << mlir::debugString(child_loc);
         auto name_loc = mlir::dyn_cast<mlir::NameLoc>(child_loc);
@@ -1727,10 +1728,12 @@ absl::Status HandleCollapseReshape(
     }
     if (!contains_dynamic_input) continue;
 
-    const int64_t output_group_bounded_size = std::accumulate(
-        group.begin(), group.end(), 1L, [&](int64_t acc, int64_t inputIdx) {
-          return acc * op_dims[inputIdx].size;
-        });
+    const int64_t output_group_bounded_size =
+        std::accumulate(group.begin(), group.end(), 1L,
+                        [&]  // REF_CAPTURE_OK=called synchronously
+                        (int64_t acc, int64_t inputIdx) {
+                          return acc * op_dims[inputIdx].size;
+                        });
     int64_t output_bound_dim = outputIdx;
     int64_t output_dyn_bound = output_group_bounded_size;
 
@@ -1778,9 +1781,10 @@ absl::Status HandleExpandReshape(
           op_dims[inputIdx].size;  // Bound is directly transferred
     } else {
       Dimensions non_one_output_dims;
-      absl::c_copy_if(
-          outputGroup, std::back_inserter(non_one_output_dims),
-          [&](int64_t dim) { return static_shape_after[dim] != 1; });
+      absl::c_copy_if(outputGroup, std::back_inserter(non_one_output_dims),
+                      [&](int64_t dim) {  // REF_CAPTURE_OK=called synchronously
+                        return static_shape_after[dim] != 1;
+                      });
       if (non_one_output_dims.size() == 1) {
         output_bound_dim = non_one_output_dims[0];
         output_dyn_bound =

@@ -16,13 +16,16 @@
 
 #include "csrc/eager/tensor_to_buffer.h"
 
+#include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ATen/core/ATen_fwd.h"
 #include "absl/cleanup/cleanup.h"
 #include "absl/types/span.h"
-#include "csrc/common/context_states.h"
+#include "c10/core/TensorImpl.h"
+#include "c10/util/intrusive_ptr.h"
 #include "csrc/common/dimension_types.h"
 #include "csrc/common/status_test_utils.h"
 #include "csrc/eager/device_buffer.h"
@@ -287,6 +290,68 @@ TEST(TensorToBufferTest, GetBuffersDonatedAliased) {
   ASSERT_EQ(read2_deferred_op->inputs().size(), 1);
   EXPECT_EQ(read2_deferred_op->inputs()[0], base_buffer);
   EXPECT_THAT(read2_deferred_op->donated_indices(), testing::ElementsAre(0));
+}
+
+TEST(TensorToBufferTest, AssignBufferToAtTensorBumpVersion) {
+  ScopedPythonContextCapturer capturer(OpName::kAdd);
+  EagerMode prev_mode = GetEagerMode();
+  SetEagerMode(EagerMode::kInternalDeferAll);
+  auto cleanup_mode =
+      absl::MakeCleanup([prev_mode]() { SetEagerMode(prev_mode); });
+  constexpr auto f32_type = mlir::ElementType::F32;
+
+  TT_ASSERT_OK_AND_ASSIGN(auto buf0,
+                          CreateEmptyDeviceBufferRef({2, 3}, f32_type));
+  TT_ASSERT_OK_AND_ASSIGN(auto buf1,
+                          CreateEmptyDeviceBufferRef({2, 3}, f32_type));
+  TT_ASSERT_OK_AND_ASSIGN(auto buf2,
+                          CreateEmptyDeviceBufferRef({2, 3}, f32_type));
+  TT_ASSERT_OK_AND_ASSIGN(auto buf3,
+                          CreateEmptyDeviceBufferRef({2, 3}, f32_type));
+  at::Tensor tensor = MakeTensor(buf0);
+  c10::Storage storage_copy = tensor.storage();
+  at::Tensor view(c10::make_intrusive<c10::TensorImpl>(
+      c10::TensorImpl::VIEW, std::move(storage_copy), tensor.key_set(),
+      tensor.dtype()));
+  view.unsafeGetTensorImpl()->set_version_counter(
+      tensor.unsafeGetTensorImpl()->version_counter());
+  uint32_t initial_version =
+      tensor.unsafeGetTensorImpl()->version_counter().current_version();
+  EXPECT_EQ(view.unsafeGetTensorImpl()->version_counter().current_version(),
+            initial_version);
+
+  // By default (bump_version = true), assigning a buffer bumps the version on
+  // both the tensor and its view.
+  ASSERT_TRUE(AssignBufferToAtTensor(buf1, tensor).ok());
+  TT_ASSERT_OK_AND_ASSIGN(auto read_buf1, GetBuffer(tensor));
+  EXPECT_EQ(read_buf1, buf1);
+  EXPECT_EQ(tensor.unsafeGetTensorImpl()->version_counter().current_version(),
+            initial_version + 1);
+  EXPECT_EQ(view.unsafeGetTensorImpl()->version_counter().current_version(),
+            initial_version + 1);
+
+  // With bump_version = false, the buffer is updated without bumping the
+  // version counter on either the tensor or its view.
+  ASSERT_TRUE(AssignBufferToAtTensor(buf2, tensor,
+                                     /*enable_autodonation=*/false,
+                                     /*bump_version=*/false)
+                  .ok());
+  TT_ASSERT_OK_AND_ASSIGN(auto read_buf2, GetBuffer(tensor));
+  EXPECT_EQ(read_buf2, buf2);
+  EXPECT_EQ(tensor.unsafeGetTensorImpl()->version_counter().current_version(),
+            initial_version + 1);
+  EXPECT_EQ(view.unsafeGetTensorImpl()->version_counter().current_version(),
+            initial_version + 1);
+
+  // A subsequent assignment with bump_version = true continues to bump the
+  // version counter to initial_version + 2 across views.
+  ASSERT_TRUE(AssignBufferToAtTensor(buf3, tensor).ok());
+  TT_ASSERT_OK_AND_ASSIGN(auto read_buf3, GetBuffer(tensor));
+  EXPECT_EQ(read_buf3, buf3);
+  EXPECT_EQ(tensor.unsafeGetTensorImpl()->version_counter().current_version(),
+            initial_version + 2);
+  EXPECT_EQ(view.unsafeGetTensorImpl()->version_counter().current_version(),
+            initial_version + 2);
 }
 
 }  // namespace

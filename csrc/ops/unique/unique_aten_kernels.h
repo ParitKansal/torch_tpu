@@ -17,6 +17,7 @@
 #ifndef TORCH_TPU_CSRC_OPS_UNIQUE_UNIQUE_ATEN_KERNELS_H_
 #define TORCH_TPU_CSRC_OPS_UNIQUE_UNIQUE_ATEN_KERNELS_H_
 
+#include <cstdint>
 #include <tuple>
 
 #include "ATen/core/TensorBody.h"
@@ -25,6 +26,10 @@ namespace torch_tpu {
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> AtenUnique2(
     const at::Tensor& self, bool sorted, bool return_inverse,
+    bool return_counts);
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> AtenUniqueDim(
+    const at::Tensor& self, int64_t dim, bool sorted, bool return_inverse,
     bool return_counts);
 
 }  // namespace torch_tpu

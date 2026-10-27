@@ -67,6 +67,12 @@ class SeededTest(parameterized.TestCase):  # ABSLTEST_OK=base seed class
     if self.seed_in_setup:
       # Set the random seed for Python and Torch.
       seed_rngs(self.test_random_seed)
+    # Clear Dynamo's compile caches so compiled graphs from earlier test methods
+    # cannot be reused by this one. Newer PyTorch versions do this in
+    # common_utils.TestCase.run(), but older releases (e.g. the one used in
+    # OSS CI) do not, and stale cache entries without sufficient guards can
+    # leak across tests.
+    torch._dynamo.reset()  # pylint: disable=protected-access
     # Disable Dynamo's recompilation limit (default 8) so tests that call
     # torch.compile across many inputs/dtypes/subtests do not hit the cache
     # limit and silently fall back to eager execution.

@@ -23,11 +23,9 @@ such program and checks its results.
 from absl.testing import absltest
 import torch
 from torch import distributed as dist
-import torch.multiprocessing as mp
 from torch_tpu._internal.utils import test_utils as utils
 from torch_tpu._internal.distributed import multiprocessing
-from tests import seed_test_utils
-from tests.distributed import distributed_utils
+from tests.distributed import continuous_test_utils
 
 
 def _my_group(rank: int, layout: list[list[int]]) -> dist.ProcessGroup:
@@ -51,7 +49,6 @@ def run_pcp_x_tp() -> None:
   Tensor-parallel groups are pairs of consecutive ranks; context-parallel
   groups are the ranks with the same tensor-parallel rank.
   """
-  dist.init_process_group("tpu")
   rank = dist.get_rank()
   world_size = dist.get_world_size()
   assert world_size == 8
@@ -83,7 +80,6 @@ def run_tp_x_dcp() -> None:
   The tensor-parallel group is the world; decode context-parallel groups are
   consecutive halves of it.
   """
-  dist.init_process_group("tpu")
   rank = dist.get_rank()
   world_size = dist.get_world_size()
   assert world_size == 8
@@ -107,36 +103,15 @@ def run_tp_x_dcp() -> None:
   utils.assert_close(res, expected)
 
 
-def _run_with_cleanup(test_fn) -> None:
-  """Runs `test_fn`, then tears down the default process group."""
-  try:
-    test_fn()
-  except BaseException:
-    if dist.is_initialized():
-      dist.destroy_process_group()
-    raise
-  if dist.is_initialized():
-    dist.barrier()
-    dist.destroy_process_group()
+class MixedGroupProgramsTest(continuous_test_utils.TpuMultiProcContinuousTest):
+  world_size = 8
 
+  def test_pcp_x_tp(self) -> None:
+    run_pcp_x_tp()
 
-class MixedGroupProgramsTest(seed_test_utils.MultiProcessRepeatableTest):
-
-  def test_pcp_x_tp(self):
-    distributed_utils.dist_run(
-        nproc_per_node=8,
-        fn=_run_with_cleanup,
-        test_fn=run_pcp_x_tp,
-    )
-
-  def test_tp_x_dcp(self):
-    distributed_utils.dist_run(
-        nproc_per_node=8,
-        fn=_run_with_cleanup,
-        test_fn=run_tp_x_dcp,
-    )
+  def test_tp_x_dcp(self) -> None:
+    run_tp_x_dcp()
 
 
 if __name__ == "__main__":
-  mp.set_start_method("spawn")
   multiprocessing.handle_test_main(absltest.main)

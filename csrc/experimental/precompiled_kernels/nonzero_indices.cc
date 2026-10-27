@@ -98,7 +98,9 @@ void FlushTail(kiln::Ref count, kiln::Ref stage_rows, kiln::Ref stage_cols,
                kiln::Ref output, kiln::Semaphore sem) {
   kiln::Scalar n = kiln::Scalar(count);
   kiln::If((n & 127) != 0,
-           [&] { Flush(n & -128, stage_rows, stage_cols, output, sem); });
+           [&] {  // REF_CAPTURE_OK=called synchronously
+             Flush(n & -128, stage_rows, stage_cols, output, sem);
+           });
 }
 
 // Place one pair at count % 128 and advance the device counter.
@@ -113,7 +115,9 @@ void Append(kiln::Scalar row, kiln::Scalar col, kiln::Ref count,
   kiln::Scalar next = n + 1;
   count = next;
   kiln::If((next & 127) == 0,
-           [&] { Flush(n & -128, stage_rows, stage_cols, output, sem); });
+           [&] {  // REF_CAPTURE_OK=called synchronously
+             Flush(n & -128, stage_rows, stage_cols, output, sem);
+           });
 }
 
 // Gather a runtime-selected lane, then extract its replicated value as a
@@ -171,25 +175,37 @@ absl::StatusOr<kiln::Kernel> BuildNonzeroIndices() {
         // Coordinates fit S32: zero the native int64 high words once; the scan
         // and flushes only write low words.
         kiln::Scalar num_tiles = output.Dim(0);
-        kiln::For(num_tiles >> 1, num_tiles, [&](kiln::Scalar tile_index) {
-          WriteTile(stage_rows, tile_index, output, sem);
-        });
+        kiln::For(num_tiles >> 1, num_tiles,
+                  [&]  // REF_CAPTURE_OK=called synchronously
+                  (kiln::Scalar tile_index) {
+                    WriteTile(stage_rows, tile_index, output, sem);
+                  });
 
         // Emit the complete scalar scan, then flush the remaining output
         // coordinates.
         kiln::Scalar num_rows = input.Dim(0), num_cols = input.Dim(1);
-        kiln::For(0, num_rows, [&](kiln::Scalar row) {
-          kiln::For(0, num_cols, kLanes, [&](kiln::Scalar col) {
-            kiln::Tile values = LoadRow(row, col, input, tile, sem);
-            kiln::Scalar limit = Min(num_cols - col, kLanes);
-            kiln::For(0, limit, [&](kiln::Scalar lane) {
-              kiln::If(IsNonzero(values, lane), [&] {
-                Append(row, col + lane, count, position, stage_rows, stage_cols,
-                       output, sem);
-              });
+        kiln::For(
+            0, num_rows,
+            [&](kiln::Scalar row) {  // REF_CAPTURE_OK=called synchronously
+              kiln::For(
+                  0, num_cols, kLanes,
+                  [&]  // REF_CAPTURE_OK=called synchronously
+                  (kiln::Scalar col) {
+                    kiln::Tile values = LoadRow(row, col, input, tile, sem);
+                    kiln::Scalar limit = Min(num_cols - col, kLanes);
+                    kiln::For(
+                        0, limit,
+                        [&]  // REF_CAPTURE_OK=called synchronously
+                        (kiln::Scalar lane) {
+                          kiln::If(IsNonzero(values, lane),
+                                   [&] {  // REF_CAPTURE_OK=called synchronously
+                                     Append(row, col + lane, count, position,
+                                            stage_rows, stage_cols, output,
+                                            sem);
+                                   });
+                        });
+                  });
             });
-          });
-        });
         FlushTail(count, stage_rows, stage_cols, output, sem);
       });
 }
@@ -322,7 +338,8 @@ CompilationCacheKey NonZeroCacheKey() {
   int out = -1;
   graph.AddOp(OpName::kNonzero, OpParamCacheKeys::Empty(),
               /*donated_inputs=*/{},
-              [&](GraphSignature::OpSignatureBuilder& op) {
+              [&]  // REF_CAPTURE_OK=called synchronously
+              (GraphSignature::OpSignatureBuilder& op) {
                 op.AddInput(in);
                 out = op.AddOutput(out_dims, mlir::ElementType::I64);
               });

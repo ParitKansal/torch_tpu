@@ -30,8 +30,11 @@ keeps them, and their process group, alive across the class's tests:
 harness.
 """
 
+import functools
 import os
-from typing import Any
+import types
+from typing import Any, Callable
+import unittest
 from unittest import mock
 
 import portpicker
@@ -42,6 +45,36 @@ from torch.testing._internal import common_utils
 from torch_tpu._internal.distributed import multiprocessing
 from tests import seed_test_utils
 from tests.distributed import distributed_utils
+
+# Whether the parent drains every worker's completion queue before it raises a
+# worker's result (PyTorch 2.14+). Older versions raise the first rank's skip
+# and leave the other ranks' results queued for the next test.
+_PARENT_DRAINS_COMPLETION_QUEUES = hasattr(
+    common_distributed, "retrieve_result_from_completion_queue"
+)
+
+
+class _ReportSkipsQueue:
+  """Wraps a worker's completion queue to report worker skips as skips.
+
+  Before PyTorch 2.14, `MultiProcContinuousTest._worker_loop()` reports a
+  `unittest.SkipTest` raised by a test as a `RuntimeError` (caused by the
+  `SkipTest`), which the parent treats as a failure that skips the rest of the
+  class. This queue sends the `SkipTest` itself instead.
+  """
+
+  def __init__(self, queue: Any):
+    self._queue = queue
+
+  def put(self, item: Any, *args: Any, **kwargs: Any) -> None:
+    if isinstance(item, RuntimeError) and isinstance(
+        item.__cause__, unittest.SkipTest
+    ):
+      item = item.__cause__
+    self._queue.put(item, *args, **kwargs)
+
+  def __getattr__(self, name: str) -> Any:
+    return getattr(self._queue, name)
 
 
 class TpuMultiProcContinuousTest(
@@ -138,8 +171,49 @@ class TpuMultiProcContinuousTest(
       torch.tpu._clear_cache()
 
   @classmethod
+  def _worker_loop(
+      cls,
+      rank: int,
+      world_size: int,
+      rdvz_file: str | None,
+      task_queue: Any,
+      completion_queue: Any,
+  ) -> None:
+    super()._worker_loop(
+        rank,
+        world_size,
+        rdvz_file,
+        task_queue,
+        _ReportSkipsQueue(completion_queue),
+    )
+
+  def _worker_run_main_wait(self, fn: Callable[[], None]) -> Callable[[], None]:
+    wait = super()._worker_run_main_wait(fn)
+    if _PARENT_DRAINS_COMPLETION_QUEUES:
+      return wait
+
+    @functools.wraps(wait)
+    def wrapper(self) -> None:
+      try:
+        wait()
+      except unittest.SkipTest:
+        if self.rank == self.MAIN_PROCESS_RANK:
+          # The parent raised rank 0's skip; take the other ranks' results so
+          # they don't answer for the next test.
+          for completion_queue in self.completion_queues[1:]:
+            completion_queue.get()
+          # A worker that raised in a test skips `destroy_process_group()` and
+          # may not exit cleanly, so `tearDownClass()` kills the workers.
+          self.__class__._worker_skipped = True
+        raise
+
+    return types.MethodType(wrapper, self)
+
+  @classmethod
   def tearDownClass(cls) -> None:
-    if cls.__dict__.get("_processes_spawned", False) and cls.poison_pill:
+    if cls.__dict__.get("_processes_spawned", False) and (
+        cls.poison_pill or cls.__dict__.get("_worker_skipped", False)
+    ):
       # After a failure, workers may not exit cleanly (e.g. a failed rank skips
       # `destroy_process_group()` and blocks at exit waiting for its peers), so
       # `super().tearDownClass()` would wait on them forever.

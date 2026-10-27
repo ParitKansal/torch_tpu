@@ -26,12 +26,10 @@ import torch
 from torch import distributed as dist
 from torch._dynamo.utils import counters
 from torch._inductor.runtime.cache_dir_utils import temporary_cache_dir
-import torch.multiprocessing as mp
 from torch_tpu._internal.distributed import spmd_util
 from torch_tpu._internal.utils import test_utils as utils
 from torch_tpu._internal.distributed import multiprocessing
-from tests import seed_test_utils
-from tests.distributed import distributed_utils
+from tests.distributed import continuous_test_utils
 
 _WORLD = 8
 
@@ -41,6 +39,17 @@ _LAYOUTS = {
     "halves": [[0, 1, 2, 3], [4, 5, 6, 7]],
     "columns": [[0, 2, 4, 6], [1, 3, 5, 7]],
 }
+
+
+_LAYOUT_GROUPS: dict[str, list[dist.ProcessGroup]] = {}
+
+
+def _get_layout_groups(layout: str) -> list[dist.ProcessGroup]:
+  if layout not in _LAYOUT_GROUPS:
+    _LAYOUT_GROUPS[layout] = [
+        dist.new_group(ranks=ranks) for ranks in _LAYOUTS[layout]
+    ]
+  return _LAYOUT_GROUPS[layout]
 
 
 def run_group_all_reduce(
@@ -60,18 +69,17 @@ def run_group_all_reduce(
     unused_group: Whether to also create the groups of the "columns" layout,
       which the program does not use.
   """
-  dist.init_process_group(backend="tpu_dist")
+  torch._dynamo.reset()
+  counters.clear()
   rank = int(os.environ["RANK"])
   assert dist.get_world_size() == _WORLD
 
   my_group, my_ranks = None, None
-  for ranks in _LAYOUTS[layout]:
-    group = dist.new_group(ranks=ranks)
+  for ranks, group in zip(_LAYOUTS[layout], _get_layout_groups(layout)):
     if rank in ranks:
       my_group, my_ranks = group, ranks
   if unused_group:
-    for ranks in _LAYOUTS["columns"]:
-      dist.new_group(ranks=ranks)
+    _get_layout_groups("columns")
 
   @torch.compile(backend="tpu", fullgraph=True, dynamic=False)
   @spmd_util.spmd_safe
@@ -86,8 +94,15 @@ def run_group_all_reduce(
   aot = counters["aot_autograd"]
   assert aot["autograd_cache_hit"] == int(cache_hit), dict(aot)
 
+  if dist.is_initialized():
+    torch.accelerator.synchronize()
+    dist.barrier()
 
-class CompileCacheProcessGroupsTest(seed_test_utils.MultiProcessRepeatableTest):
+
+class CompileCacheProcessGroupsTest(
+    continuous_test_utils.TpuMultiProcContinuousTest
+):
+  world_size = _WORLD
 
   def test_group_layouts_get_their_own_cache_entries(self):
     cache_dir = self.create_tempdir().full_path
@@ -96,9 +111,7 @@ class CompileCacheProcessGroupsTest(seed_test_utils.MultiProcessRepeatableTest):
         ("columns", False),
         ("halves", True),
     ):
-      distributed_utils.dist_run(
-          nproc_per_node=_WORLD,
-          fn=run_group_all_reduce,
+      run_group_all_reduce(
           layout=layout,
           cache_dir=cache_dir,
           cache_hit=cache_hit,
@@ -107,9 +120,7 @@ class CompileCacheProcessGroupsTest(seed_test_utils.MultiProcessRepeatableTest):
   def test_unused_groups_do_not_change_the_cache_key(self):
     cache_dir = self.create_tempdir().full_path
     for unused_group, cache_hit in ((False, False), (True, True)):
-      distributed_utils.dist_run(
-          nproc_per_node=_WORLD,
-          fn=run_group_all_reduce,
+      run_group_all_reduce(
           layout="halves",
           cache_dir=cache_dir,
           cache_hit=cache_hit,
@@ -118,5 +129,4 @@ class CompileCacheProcessGroupsTest(seed_test_utils.MultiProcessRepeatableTest):
 
 
 if __name__ == "__main__":
-  mp.set_start_method("spawn")
   multiprocessing.handle_test_main(absltest.main)

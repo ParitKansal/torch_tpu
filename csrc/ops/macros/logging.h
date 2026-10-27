@@ -88,38 +88,41 @@ namespace torch_tpu {
 //
 // Implementation note: __VA_OPT__(,) expands to nothing if the variadic
 // argument list is empty, and expands to a comma otherwise.
-#define TT_CHECK_AND_LOG_KERNEL_ARGS_IMPL_(op_name, ...)                       \
-  do {                                                                         \
-    static_assert(::torch_tpu::internal::ArgsAreIdentifiers(#__VA_ARGS__),     \
-                  "The op parameter list passed to TT_KERNEL() must contain "  \
-                  "only identifier names.");                                   \
-    constexpr std::string_view _func_sig = __PRETTY_FUNCTION__;                \
-    static_assert(                                                             \
-        ::torch_tpu::internal::CountFunctionParams(_func_sig) ==               \
-            std::tuple_size_v<decltype(std::forward_as_tuple(__VA_ARGS__))>,   \
-        "TT_KERNEL() called with mismatching number of arguments to "          \
-        "the kernel function signature.");                                     \
-    if (ABSL_VLOG_IS_ON(1)) {                                                  \
-      std::ostringstream _ss;                                                  \
-      ::torch_tpu::internal::LogKernelName(_ss, op_name);                      \
-      const std::vector<std::string_view> _arg_names =                         \
-          TT_ARGS_AS_STRINGS_(__VA_ARGS__);                                    \
-      ::torch_tpu::internal::LogKernelArgs(                                    \
-          _ss, _arg_names __VA_OPT__(, ) __VA_ARGS__);                         \
-      ABSL_LOG(INFO) << _ss.str();                                             \
-    }                                                                          \
-    if constexpr (::torch_tpu::internal::kDebugMode) {                         \
-      /* Only check the argument types once per kernel function. */            \
-      static const bool _checked = [&] {                                       \
-        ::torch_tpu::internal::CheckTtKernelArgList<op_name>(                  \
-            ::torch_tpu::internal::KernelArgCheckerContext{                    \
-                TT_NORMALIZED_FILE, __LINE__, _func_sig,                       \
-                ::torch_tpu::internal::ParseArgTypesOrEmpty(_func_sig),        \
-                TT_ARGS_AS_STRINGS_(__VA_ARGS__)} __VA_OPT__(, ) __VA_ARGS__); \
-        return true;                                                           \
-      }(); /* NOLINT - capturing tensors in this lambda is safe. */            \
-      static_cast<void>(_checked); /* VOID_CAST_OK=dummy result. */            \
-    }                                                                          \
+#define TT_CHECK_AND_LOG_KERNEL_ARGS_IMPL_(op_name, ...)                      \
+  do {                                                                        \
+    static_assert(::torch_tpu::internal::ArgsAreIdentifiers(#__VA_ARGS__),    \
+                  "The op parameter list passed to TT_KERNEL() must contain " \
+                  "only identifier names.");                                  \
+    constexpr std::string_view _func_sig = __PRETTY_FUNCTION__;               \
+    static_assert(                                                            \
+        ::torch_tpu::internal::CountFunctionParams(_func_sig) ==              \
+            std::tuple_size_v<decltype(std::forward_as_tuple(__VA_ARGS__))>,  \
+        "TT_KERNEL() called with mismatching number of arguments to "         \
+        "the kernel function signature.");                                    \
+    if (ABSL_VLOG_IS_ON(1)) {                                                 \
+      std::ostringstream _ss;                                                 \
+      ::torch_tpu::internal::LogKernelName(_ss, op_name);                     \
+      const std::vector<std::string_view> _arg_names =                        \
+          TT_ARGS_AS_STRINGS_(__VA_ARGS__);                                   \
+      ::torch_tpu::internal::LogKernelArgs(                                   \
+          _ss, _arg_names __VA_OPT__(, ) __VA_ARGS__);                        \
+      ABSL_LOG(INFO) << _ss.str();                                            \
+    }                                                                         \
+    if constexpr (::torch_tpu::internal::kDebugMode) {                        \
+      /* Only check the argument types once per kernel function. */           \
+      static const bool _checked =                                            \
+          [&] { /* REF_CAPTURE_OK=called locally */                           \
+                ::torch_tpu::internal::CheckTtKernelArgList<op_name>(         \
+                    ::torch_tpu::internal::KernelArgCheckerContext{           \
+                        TT_NORMALIZED_FILE, __LINE__, _func_sig,              \
+                        ::torch_tpu::internal::ParseArgTypesOrEmpty(          \
+                            _func_sig),                                       \
+                        TT_ARGS_AS_STRINGS_(__VA_ARGS__)} __VA_OPT__(, )      \
+                        __VA_ARGS__);                                         \
+                return true;                                                  \
+          }(); /* NOLINT - capturing tensors in this lambda is safe. */       \
+      static_cast<void>(_checked); /* VOID_CAST_OK=dummy result. */           \
+    }                                                                         \
   } while (false)
 
 namespace internal {
@@ -252,7 +255,7 @@ void CheckKernelArgType(  // NOLINT: cognitive complexity
   const std::string_view arg_name = context.tt_kernel_arg_names[arg_idx];
   const std::string_view normalized_arg_type_in_func_sig =
       context.arg_types[arg_idx];
-  const auto message = [&]() {
+  const auto message = [&]() {  // REF_CAPTURE_OK=called locally
     return absl::StrCat("\n", context.file, ":", context.line,
                         ": INTERNAL: expected the '", arg_name,
                         "' argument in TT_KERNEL()'s inner parenthesized list "

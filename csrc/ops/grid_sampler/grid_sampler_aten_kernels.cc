@@ -364,7 +364,7 @@ absl::StatusOr<mlir::MlirOp> ApplyZeroPadding(
     const std::vector<mlir::MlirOp>& indices_unclamped,
     const mlir::stablehlo::Dimensions& input_shape, int64_t spatial_dim_size,
     mlir::Type calc_type, const Dimensions& bcast_dims) {
-  auto is_in_bounds = [&](mlir::MlirOp idx,
+  auto is_in_bounds = [&](mlir::MlirOp idx,  // REF_CAPTURE_OK=called locally
                           mlir::stablehlo::DimensionInfo in_size)
       -> absl::StatusOr<mlir::MlirOp> {
     // Construct limit values based on dynamic input size.
@@ -568,7 +568,8 @@ absl::Status UpdateIndicesForPaddingMode(
     mlir::MlirOp zero_i32) {
   // Default update operation for non-reflection padding modes.
   absl::AnyInvocable<absl::Status(mlir::MlirOp & idx)> update_index_fn =
-      [&](mlir::MlirOp& idx) mutable -> absl::Status {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (mlir::MlirOp& idx) mutable -> absl::Status {
     idx = mlir::stablehlo::Clamp(zero_i32, idx, in_size_minus_1_i32);
     return absl::OkStatus();
   };
@@ -586,8 +587,9 @@ absl::Status UpdateIndicesForPaddingMode(
           mlir::stablehlo::Max(double_size_minus_2, one_in_size);
       TT_ASSIGN_OR_RETURN(auto double_size_minus_2_broadcast,
                           BroadcastIfNeeded(double_size_minus_2, src_idx));
-      update_index_fn = [&, double_size_minus_2_broadcast](
-                            mlir::MlirOp& idx) -> absl::Status {
+      update_index_fn =
+          [&, double_size_minus_2_broadcast](  // REF_CAPTURE_OK=called locally
+              mlir::MlirOp& idx) -> absl::Status {
         auto abs_idx = mlir::stablehlo::Abs(idx);
         TT_ASSIGN_OR_RETURN(
             auto mod_idx,
@@ -605,7 +607,8 @@ absl::Status UpdateIndicesForPaddingMode(
       TT_ASSIGN_OR_RETURN(auto four_size_broadcast,
                           BroadcastIfNeeded(four_size, src_idx));
       auto two_i32 = MakeConstantLike(src_idx, 2, i32_type);
-      update_index_fn = [&, four_size_broadcast,
+      update_index_fn = [&,  // REF_CAPTURE_OK=called locally
+                         four_size_broadcast,
                          two_i32](mlir::MlirOp& idx) -> absl::Status {
         // shifted = 2 * idx + 1
         TT_ASSIGN_OR_RETURN(auto temp1, BuildMulShlo(idx, two_i32));
@@ -660,7 +663,8 @@ absl::StatusOr<CubicDimInfo> ComputeCubicDimInfo(
   const auto A_plus_2 = MakeConstantLike(src_idx, A_val + 2.0, calc_type);
   const auto A_plus_3 = MakeConstantLike(src_idx, A_val + 3.0, calc_type);
 
-  auto conv1 = [&](mlir::MlirOp x) -> absl::StatusOr<mlir::MlirOp> {
+  auto conv1 = [&]  // REF_CAPTURE_OK=called locally
+      (mlir::MlirOp x) -> absl::StatusOr<mlir::MlirOp> {
     // ((A + 2) * x - (A + 3)) * x * x + 1
     TT_ASSIGN_OR_RETURN(auto term1, BuildMulShlo(A_plus_2, x));
     TT_ASSIGN_OR_RETURN(auto term2, BuildSubShlo(term1, A_plus_3));
@@ -669,7 +673,8 @@ absl::StatusOr<CubicDimInfo> ComputeCubicDimInfo(
     return BuildAddShlo(term4, one);
   };
 
-  auto conv2 = [&](mlir::MlirOp x) -> absl::StatusOr<mlir::MlirOp> {
+  auto conv2 = [&]  // REF_CAPTURE_OK=called locally
+      (mlir::MlirOp x) -> absl::StatusOr<mlir::MlirOp> {
     // ((A * x - 5 * A) * x + 8 * A) * x - 4 * A
     const auto five_A = MakeConstantLike(src_idx, 5.0 * A_val, calc_type);
     const auto eight_A = MakeConstantLike(src_idx, 8.0 * A_val, calc_type);
@@ -755,8 +760,9 @@ absl::StatusOr<mlir::MlirOp> AccumulateBicubicInterpolation(
                                                 /*indices_are_sorted=*/false));
 
       if (padding_mode == PaddingMode::kZeros) {
-        auto is_in_bounds = [&](mlir::MlirOp idx,
-                                mlir::stablehlo::DimensionInfo in_size)
+        auto is_in_bounds =
+            [&](mlir::MlirOp idx,  // REF_CAPTURE_OK=called locally
+                mlir::stablehlo::DimensionInfo in_size)
             -> absl::StatusOr<mlir::MlirOp> {
           TT_ASSIGN_OR_RETURN(auto in_size_op,
                               DimensionInfoToOp(builder, in_size));
@@ -997,7 +1003,7 @@ absl::StatusOr<mlir::MlirOp> BuildGridSamplerNearestShlo(
 
     if (padding_mode == PaddingMode::kZeros) {
       auto is_in_bounds =
-          [&](mlir::MlirOp idx,
+          [&](mlir::MlirOp idx,  // REF_CAPTURE_OK=called synchronously
               mlir::MlirOp in_size_op) -> absl::StatusOr<mlir::MlirOp> {
         // Construct zero and limit values based on dynamic input size.
         mlir::MlirOp limit_element = mlir::stablehlo::ConvertElementType(
@@ -1265,7 +1271,7 @@ absl::StatusOr<std::array<mlir::MlirOp, 2>> BuildGridSamplerNearestBackwardShlo(
 
     if (padding_mode == PaddingMode::kZeros) {
       auto is_in_bounds =
-          [&](mlir::MlirOp idx,
+          [&](mlir::MlirOp idx,  // REF_CAPTURE_OK=called synchronously
               mlir::MlirOp in_size_op) -> absl::StatusOr<mlir::MlirOp> {
         mlir::MlirOp limit_element = mlir::stablehlo::ConvertElementType(
             in_size_op, builder.getOpBuilder().getI32Type());
@@ -1707,14 +1713,16 @@ CalculateBicubicBackwardWeightsAndIndices(
     const auto ten_A = MakeConstantLike(src_coord, 10.0 * A_val, calc_type);
     const auto eight_A = MakeConstantLike(src_coord, 8.0 * A_val, calc_type);
 
-    auto d_conv1 = [&](mlir::MlirOp x) -> absl::StatusOr<mlir::MlirOp> {
+    auto d_conv1 = [&]  // REF_CAPTURE_OK=called locally
+        (mlir::MlirOp x) -> absl::StatusOr<mlir::MlirOp> {
       TT_ASSIGN_OR_RETURN(auto x_sq, BuildMulShlo(x, x));
       TT_ASSIGN_OR_RETURN(auto term1, BuildMulShlo(three_A_plus_2, x_sq));
       TT_ASSIGN_OR_RETURN(auto term2, BuildMulShlo(two_A_plus_3, x));
       return BuildSubShlo(term1, term2);
     };
 
-    auto d_conv2 = [&](mlir::MlirOp x) -> absl::StatusOr<mlir::MlirOp> {
+    auto d_conv2 = [&]  // REF_CAPTURE_OK=called locally
+        (mlir::MlirOp x) -> absl::StatusOr<mlir::MlirOp> {
       TT_ASSIGN_OR_RETURN(auto x_sq, BuildMulShlo(x, x));
       TT_ASSIGN_OR_RETURN(auto term1, BuildMulShlo(three_A, x_sq));
       TT_ASSIGN_OR_RETURN(auto term2, BuildMulShlo(ten_A, x));
@@ -1785,7 +1793,7 @@ absl::StatusOr<BicubicBackwardCornerOperands> CalculateBicubicBackwardCorners(
         calc_type, rb.getRegion(), rb.getOpBuilder());
   };
   auto zero_scalar = MakeScalarConstant(builder, 0.0, calc_type);
-  auto is_in_bounds = [&](mlir::MlirOp idx,
+  auto is_in_bounds = [&](mlir::MlirOp idx,  // REF_CAPTURE_OK=called locally
                           mlir::stablehlo::DimensionInfo in_size)
       -> absl::StatusOr<mlir::MlirOp> {
     TT_ASSIGN_OR_RETURN(auto in_size_op, DimensionInfoToOp(builder, in_size));
@@ -1801,7 +1809,8 @@ absl::StatusOr<BicubicBackwardCornerOperands> CalculateBicubicBackwardCorners(
     return mlir::stablehlo::Not(out_of_bounds);
   };
 
-  auto update_state_for_corner = [&](int y_bit, int x_bit) -> absl::Status {
+  auto update_state_for_corner = [&]  // REF_CAPTURE_OK=called locally
+      (int y_bit, int x_bit) -> absl::Status {
     auto x_idx = all_indices[0][x_bit];
     auto y_idx = all_indices[1][y_bit];
     auto x_w = all_weights[0][x_bit];
@@ -2001,7 +2010,8 @@ at::Tensor AtenGridSampler2d(const at::Tensor& input, const at::Tensor& grid,
                                   grid_shape[2]};
 
         PaddingMode pm = static_cast<PaddingMode>(padding_mode);
-        auto op_builder = [&]() -> NAryMlirOpBuilder<2, 1> {
+        auto op_builder =
+            [&]() -> NAryMlirOpBuilder<2, 1> {  // REF_CAPTURE_OK=called locally
           if (interpolation_mode_enum == InterpolationMode::kBilinear) {
             return [align_corners, pm](FixedSizeSpan<mlir::MlirOp, 2> inputs)
                        -> absl::StatusOr<mlir::MlirOp> {
@@ -2054,7 +2064,8 @@ at::Tensor AtenGridSampler3d(const at::Tensor& input, const at::Tensor& grid,
 
         PaddingMode pm = static_cast<PaddingMode>(padding_mode);
 
-        auto op_builder = [&]() -> NAryMlirOpBuilder<2, 1> {
+        auto op_builder =
+            [&]() -> NAryMlirOpBuilder<2, 1> {  // REF_CAPTURE_OK=called locally
           if (interpolation_mode_enum == InterpolationMode::kBilinear) {
             return [align_corners, pm](FixedSizeSpan<mlir::MlirOp, 2> inputs)
                        -> absl::StatusOr<mlir::MlirOp> {
@@ -2103,7 +2114,8 @@ std::tuple<at::Tensor, at::Tensor> AtenGridSampler2dBackward(
 
         const PaddingMode pm = static_cast<PaddingMode>(padding_mode);
 
-        auto op_builder = [&]() -> NAryMlirOpBuilder<3, 2> {
+        auto op_builder =
+            [&]() -> NAryMlirOpBuilder<3, 2> {  // REF_CAPTURE_OK=called locally
           return [align_corners, pm, interpolation_mode_enum,
                   output_mask](FixedSizeSpan<mlir::MlirOp, 3> inputs)
                      -> absl::StatusOr<std::array<mlir::MlirOp, 2>> {
@@ -2170,7 +2182,8 @@ std::tuple<at::Tensor, at::Tensor> AtenGridSampler3dBackward(
 
         PaddingMode pm = static_cast<PaddingMode>(padding_mode);
 
-        auto op_builder = [&]() -> NAryMlirOpBuilder<3, 2> {
+        auto op_builder =
+            [&]() -> NAryMlirOpBuilder<3, 2> {  // REF_CAPTURE_OK=called locally
           return [align_corners, pm, interpolation_mode_enum,
                   output_mask](FixedSizeSpan<mlir::MlirOp, 3> inputs)
                      -> absl::StatusOr<std::array<mlir::MlirOp, 2>> {

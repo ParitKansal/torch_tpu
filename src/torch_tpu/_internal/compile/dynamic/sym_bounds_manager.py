@@ -29,6 +29,11 @@ from torch_tpu._internal.compile.dynamic import output_sym_shape
 from torch_tpu._internal.compile.dynamic import symbol_bounds
 
 
+def _align_up(value: int, offset: int, bucket_step: int) -> int:
+  """Returns the smallest `k * bucket_step - offset` that is `>= value`."""
+  return -(-(value + offset) // bucket_step) * bucket_step - offset
+
+
 class SymBoundsManager:
   """Manages lower and upper bounds for dynamic SymInts."""
 
@@ -87,6 +92,16 @@ class SymBoundsManager:
       first_bucket_upper = first_bucket_multiple - c
       B_i = first_bucket_upper + i * bucket_step   for i in range(num_buckets)
 
+    When a symbol `s` has a finite upper bound `U` (`mark_dynamic(..., max=U)`
+    or a range refined by a guard):
+      * If the first bucket reaches `U` (or `num_buckets == 1`), that bucket is
+        capped at `U` and later buckets keep the same bound.
+      * Otherwise, the first bucket ends at `first_bucket_upper` (already on
+        the `128k - c` grid), and once a later bucket reaches `U` (or on the
+        last bucket), it is capped at the smallest `k * bucket_step - c >= U`
+        (`aligned_upper`) and kept for any remaining buckets so all buckets
+        share the same output layout alignment.
+
     Each candidate bucket is validated against active shape guards. If any
     bucket violates a guard, returns an empty list.
 
@@ -120,10 +135,10 @@ class SymBoundsManager:
           symbol_offsets[sym_name] = offset
     shape_env = getattr(self._atomic_symints[0].node, "shape_env", None)
 
-    # Precompute per-symbol parameters:
-    # (symbol, sym_name, initial_lower, initial_upper, first_bucket_upper).
+    # Precompute per-symbol parameters: (symbol, sym_name, initial_lower,
+    # initial_upper, first_bucket_upper, aligned_upper).
     symbol_configs: list[
-        tuple[sympy.Symbol, str, int, int | sympy.Expr, int]
+        tuple[sympy.Symbol, str, int, int | sympy.Expr, int, int | sympy.Expr]
     ] = []
     for symint in self._atomic_symints:
       symbol = symint.node.expr
@@ -140,10 +155,7 @@ class SymBoundsManager:
         )
         # Round `start_val + offset` up to the next multiple of `bucket_step`,
         # then subtract `offset` to get the first bucket's upper bound.
-        first_bucket_multiple = (
-            (start_val + offset + bucket_step - 1) // bucket_step
-        ) * bucket_step
-        first_bucket_upper = first_bucket_multiple - offset
+        first_bucket_upper = _align_up(start_val, offset, bucket_step)
         # Avoid a degenerate single-point first bucket `[L, L]` (which causes
         # ShapeEnv to specialize the symbol to a constant when L == U) when
         # `initial_lower + offset` is already an exact multiple of `bucket_step`.
@@ -152,9 +164,21 @@ class SymBoundsManager:
             and initial_upper > initial_lower
         ):
           first_bucket_upper += bucket_step
-        symbol_configs.append(
-            (symbol, sym_name, initial_lower, initial_upper, first_bucket_upper)
+        # Capacity of a finite `initial_upper` on the `128k - c` grid, for the
+        # buckets after the first one.
+        aligned_upper = (
+            int_oo
+            if initial_upper == int_oo
+            else _align_up(int(initial_upper), offset, bucket_step)
         )
+        symbol_configs.append((
+            symbol,
+            sym_name,
+            initial_lower,
+            initial_upper,
+            first_bucket_upper,
+            aligned_upper,
+        ))
 
     buckets: list[symbol_bounds.SymbolBounds] = []
     prev_ranges: dict[sympy.Symbol, value_ranges.ValueRanges] | None = None
@@ -169,6 +193,7 @@ class SymBoundsManager:
           initial_lower,
           initial_upper,
           first_bucket_upper,
+          aligned_upper,
       ) in symbol_configs:
         # If this symbol already reached its finite user-defined `initial_upper`
         # in the previous bucket, keep its capped range so we don't advance
@@ -180,15 +205,28 @@ class SymBoundsManager:
           bucket_ranges[symbol] = prev_ranges[symbol]
           candidate_upper_bounds[sym_name] = int(prev_ranges[symbol].upper)
           continue
-        # Step upper bound by `bucket_step` for each bucket, clamped to
-        # `initial_upper` (which is `int_oo` when unbounded). On the final
-        # bucket, extend to `initial_upper` if finite so Dynamo's
-        # StrictMinMaxConstraint is satisfied.
-        if is_last_bucket and initial_upper != int_oo:
-          candidate_upper = int(initial_upper)
+        # Step upper bound by `bucket_step` for each bucket, extending the final
+        # bucket to `capacity` when finite so Dynamo's StrictMinMaxConstraint is
+        # satisfied.
+        #
+        # XLA:TPU derives a bounded output's layout from its bound, so changing
+        # the bound's `128k - c` alignment class across buckets flips the output
+        # layout and forces a recompile after a bucket switch:
+        # - Bucket 0 (`prev_ranges is None`) uses `initial_upper`: if
+        #   `first_bucket_upper >= initial_upper` (or `num_buckets == 1`), bucket 0
+        #   is capped at `initial_upper` and the `prev_ranges` check above keeps
+        #   that exact bound for all later buckets; otherwise bucket 0 ends at
+        #   `first_bucket_upper`, which is already on the `128k - c` grid.
+        # - Buckets >= 1 (`prev_ranges is not None`) use `aligned_upper`: once
+        #   `initial_upper` is reached (or on the last bucket), that bucket and
+        #   any subsequent buckets use `aligned_upper` so every bucket stays on
+        #   the `128k - c` grid.
+        capacity = initial_upper if prev_ranges is None else aligned_upper
+        if is_last_bucket and capacity != int_oo:
+          candidate_upper = int(capacity)
         else:
           candidate_upper = int(
-              min(first_bucket_upper + bucket_idx * bucket_step, initial_upper)
+              min(first_bucket_upper + bucket_idx * bucket_step, capacity)
           )
         # Partition buckets into contiguous non-overlapping intervals:
         # Bucket 0 covers [initial_lower, B_0], Bucket i covers [B_{i-1} + 1, B_i].

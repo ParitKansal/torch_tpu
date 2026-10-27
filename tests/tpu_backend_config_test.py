@@ -48,16 +48,10 @@ class TpuBackendConfigTest(seed_test_utils.RepeatableTest):
         device=device,
         dtype=torch.bfloat16,
     )
-
-    def run_compute():
-      with em.set_eager_mode(em.EagerMode.DEFER_AND_FUSE):
-        intermediate = torch.mm(x, x)
-        output = intermediate * torch.tensor(
-            [1.0], dtype=torch.float32, device=device
-        )
-      return output[0, 0]
-
-    self.assertEqual(run_compute().cpu().item(), expected_value)
+    one = torch.tensor([1.0], dtype=torch.float32, device=device)
+    with em.set_eager_mode(em.EagerMode.DEFER_AND_FUSE):
+      output = (torch.mm(x, x) * one)[0, 0]
+    self.assertEqual(output.cpu().item(), expected_value)
 
 
 if __name__ == "__main__":

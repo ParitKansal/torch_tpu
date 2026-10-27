@@ -123,8 +123,8 @@ absl::StatusOr<Dimensions> CanonicalizeDims(
   int64_t rank = tensor.dim();
   ABSL_CHECK(rank >= 0);  // CRASH_OK
 
-  auto log_and_return =
-      [&](Dimensions canonical_dims) -> absl::StatusOr<Dimensions> {
+  auto log_and_return = [&]  // REF_CAPTURE_OK=called synchronously
+      (Dimensions canonical_dims) -> absl::StatusOr<Dimensions> {
     if (ABSL_VLOG_IS_ON(3)) {
       const std::string dim_str =
           dim.has_value() ? absl::StrCat("[", absl::StrJoin(*dim, ","), "]")

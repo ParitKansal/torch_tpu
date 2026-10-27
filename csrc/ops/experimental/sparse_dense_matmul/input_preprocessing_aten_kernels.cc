@@ -84,8 +84,8 @@ TORCH_LIBRARY_FRAGMENT(tpu, m) {
          std::string_view combiner, int64_t local_device_count,
          int64_t global_device_count, int64_t num_sc_per_device,
          int64_t sc_simd_width, int64_t hbm_word_size_in_4b,
-         bool allow_id_dropping,
-         std::string_view table_name) -> c10::Dict<std::string, at::Tensor> {
+         bool allow_id_dropping, std::string_view table_name,
+         bool enable_minibatching) -> c10::Dict<std::string, at::Tensor> {
     TT_CHECK_THROW(input_indices.dtype() == at::kInt, error::kInvalidArgument)
         << "indices must be int32";
     TT_CHECK_THROW(input_offsets.dtype() == at::kInt, error::kInvalidArgument)
@@ -117,7 +117,9 @@ TORCH_LIBRARY_FRAGMENT(tpu, m) {
         .hbm_word_size_in_4b = static_cast<int>(hbm_word_size_in_4b),
         .sharding_strategy = sc_preprocessing::ShardingStrategy::kMod,
         .allow_id_dropping = allow_id_dropping,
-        .minibatching_mode = sc_preprocessing::MinibatchingMode::kDisabled,
+        .minibatching_mode =
+            enable_minibatching ? sc_preprocessing::MinibatchingMode::kDevice
+                                : sc_preprocessing::MinibatchingMode::kDisabled,
     };
     const int row_pointers_size_per_device =
         sc_options.GetRowPointersSizePerDevice();
@@ -183,16 +185,17 @@ TORCH_LIBRARY_FRAGMENT(tpu, m) {
     outputs.insert("gains", gains);
 
     const auto& stats = preprocess_result.stats;
-    auto insert_vector_stat = [&](std::string_view key, const auto& map) {
-      if (auto it = map.find(table_name_str); it != map.end()) {
-        const auto& vec = it->second;
-        at::Tensor tensor =
-            at::empty({static_cast<int64_t>(vec.size())}, at::kInt);
-        std::memcpy(tensor.data_ptr<int32_t>(), vec.data(),
-                    vec.size() * sizeof(int32_t));
-        outputs.insert(key, tensor);
-      }
-    };
+    auto insert_vector_stat = [&]  // REF_CAPTURE_OK=called locally
+        (std::string_view key, const auto& map) {
+          if (auto it = map.find(table_name_str); it != map.end()) {
+            const auto& vec = it->second;
+            at::Tensor tensor =
+                at::empty({static_cast<int64_t>(vec.size())}, at::kInt);
+            std::memcpy(tensor.data_ptr<int32_t>(), vec.data(),
+                        vec.size() * sizeof(int32_t));
+            outputs.insert(key, tensor);
+          }
+        };
 
     insert_vector_stat("max_ids_per_partition", stats.max_ids_per_partition);
     insert_vector_stat("max_unique_ids_per_partition",
@@ -244,7 +247,8 @@ TORCH_LIBRARY_FRAGMENT(tpu, m) {
       "    int sc_simd_width, "
       "    int hbm_word_size_in_4b, "
       "    bool allow_id_dropping, "
-      "    str table_name"
+      "    str table_name, "
+      "    bool enable_minibatching=False"
       ") -> Dict(str, Tensor)",
       func);
 }

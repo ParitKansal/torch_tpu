@@ -251,6 +251,7 @@ untriaged_ops_deny_list: dict[
     "tril": ALL_MODES,  # bad broadcast
     "triu": ALL_MODES,  # bad broadcast, iota-like
     "trunc": ALL_MODES,  # dynamic triage (invalid result)
+    "unique": ALL_MODES,  # dynamic shape operator / invalid TPU shape
     "unique_consecutive": (
         ALL_MODES
     ),  # dynamic shape operator / invalid TPU shape

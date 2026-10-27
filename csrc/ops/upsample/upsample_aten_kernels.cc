@@ -316,7 +316,7 @@ absl::StatusOr<mlir::MlirOp> BuildUpsampleNearestSingleDimIndexTensor(
   auto iota_type = mlir::RankedTensorType::get(
       grad_output_shape[dimension + 2], builder.getOpBuilder().getF32Type());
   auto iota = mlir::stablehlo::Iota(builder, iota_type, 0);
-  mlir::MlirOp offset_iota = [&]() {
+  mlir::MlirOp offset_iota = [&]() {  // REF_CAPTURE_OK=called locally
     if (upsample_mode != UpsampleMode::kNearestExact) {
       return iota;
     }

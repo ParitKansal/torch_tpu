@@ -46,11 +46,11 @@
 #include "c10/util/Optional.h"
 #include "c10/util/intrusive_ptr.h"
 #include "csrc/common/cache_key.h"
-#include "csrc/common/context_states.h"
 #include "csrc/common/env_vars.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/eager_mode.h"
+#include "csrc/eager/events_queue.h"
 #include "csrc/eager/materialize.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/split_traversal.h"
@@ -150,8 +150,8 @@ absl::StatusOr<at::Tensor> CreateDeviceRngStateTensor(c10::Device device,
   TT_ASSIGN_OR_RETURN(
       auto rng_state_buffer,
       TpuMallocAndMemcpyHtoD(host_data_ptr, mlir::ElementType::UI64, {2},
-                             /*non_blocking=*/true,
                              /*backing_data=*/std::move(host_data_bytes)));
+  RecordAsyncHostToDevice(rng_state_buffer);
   return MakeTensor(std::move(rng_state_buffer), device.index());
 }
 
@@ -368,17 +368,18 @@ at::Generator& DeviceGenerators::GetEagerDefaultGenerator(at::DeviceIndex idx) {
   idx = NormalizeDeviceIndex(idx);
 
   auto& generator = generators_[idx];
-  c10::call_once(generator_init_flags_[idx], [&] {
-    auto gen = at::make_generator<EagerModeDeviceGeneratorImpl>(idx);
-    auto* gen_impl = gen.get<EagerModeDeviceGeneratorImpl>();
-    auto random = c10::detail::getNonDeterministicRandom(false);
-    auto status = InitDefaultGenerator(gen_impl, random);
-    if (!status.ok()) {
-      generator = status;
-    } else {
-      generator = std::move(gen);
-    }
-  });
+  c10::call_once(
+      generator_init_flags_[idx], [&] {  // REF_CAPTURE_OK=called synchronously
+        auto gen = at::make_generator<EagerModeDeviceGeneratorImpl>(idx);
+        auto* gen_impl = gen.get<EagerModeDeviceGeneratorImpl>();
+        auto random = c10::detail::getNonDeterministicRandom(false);
+        auto status = InitDefaultGenerator(gen_impl, random);
+        if (!status.ok()) {
+          generator = status;
+        } else {
+          generator = std::move(gen);
+        }
+      });
 
   // IMPORTANT: if the generator failed to initialize before, we must fail now
   // instead of returning an uninitialized generator.

@@ -19,7 +19,6 @@
 #include <cmath>
 #include <cstdint>
 
-#include "absl/log/absl_check.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "csrc/common/aten_utils.h"
@@ -27,6 +26,8 @@
 #include "csrc/ops/binary.h"
 #include "csrc/ops/op_builder_utils.h"
 #include "csrc/ops/reductions/reductions.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Types.h"
 #include "stablehlo/dialect/StablehloOps.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
@@ -53,6 +54,20 @@ absl::StatusOr<mlir::MlirOp> ApplyNormPower(mlir::MlirOp op,
   TT_ASSIGN_OR_RETURN(const mlir::MlirOp exp,
                       is_root ? BuildDivShlo(one, ord_op) : ord_op);
   return BuildPowShlo(op, exp);
+}
+
+bool HasZeroReductionDim(mlir::RankedTensorType type,
+                         absl::Span<const int64_t> reduce_dims) {
+  llvm::ArrayRef<int64_t> shape = type.getShape();
+  const int64_t rank = static_cast<int64_t>(shape.size());
+  for (int64_t dim : reduce_dims) {
+    int64_t canonical_dim = dim < 0 ? dim + rank : dim;
+    if (canonical_dim >= 0 && canonical_dim < rank &&
+        shape[canonical_dim] == 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace
@@ -128,13 +143,22 @@ absl::StatusOr<mlir::MlirOp> BuildPNormShlo(
   } else {
     // The general p-norm is sum(abs(x)^ord)^(1/ord).
     mlir::MlirOp orig_abs_input = input_op;
-    TT_ASSIGN_OR_RETURN(
-        input_op, ApplyNormPower(input_op, ord_op, ord, /*is_root=*/false));
-
     auto reduce_fn = [compute_mlir_type](mlir::RegionBuilder& rb) {
       mlir::stablehlo::buildReduceBody<mlir::stablehlo::AddOp>(
           compute_mlir_type, rb.getRegion(), rb.getOpBuilder());
     };
+
+    if (std::isnan(ord) &&
+        HasZeroReductionDim(GetTensorTypeOrDie(input_op), reduce_dims)) {
+      mlir::MlirOp reduction_res =
+          BuildReductionShlo(input_op, reduce_dims, compute_mlir_type, init_val,
+                             reduce_fn, reduction_mode);
+      return CastIfNeeded(reduction_res, out_type);
+    }
+
+    TT_ASSIGN_OR_RETURN(
+        input_op, ApplyNormPower(input_op, ord_op, ord, /*is_root=*/false));
+
     mlir::MlirOp reduction_res =
         BuildReductionShlo(input_op, reduce_dims, compute_mlir_type, init_val,
                            reduce_fn, reduction_mode);

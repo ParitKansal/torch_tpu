@@ -26,6 +26,7 @@ from tests import seed_test_utils
 from tests.distributed import continuous_test_utils
 
 _FAILURE_MESSAGE: Final[str] = "DELIBERATE_FAILURE_ON_RANK_3"
+_SKIP_MESSAGE: Final[str] = "DELIBERATE_SKIP_IN_WORKERS"
 
 
 class _FailsOnOneRank(continuous_test_utils.TpuMultiProcContinuousTest):
@@ -43,9 +44,39 @@ class _FailsOnOneRank(continuous_test_utils.TpuMultiProcContinuousTest):
       raise AssertionError(_FAILURE_MESSAGE)
 
 
+class _SkipsInWorkers(continuous_test_utils.TpuMultiProcContinuousTest):
+  """Skips one test in the workers; the next test must still run.
+
+  Its methods have no `test` prefix, so the test runner doesn't collect them.
+  `TpuMultiProcContinuousTestTest` runs them explicitly.
+  """
+
+  world_size = 8
+
+  def skip_in_workers(self) -> None:
+    self.skipTest(_SKIP_MESSAGE)
+
+  def run_after_skip(self) -> None:
+    dist.all_reduce(torch.ones(1, device="tpu"))
+
+
 class TpuMultiProcContinuousTestTest(
     seed_test_utils.MultiProcessRepeatableTest
 ):
+
+  def test_worker_skip_is_reported_as_skip(self) -> None:
+    """A skip raised in the workers is a skip, and later tests still run."""
+    result = unittest.TestResult()
+    unittest.TestSuite([
+        _SkipsInWorkers("skip_in_workers"),
+        _SkipsInWorkers("run_after_skip"),
+    ]).run(result)
+
+    self.assertEmpty(result.errors + result.failures)
+    self.assertEqual(result.testsRun, 2)
+    self.assertLen(result.skipped, 1)
+    _, reason = result.skipped[0]
+    self.assertIn(_SKIP_MESSAGE, reason)
 
   def test_single_rank_failure_is_reported_without_hanging(self) -> None:
     """A failure on one rank is reported, and the workers shut down.

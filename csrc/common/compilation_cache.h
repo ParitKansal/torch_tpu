@@ -21,6 +21,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -214,6 +215,20 @@ class CompilationCache {
     kUnboundedDynamic,
   };
 
+  // Formats a CacheEntryKind as "STATIC" / "UNBOUNDED DYNAMIC". Friends
+  // so that both absl (StrCat, LOG, %v) and iostream (<<) formatting work via
+  // ADL on the nested enum.
+  template <typename Sink>
+  friend void AbslStringify(Sink& sink, CacheEntryKind kind) {
+    sink.Append(kind == CacheEntryKind::kStatic ? "STATIC"
+                                                : "UNBOUNDED DYNAMIC");
+  }
+
+  friend std::ostream& operator<<(std::ostream& os, CacheEntryKind kind) {
+    return os << (kind == CacheEntryKind::kStatic ? "STATIC"
+                                                  : "UNBOUNDED DYNAMIC");
+  }
+
   ~CompilationCache();
 
   // Returns the singleton cache instance. Note that this returns the instance
@@ -383,12 +398,6 @@ class CompilationCache {
     bool dump_on_cache_miss = false;
   };
 
-  // Returns a pointer to the cache entry for `key` if found, otherwise returns
-  // nullptr.
-  [[nodiscard]] const CacheEntry* FindStaticCacheEntryOrNull(
-      const CompilationCacheKey& key) const
-      ABSL_EXCLUSIVE_LOCKS_REQUIRED(cache_mutex_);
-
   // Returns a pointer to the unbounded dynamic cache entry for `key` if found,
   // otherwise returns nullptr.
   [[nodiscard]] const UnboundedDynamicCacheEntry*
@@ -401,10 +410,10 @@ class CompilationCache {
       const CompilationCacheKey& key, CacheEntryKind kind) const
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(cache_mutex_);
 
-  // Retrieves a cache entry from the static cache. If the key is not found in
-  // the static cache, returns nullopt.
-  std::optional<CacheLookupInternal> GetStaticCacheEntry(
-      const CompilationCacheKey& key) const
+  // Retrieves the entry for `key` from the tier-1 cache selected by `kind`,
+  // recording the hit. If the key is not found in that cache, returns nullopt.
+  std::optional<CacheLookupInternal> GetCacheEntry(
+      const CompilationCacheKey& key, CacheEntryKind kind) const
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(cache_mutex_);
 
   using BoundedDynamicCache =
@@ -441,6 +450,14 @@ class CompilationCache {
       ShapeDynamismMetadata shape_dynamism_metadata,
       std::optional<BoundedDynamicCache::iterator> dynamic_it)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(cache_mutex_);
+
+  // Schedules `executable_builder` on the compilation threadpool and publishes
+  // its result to the tier-1 entry for `key` in the cache selected by `kind`,
+  // going through the tier-2/3 caches first.
+  void EnqueueCompilation(const CompilationCacheKey& key, CacheEntryKind kind,
+                          LoadedExecutableBuilder executable_builder,
+                          UniqueCompileOptions compile_options)
+      ABSL_LOCKS_EXCLUDED(cache_mutex_);
 
   // Retrieves a cache entry or create a new one as needed. This updates the
   // access count and last accessed time for the cache entry if it is found.

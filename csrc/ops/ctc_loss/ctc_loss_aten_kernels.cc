@@ -43,6 +43,7 @@
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/tensor_to_buffer.h"
 #include "csrc/ops/binary.h"
+#include "csrc/ops/copy_from/copy_common.h"
 #include "csrc/ops/copy_from/tpu_to_cpu.h"
 #include "csrc/ops/cumsum/cumsum.h"
 #include "csrc/ops/macros/kernel.h"
@@ -95,7 +96,7 @@ absl::StatusOr<int64_t> GetMaxTargetLength(const at::Tensor& targets,
   const at::Tensor target_lengths_cpu = at::empty(
       target_lengths.sizes(), target_lengths.options().device(at::kCPU));
   TT_RETURN_IF_ERROR(CopyTpuToCpu(target_lengths, target_lengths_cpu,
-                                  /*non_blocking=*/false));
+                                  GetTransferSyncMode(/*non_blocking=*/false)));
 
   const at::Tensor target_lengths_long =
       (target_lengths_cpu.scalar_type() == at::kLong)
@@ -685,7 +686,7 @@ absl::StatusOr<std::vector<mlir::MlirOp>> BuildCtcLossShlo(
   auto whl = mlir::stablehlo::While(
       builder,
       {MakeScalarConstant(builder, 1, i32_type), alpha_0, log_alpha_acc_init},
-      [&](mlir::RegionBuilder& cond) {
+      [&](mlir::RegionBuilder& cond) {  // REF_CAPTURE_OK=called synchronously
         mlir::MlirBuilder cond_builder(cond.getOpBuilder(),
                                        cond.getOpBuilder().getUnknownLoc());
         auto args = mlir::stablehlo::Arguments(
@@ -697,7 +698,7 @@ absl::StatusOr<std::vector<mlir::MlirOp>> BuildCtcLossShlo(
             mlir::stablehlo::Compare(args[0], t_limit,
                                      mlir::stablehlo::ComparisonDirection::LT));
       },
-      [&](mlir::RegionBuilder& body) {
+      [&](mlir::RegionBuilder& body) {  // REF_CAPTURE_OK=called synchronously
         mlir::MlirBuilder body_builder(body.getOpBuilder(),
                                        body.getOpBuilder().getUnknownLoc());
         auto args = mlir::stablehlo::Arguments(
@@ -870,7 +871,7 @@ mlir::MlirOp ReduceAddDim2(mlir::MlirBuilder& builder, mlir::MlirOp input,
       mlir::RankedTensorType::get({}, element_type), zero_scalar, {});
   return mlir::stablehlo::Reduce(
       builder, {input}, {zero},
-      [&](mlir::RegionBuilder& region) {
+      [&](mlir::RegionBuilder& region) {  // REF_CAPTURE_OK=called synchronously
         auto type = mlir::RankedTensorType::get({}, element_type);
         auto arg0 = mlir::Argument(region, type);
         auto arg1 = mlir::Argument(region, type);
@@ -947,7 +948,7 @@ absl::StatusOr<mlir::MlirOp> BuildCtcLossBackwardShlo(
 
   auto whl = mlir::stablehlo::While(
       builder, {t_start, beta_0, log_beta_acc_init},
-      [&](mlir::RegionBuilder& cond) {
+      [&](mlir::RegionBuilder& cond) {  // REF_CAPTURE_OK=called synchronously
         mlir::MlirBuilder cond_builder(cond.getOpBuilder(),
                                        cond.getOpBuilder().getUnknownLoc());
         auto args = mlir::stablehlo::Arguments(
@@ -958,7 +959,7 @@ absl::StatusOr<mlir::MlirOp> BuildCtcLossBackwardShlo(
             mlir::stablehlo::Compare(args[0], zero_i32,
                                      mlir::stablehlo::ComparisonDirection::GE));
       },
-      [&](mlir::RegionBuilder& body) {
+      [&](mlir::RegionBuilder& body) {  // REF_CAPTURE_OK=called synchronously
         mlir::MlirBuilder body_builder(body.getOpBuilder(),
                                        body.getOpBuilder().getUnknownLoc());
         auto args = mlir::stablehlo::Arguments(
@@ -1785,12 +1786,10 @@ at::Tensor AtenCtcLossBackwardTensor(
         TT_ASSIGN_OR_THROW(
             mlir::ElementType output_dtype,
             ConvertTo<mlir::ElementType>(log_probs.scalar_type()));
-        const Dimensions grad_in_dims = {log_probs.size(0), log_probs.size(1),
-                                         log_probs.size(2)};
 
         DispatchOpOptions<1> options = {
             .out_dtype = output_dtype,
-            .out_dims = absl::MakeConstSpan(grad_in_dims),
+            .out_dims = log_probs.sizes(),
             .op_param_cache_keys = std::move(param_keys),
         };
 

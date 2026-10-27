@@ -51,6 +51,9 @@ absl::StatusOr<mlir::MlirOp> BuildCumsumShlo(
                                               : GetElementTypeOrDie(input));
 
   mlir::MlirBuilder& builder = input.getBuilder();
+  if (GetElementTypeOrDie(input) != target_element_type) {
+    input = mlir::stablehlo::ConvertElementType(input, target_element_type);
+  }
   TT_ASSIGN_OR_RETURN(const mlir::ElementType compute_dtype,
                       InferComputationDtype(target_element_type));
   if (GetElementTypeOrDie(input) != compute_dtype) {

@@ -86,7 +86,7 @@ absl::StatusOr<mlir::MlirOp> BuildZeroNorm(mlir::MlirOp input,
       /*inputs=*/{is_non_zero_casted},
       /*init_values=*/{zero},
       /*body_builder=*/
-      [&](mlir::RegionBuilder& rb) {
+      [&](mlir::RegionBuilder& rb) {  // REF_CAPTURE_OK=called synchronously
         mlir::stablehlo::buildReduceBody<mlir::stablehlo::AddOp>(
             element_type, rb.getRegion(), rb.getOpBuilder());
       },

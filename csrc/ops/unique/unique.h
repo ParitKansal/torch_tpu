@@ -18,12 +18,26 @@
 #define TORCH_TPU_CSRC_OPS_UNIQUE_UNIQUE_H_
 
 #include <cstdint>
+#include <string>
 
 #include "absl/status/statusor.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
 #include "stablehlo/integrations/cpp/builder/MlirBuilder.h"
 
 namespace torch_tpu {
+
+enum class ReturnInverse { kFalse, kTrue };
+enum class ReturnCounts { kFalse, kTrue };
+
+[[nodiscard]] inline std::string EncodeParamCacheKey(
+    ReturnInverse return_inverse) {
+  return return_inverse == ReturnInverse::kTrue ? "true" : "false";
+}
+
+[[nodiscard]] inline std::string EncodeParamCacheKey(
+    ReturnCounts return_counts) {
+  return return_counts == ReturnCounts::kTrue ? "true" : "false";
+}
 
 struct BuildUniqueShloOutputs {
   mlir::MlirOp unique_values;
@@ -39,6 +53,20 @@ absl::StatusOr<BuildUniqueShloOutputs> BuildUnique2Shlo(int64_t output_size,
                                                         bool sorted,
                                                         bool return_inverse,
                                                         bool return_counts);
+
+struct BuildUniqueDimPrepareOutputs {
+  mlir::MlirOp count;
+  mlir::MlirOp p_indices;
+  mlir::MlirOp mask;
+};
+
+absl::StatusOr<BuildUniqueDimPrepareOutputs> BuildUniqueDimPrepareShlo(
+    mlir::MlirOp input, int64_t dim);
+
+absl::StatusOr<BuildUniqueShloOutputs> BuildUniqueDimFinalizeShlo(
+    int64_t output_size, mlir::MlirOp input, mlir::MlirOp p_indices,
+    mlir::MlirOp mask, int64_t dim, ReturnInverse return_inverse,
+    ReturnCounts return_counts);
 
 }  // namespace torch_tpu
 

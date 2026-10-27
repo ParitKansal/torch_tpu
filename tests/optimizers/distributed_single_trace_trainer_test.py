@@ -23,14 +23,14 @@ local gradient shards.
 """
 
 from typing import Any
-
+from unittest import mock
 from absl import flags
 from absl.testing import absltest
 from absl.testing import parameterized
 import torch
 from torch import nn
 from torch.distributed import tensor as dtensor
-import torch.multiprocessing as mp
+from torch.testing._internal import common_utils
 from torch.utils import checkpoint as checkpoint_utils
 from torch_tpu._internal.compile import compiler
 from torch_tpu._internal.optimizers import adamw
@@ -40,7 +40,7 @@ from torch_tpu._internal.optimizers import single_trace_trainer
 from torch_tpu._internal.utils import test_utils
 from torch_tpu._internal.distributed import multiprocessing
 from tests import seed_test_utils
-from tests.distributed import distributed_utils
+from tests.distributed import continuous_test_utils
 from torchtitan.experiments.graph_trainer import simple_fsdp
 
 _DEVICE = flags.DEFINE_enum(
@@ -109,12 +109,6 @@ class _BufferOnly(nn.Module):
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     return x * self.scale.to_local()
-
-
-def _init_process_group(device: str) -> None:
-  torch.distributed.init_process_group(
-      backend="tpu_dist" if device == "tpu" else "gloo", init_method="env://"
-  )
 
 
 def _mesh(device: str) -> torch.distributed.device_mesh.DeviceMesh:
@@ -195,9 +189,52 @@ def _eager_reference(
   return losses, dict(param_group.params)
 
 
-def _worker_matches_eager(optimizer_name: str, device: str, mode: str) -> None:
-  _init_process_group(device)
-  try:
+class DistributedSingleTraceTrainerTest(
+    continuous_test_utils.TpuMultiProcContinuousTest
+):
+  world_size = _WORLD_SIZE
+
+  @classmethod
+  def device_type(cls) -> str:
+    multiprocessing.parse_absl_flags()
+    return _DEVICE.value
+
+  @classmethod
+  def backend_str(cls) -> str:
+    return "tpu_dist" if cls.device_type() == "tpu" else "gloo"
+
+  @classmethod
+  def _run_test_given_id(cls, test_id: str, **kwargs: Any) -> None:
+    test_id = test_id.split()[0]
+    if cls.device_type() == "tpu":
+      super()._run_test_given_id(test_id, **kwargs)
+      return
+
+    # device_type == "cpu"
+    # TpuMultiProcContinuousTest is designed for TPU and performs accelerator
+    # synchronization and device cache clearing between tests. This is
+    # unsupported on CPU, so execute with rank-specific RNG seeding and
+    # dist.barrier() instead.
+    def seed_rngs_for_rank(seed: int | None = None) -> None:
+      base_seed = cls.choose_seed() if seed is None else seed
+      seed_test_utils.seed_rngs(base_seed + cls.rank)
+
+    try:
+      with mock.patch.object(common_utils, "set_rng_seed", seed_rngs_for_rank):
+        super(
+            continuous_test_utils.TpuMultiProcContinuousTest, cls
+        )._run_test_given_id(test_id, **kwargs)
+    finally:
+      if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+  @parameterized.product(
+      optimizer_name=("adamw", "sgd"), mode=("fully_shard", "replicate")
+  )
+  def test_simple_fsdp_matches_eager(
+      self, optimizer_name: str, mode: str
+  ) -> None:
+    device = self.device_type()
     tolerances = _TOLERANCES[device]
     ref_losses, ref_params = _eager_reference(optimizer_name, device, mode)
 
@@ -206,15 +243,15 @@ def _worker_matches_eager(optimizer_name: str, device: str, mode: str) -> None:
         name: tuple(p.placements) for name, p in model.named_parameters()
     }
     if mode == "fully_shard":
-      assert placements["fc1.weight"] == (dtensor.Shard(0),), placements
+      self.assertEqual(placements["fc1.weight"], (dtensor.Shard(0),))
     else:
-      assert placements["fc1.weight"] == (dtensor.Replicate(),), placements
-    assert placements["fc2.weight"] == (dtensor.Replicate(),), placements
+      self.assertEqual(placements["fc1.weight"], (dtensor.Replicate(),))
+    self.assertEqual(placements["fc2.weight"], (dtensor.Replicate(),))
     trainer = _make_trainer(model, device, _make_optimizer(optimizer_name))
     # The optimizer state holds local shards only.
     for name, p in model.named_parameters():
       local = trainer.param_group.params[name.replace(".", "_")]
-      assert local.shape == p.to_local().shape, (name, local.shape)
+      self.assertEqual(local.shape, p.to_local().shape)
 
     step_fn = trainer.make_compiled_train_step(*_make_batch(0, device))
     for step in range(_NUM_STEPS):
@@ -222,21 +259,17 @@ def _worker_matches_eager(optimizer_name: str, device: str, mode: str) -> None:
       test_utils.assert_close(loss, ref_losses[step], **tolerances)
 
     for name, p in trainer.params.items():
-      assert isinstance(p, dtensor.DTensor), name
-      assert tuple(p.placements) == placements[name], name
+      self.assertIsInstance(p, dtensor.DTensor)
+      self.assertEqual(tuple(p.placements), placements[name])
       test_utils.assert_close(
           p.to_local(),
           ref_params[name.replace(".", "_")],
           preamble=name,
           **tolerances,
       )
-  finally:
-    torch.distributed.destroy_process_group()
 
-
-def _worker_grads_without_optimizer(device: str) -> None:
-  _init_process_group(device)
-  try:
+  def test_simple_fsdp_grads_without_optimizer(self) -> None:
+    device = self.device_type()
     tolerances = _TOLERANCES[device]
     ref_model = _build_fsdp_mlp(device, with_unused=True)
     inputs, targets = _make_batch(0, device)
@@ -250,25 +283,21 @@ def _worker_grads_without_optimizer(device: str) -> None:
     for (name, p), ref_p in zip(
         model.named_parameters(), ref_model.parameters()
     ):
-      assert isinstance(p.grad, dtensor.DTensor), name
+      self.assertIsInstance(p.grad, dtensor.DTensor)
       if name.startswith("unused."):
         # Unused parameters get zero gradients rather than None.
-        assert ref_p.grad is None, name
+        self.assertIsNone(ref_p.grad)
         test_utils.assert_close(
             p.grad.to_local(), torch.zeros_like(p.grad.to_local())
         )
         continue
-      assert p.grad.placements == ref_p.grad.placements, name
+      self.assertEqual(p.grad.placements, ref_p.grad.placements)
       test_utils.assert_close(
           p.grad.to_local(), ref_p.grad.to_local(), preamble=name, **tolerances
       )
-  finally:
-    torch.distributed.destroy_process_group()
 
-
-def _worker_dtensor_buffer(device: str) -> None:
-  _init_process_group(device)
-  try:
+  def test_dtensor_buffer(self) -> None:
+    device = self.device_type()
     tolerances = _TOLERANCES[device]
     torch.manual_seed(1234)
     with torch.device(device):
@@ -280,85 +309,38 @@ def _worker_dtensor_buffer(device: str) -> None:
     loss = trainer.make_compiled_train_step(inputs, targets)(inputs, targets)
     test_utils.assert_close(loss, ref_loss.detach(), **tolerances)
     buffers = trainer._bufs  # pylint: disable=protected-access
-    assert isinstance(buffers["scale"], dtensor.DTensor), buffers
-    assert buffers["scale"].placements == (dtensor.Replicate(),), buffers
-  finally:
-    torch.distributed.destroy_process_group()
+    self.assertIsInstance(buffers["scale"], dtensor.DTensor)
+    self.assertEqual(buffers["scale"].placements, (dtensor.Replicate(),))
 
-
-def _worker_muon_rejects_sharded_params(device: str) -> None:
-  _init_process_group(device)
-  try:
-    try:
+  def test_muon_rejects_sharded_params(self) -> None:
+    device = self.device_type()
+    with self.assertRaises(  # ASSERT_RAISES_OK=Validates expected error.
+        NotImplementedError
+    ) as cm:
       single_trace_trainer.SingleTraceTrainer(
           _build_fsdp_mlp(device), optimizer=muon.ReferenceMuon()
       )
-    except NotImplementedError as e:
-      assert "does not support sharded parameters" in str(e), e
-      assert "fc1.weight" in str(e), e
-    else:
-      raise AssertionError("Muon accepted sharded parameters.")
+    self.assertIn("does not support sharded parameters", str(cm.exception))
+    self.assertIn("fc1.weight", str(cm.exception))
     # Replicated (DDP) parameters are full matrices, so Muon accepts them.
     single_trace_trainer.SingleTraceTrainer(
         _build_fsdp_mlp(device, mode="replicate"),
         optimizer=muon.ReferenceMuon(),
     )
-  finally:
-    torch.distributed.destroy_process_group()
 
-
-def _worker_rejects_buffer_only_subclass_model(device: str) -> None:
-  _init_process_group(device)
-  try:
+  def test_rejects_buffer_only_subclass_model(self) -> None:
+    device = self.device_type()
     with torch.device(device):
       model = _BufferOnly(_mesh(device))
     trainer = single_trace_trainer.SingleTraceTrainer(
         model, compile_fn=lambda gm, _: gm
     )
     inputs = torch.ones(2, device=device)
-    try:
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=Validates expected error.
+        NotImplementedError, "without parameters"
+    ):
       trainer.make_compiled_train_step(inputs)
-    except NotImplementedError as e:
-      assert "without parameters" in str(e), e
-    else:
-      raise AssertionError("Traced a buffer-only model with DTensor buffers.")
-  finally:
-    torch.distributed.destroy_process_group()
-
-
-class DistributedSingleTraceTrainerTest(
-    seed_test_utils.MultiProcessRepeatableTest
-):
-
-  @parameterized.product(
-      optimizer_name=("adamw", "sgd"), mode=("fully_shard", "replicate")
-  )
-  def test_simple_fsdp_matches_eager(self, optimizer_name, mode):
-    distributed_utils.dist_run(
-        _WORLD_SIZE, _worker_matches_eager, optimizer_name, _DEVICE.value, mode
-    )
-
-  def test_simple_fsdp_grads_without_optimizer(self):
-    distributed_utils.dist_run(
-        _WORLD_SIZE, _worker_grads_without_optimizer, _DEVICE.value
-    )
-
-  def test_dtensor_buffer(self):
-    distributed_utils.dist_run(
-        _WORLD_SIZE, _worker_dtensor_buffer, _DEVICE.value
-    )
-
-  def test_muon_rejects_sharded_params(self):
-    distributed_utils.dist_run(
-        _WORLD_SIZE, _worker_muon_rejects_sharded_params, _DEVICE.value
-    )
-
-  def test_rejects_buffer_only_subclass_model(self):
-    distributed_utils.dist_run(
-        _WORLD_SIZE, _worker_rejects_buffer_only_subclass_model, _DEVICE.value
-    )
 
 
 if __name__ == "__main__":
-  mp.set_start_method("spawn")
   multiprocessing.handle_test_main(absltest.main)

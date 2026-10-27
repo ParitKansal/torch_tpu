@@ -116,7 +116,8 @@ absl::Status DispatchBernoulliTensorRng(at::Tensor& dest,
                                         OpParamCacheKeys param_keys) {
   return DispatchRngOpOut(
       dest, generator, output_dtype,
-      [&](at::Tensor rng_input_state) -> absl::Status {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (at::Tensor rng_input_state) -> absl::Status {
         return DispatchOpOut<2, 1>(
             GetBernoulliTensorFunctional(dims, output_dtype),
             {rng_input_state, p_tensor}, dest,
@@ -171,8 +172,8 @@ at::Tensor& AtenBernoulli_Float(at::Tensor& self, double p,
 
     TT_THROW_IF_ERROR(DispatchRngOp(
         self, generator,
-        [&](at::Tensor rng_input_state)
-            -> absl::StatusOr<std::vector<DeviceBufferRef>> {
+        [&](at::Tensor rng_input_state)  // REF_CAPTURE_OK=called synchronously
+        -> absl::StatusOr<std::vector<DeviceBufferRef>> {
           TT_ASSIGN_OR_RETURN(
               auto buf, (DispatchOp<1, 1>(
                             GetBernoulliFloatFunctional(dims, output_dtype, p),

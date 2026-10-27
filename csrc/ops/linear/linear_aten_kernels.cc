@@ -25,6 +25,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "ATen/ExpandUtils.h"
 #include "ATen/core/ATen_fwd.h"
 #include "ATen/core/LegacyTypeDispatch.h"
 #include "ATen/core/TensorBody.h"
@@ -34,9 +35,13 @@
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "c10/core/DispatchKey.h"
+#include "c10/core/SymInt.h"
+#include "c10/core/SymIntArrayRef.h"
+#include "c10/util/DimVector.h"
 #include "c10/util/intrusive_ptr.h"
 #include "csrc/common/aten_utils.h"
 #include "csrc/common/cache_key.h"
+#include "csrc/common/const_tensor.h"
 #include "csrc/common/dimension_types.h"
 #include "csrc/common/dtype.h"
 #include "csrc/common/error_utils.h"
@@ -213,16 +218,20 @@ absl::StatusOr<MlirOpResults<3>> BuildLinearBackwardShlo(
 
 // Validates the input, weight, and optional bias tensors for `aten::linear` and
 // returns the output shape `[..., Out]` (or `[...]` when `weight` is 1D).
-absl::StatusOr<Dimensions> ValidateLinearInputs(
-    const at::Tensor& input, const at::Tensor& weight,
-    const std::optional<at::Tensor>& bias) {
-  TT_RET_CHECK(input.dim() >= 1 && weight.dim() >= 1, error::kInvalidArgument)
+// Takes `ConstTensor`s so that the validation does not specialize the symbolic
+// shapes of the FakeTensors that torch.compile traces with.
+absl::StatusOr<c10::SymDimVector> ValidateLinearInputs(
+    const ConstTensor& input, const ConstTensor& weight,
+    const std::optional<ConstTensor>& bias) {
+  TT_ASSIGN_OR_RETURN(const int64_t input_dim, input.dim());
+  TT_ASSIGN_OR_RETURN(const int64_t weight_dim, weight.dim());
+  TT_RET_CHECK(input_dim >= 1 && weight_dim >= 1, error::kInvalidArgument)
       << "expected both arguments to linear to be at least 1D, got "
-      << input.dim() << "D and " << weight.dim() << "D";
-  TT_RET_CHECK(weight.dim() <= 2, error::kInvalidArgument)
-      << "expected the weight tensor to be at most 2D, got " << weight.dim()
+      << input_dim << "D and " << weight_dim << "D";
+  TT_RET_CHECK(weight_dim <= 2, error::kInvalidArgument)
+      << "expected the weight tensor to be at most 2D, got " << weight_dim
       << "D";
-  TT_RET_CHECK(!IsBool(input), error::kPythonNotImplementedError)
+  TT_RET_CHECK(!IsBool(input.scalar_type()), error::kPythonNotImplementedError)
       << "not implemented for " << ToString(input.scalar_type());
   TT_RET_CHECK(input.scalar_type() == weight.scalar_type(),
                error::kInvalidArgument)
@@ -236,26 +245,40 @@ absl::StatusOr<Dimensions> ValidateLinearInputs(
         << ToString(input.scalar_type()) << " and "
         << ToString(bias->scalar_type());
   }
-  TT_RET_CHECK(input.size(-1) == weight.size(-1), error::kInvalidArgument)
+  TT_ASSIGN_OR_RETURN(const c10::SymIntArrayRef input_sizes, input.sym_sizes());
+  TT_ASSIGN_OR_RETURN(const c10::SymIntArrayRef weight_sizes,
+                      weight.sym_sizes());
+  // Like upstream, this guards only on the contracting dimensions being equal.
+  TT_RET_CHECK(input_sizes.back() == weight_sizes.back(),
+               error::kInvalidArgument)
       << "expected the input and weight tensors to have the same last "
          "dimension size, got "
-      << input.size(-1) << " and " << weight.size(-1) << " for shapes "
-      << ToString(input.sizes()) << " and " << ToString(weight.sizes());
+      << input_sizes.back() << " and " << weight_sizes.back() << " for shapes "
+      << ToString(input_sizes) << " and " << ToString(weight_sizes);
 
-  Dimensions output_dims(input.sizes().begin(), input.sizes().end() - 1);
-  if (weight.dim() == 2) {
-    output_dims.push_back(weight.size(0));
+  c10::SymDimVector output_dims(input_sizes.begin(), input_sizes.end() - 1);
+  if (weight_dim == 2) {
+    output_dims.push_back(weight_sizes[0]);
   }
 
   if (bias.has_value() && bias->defined()) {
-    absl::StatusOr<Dimensions> broadcasted_dims = InferSize(*bias, output_dims);
-    TT_RET_CHECK(broadcasted_dims.ok() && *broadcasted_dims == output_dims,
+    TT_ASSIGN_OR_RETURN(const c10::SymIntArrayRef bias_sizes,
+                        bias->sym_sizes());
+    TT_RET_CHECK(at::is_expandable_to(bias_sizes, output_dims),
                  error::kInvalidArgument)
         << "expected the bias tensor to be broadcastable to the output shape "
-        << ToString(output_dims) << ", got shape " << ToString(bias->sizes());
+        << ToString(c10::SymIntArrayRef(output_dims)) << ", got shape "
+        << ToString(bias_sizes);
   }
 
   return output_dims;
+}
+
+// Converts the sizes of real (non-fake) tensors, which are never symbolic, to
+// `Dimensions`.
+Dimensions ToDimensions(c10::SymIntArrayRef sym_dims) {
+  const at::IntArrayRef dims = C10_AS_INTARRAYREF_SLOW(sym_dims);
+  return Dimensions(dims.begin(), dims.end());
 }
 
 // Validates the self (input), grad_output, and weight tensors for
@@ -263,8 +286,10 @@ absl::StatusOr<Dimensions> ValidateLinearInputs(
 absl::Status ValidateLinearBackwardInputs(const at::Tensor& self,
                                           const at::Tensor& grad_output,
                                           const at::Tensor& weight) {
-  TT_ASSIGN_OR_RETURN(Dimensions expected_output_dims,
+  TT_ASSIGN_OR_RETURN(const c10::SymDimVector sym_expected_output_dims,
                       ValidateLinearInputs(self, weight, std::nullopt));
+  const Dimensions expected_output_dims =
+      ToDimensions(sym_expected_output_dims);
   TT_RET_CHECK(grad_output.scalar_type() == self.scalar_type(),
                error::kInvalidArgument)
       << "expected the grad_output tensor to have dtype "
@@ -318,15 +343,17 @@ absl::StatusOr<DeviceBufferRef> Linear(const at::Tensor& input,
                                        const at::Tensor& weight,
                                        const std::optional<at::Tensor>& bias,
                                        OpParamCacheKeys param_keys) {
-  TT_ASSIGN_OR_RETURN(Dimensions output_dims,
+  TT_ASSIGN_OR_RETURN(const c10::SymDimVector output_dims,
                       ValidateLinearInputs(input, weight, bias));
   return DispatchLinearImpl<absl::StatusOr<DeviceBufferRef>>(
-      input, weight, bias, std::move(output_dims), std::move(param_keys),
-      [&](auto op_builder, auto options) {
+      input, weight, bias, ToDimensions(output_dims), std::move(param_keys),
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, auto options) {
         return DispatchOp<2>(std::move(op_builder), {input, weight},
                              std::move(options));
       },
-      [&](auto op_builder, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, auto options) {
         return DispatchOp<3>(std::move(op_builder), {input, weight, *bias},
                              std::move(options));
       });
@@ -335,17 +362,19 @@ absl::StatusOr<DeviceBufferRef> Linear(const at::Tensor& input,
 absl::Status LinearOut(const at::Tensor& input, const at::Tensor& weight,
                        const std::optional<at::Tensor>& bias, at::Tensor& out,
                        OpParamCacheKeys param_keys) {
-  TT_ASSIGN_OR_RETURN(Dimensions output_dims,
+  TT_ASSIGN_OR_RETURN(const c10::SymDimVector output_dims,
                       ValidateLinearInputs(input, weight, bias));
   TT_RETURN_IF_ERROR(ValidateOutDtype(out, input.scalar_type(),
                                       /*allow_out_dtype_cast=*/false));
   return DispatchLinearImpl<absl::Status>(
-      input, weight, bias, std::move(output_dims), std::move(param_keys),
-      [&](auto op_builder, auto options) {
+      input, weight, bias, ToDimensions(output_dims), std::move(param_keys),
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, auto options) {
         return DispatchOpOut<2>(std::move(op_builder), {input, weight}, out,
                                 std::move(options));
       },
-      [&](auto op_builder, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, auto options) {
         return DispatchOpOut<3>(std::move(op_builder), {input, weight, *bias},
                                 out, std::move(options));
       });
@@ -441,10 +470,12 @@ at::Tensor AtenLinearAutograd(const at::Tensor& input, const at::Tensor& weight,
                               const std::optional<at::Tensor>& bias) {
   const bool any_requires_grad =
       torch::autograd::compute_requires_grad(input, weight, bias);
+  // Uses `sym_size()` so that FakeTensors with symbolic shapes are not
+  // specialized.
   const bool is_non_standard_grad_bias =
       any_requires_grad && bias.has_value() && bias->defined() &&
       ((weight.dim() == 2 &&
-        (bias->dim() != 1 || bias->size(0) != weight.size(0))) ||
+        (bias->dim() != 1 || bias->sym_size(0) != weight.sym_size(0))) ||
        (weight.dim() == 1 && bias->dim() != 0)) &&
       torch::autograd::compute_requires_grad(*bias) &&
       ValidateLinearInputs(input, weight, bias).ok();
@@ -471,7 +502,7 @@ at::Tensor AtenLinearAutograd(const at::Tensor& input, const at::Tensor& weight,
     grad_fn->input_ = torch::autograd::SavedVariable(input, false);
     grad_fn->weight_ = torch::autograd::SavedVariable(weight, false);
   }
-  at::Tensor output = ([&]() {
+  at::Tensor output = ([&]() {  // REF_CAPTURE_OK=called locally
     at::AutoDispatchBelowADInplaceOrView guard;
     return at::linear(input, weight, bias);
   })();

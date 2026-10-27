@@ -298,12 +298,13 @@ absl::Status PartitionGlobalToLocal(
     mlir::MLIRContext* context, mlir::ModuleOp module,
     const xla::PjRtTopologyDescription* client_topology) {
   int64_t mesh_num_partitions = 0;
-  module.walk([&](mlir::sdy::MeshOp mesh_op) {
-    const int64_t total_size = mesh_op.getMesh().getTotalSize();
-    if (total_size > mesh_num_partitions) {
-      mesh_num_partitions = total_size;
-    }
-  });
+  module.walk(
+      [&](mlir::sdy::MeshOp mesh_op) {  // REF_CAPTURE_OK=called synchronously
+        const int64_t total_size = mesh_op.getMesh().getTotalSize();
+        if (total_size > mesh_num_partitions) {
+          mesh_num_partitions = total_size;
+        }
+      });
 
   //////////////////////////////////////////////////////////////////////////////
   // Perform Shardy StableHLO/MLIR passes.
@@ -399,7 +400,7 @@ absl::Status PartitionGlobalToLocal(
 // Returns true if the module contains any sdy.manual_computation operations.
 bool ContainsSdyManualComputation(mlir::ModuleOp module) {
   bool has_manual_computation = false;
-  module.walk([&](mlir::Operation* op) {
+  module.walk([&](mlir::Operation* op) {  // REF_CAPTURE_OK=called synchronously
     if (mlir::isa<mlir::sdy::ManualComputationOp>(op)) {
       has_manual_computation = true;
       return mlir::WalkResult::interrupt();  // Stop walking

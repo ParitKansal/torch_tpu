@@ -37,6 +37,9 @@ torch_tpu_py_library(
         "gemma.py",
         "gen_benchmarks.py",
         "gpt.py",
+        "hf_llm.py",
+        "hf_multimodal.py",
+        "hf_text.py",
         "hf_vision.py",
         "llama.py",
         "nemotron.py",
@@ -58,6 +61,7 @@ torch_tpu_py_library(
         "//perflab:step_lib",
         "//perflab:torch_device_ops",
         "//perflab/gen_utils",
+        "//perflab/model_utils:ragged_moe",
         "//shims/torch:pytorch",
         "//tests:module_registry",
     ],
@@ -72,6 +76,7 @@ internal_target(
     srcs = ["qwen3_8.py"],
     deps = [
         "//perflab:context",
+        "//perflab:model_helpers",
         "//perflab:registry",
         "//perflab:step_lib",
         "//perflab:torch_device_ops",
@@ -87,6 +92,7 @@ internal_target(
     deps = [
         "//perflab:compile",
         "//perflab:context",
+        "//perflab:model_helpers",
         "//perflab:registry",
         "//perflab:step_lib",
         "//perflab:torch_device_ops",

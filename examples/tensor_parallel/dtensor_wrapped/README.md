@@ -27,6 +27,8 @@ bash ./launch.sh
 
 Or run via the Python elastic launcher:
 
+<!-- doc-test: launch_doc_test -->
+
 ```bash
 python3 ./launch.py
 ```

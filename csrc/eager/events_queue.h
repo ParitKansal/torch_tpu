@@ -20,6 +20,7 @@
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <variant>
 #include <vector>
 
 #include "absl/base/nullability.h"
@@ -32,8 +33,8 @@
 #include "csrc/common/cache_key.h"
 #include "csrc/common/compilation.h"
 #include "csrc/common/compilation_spec.h"
-#include "csrc/common/context_states.h"
 #include "csrc/eager/device_buffer.h"
+#include "csrc/eager/eager_mode.h"
 #include "csrc/eager/execution_task.h"
 #include "csrc/eager/split_traversal.h"
 #include "csrc/eager/structured_log_buffer.h"
@@ -162,19 +163,23 @@ struct MaterializationSettings {
   absl_nonnull std::shared_ptr<const CompilationContext> compilation_context;
 };
 
-// A snapshot to be materialized.
-struct PendingSnapshotMaterialization {
-  // The nodes that must be executed to reach the snapshot.
+// A block of DeferredOp nodes that should be compiled and executed together.
+struct EagerExecution {
+  // The nodes that must be executed by the block.
   std::vector<SharedDeviceBufferList> must_execute;
-  // The nodes that must be materialized by the snapshot.
+  // The nodes that must be materialized by the block.
   std::vector<SharedDeviceBufferList> must_materialize;
   // The core that the must_execute nodes should be executed on.
-  CorePinningMode core_pinning_mode;
-  // If the snapshot includes a compiled mode execution task, it will be stored
-  // here.
-  std::optional<ExecutionTask> execution_task;
+  CorePinningMode core_pinning_mode = CorePinningMode::kUnpinned;
   // Settings for the materialization.
   MaterializationSettings settings;
+};
+
+using CompiledExecution = ExecutionTask;
+
+// A request for an EventSnapshot. This should capture the futures for all
+// prior operations on the stream.
+struct SnapshotRequest {
   // Futures that must be completed before the snapshot is reached.
   std::vector<xla::Future<void>> futures;
   // When the execution for the traversals has started, an EventSnapshot will be
@@ -182,18 +187,25 @@ struct PendingSnapshotMaterialization {
   xla::Promise<std::shared_ptr<EventSnapshot>> snapshot_promise;
 };
 
-// Returns a list of execution nodes and up to one ExecutionTask that, if
-// compiled and executed, would materialize all live tensors created on the
-// given device and stream.
-// These are grouped by the snapshot they are satisfying.
-//
-// This clears these nodes and compiled tasks from the events queue.
-std::vector<PendingSnapshotMaterialization> PrepareSnapshotMaterializations(
-    c10::DeviceIndex device_index, c10::StreamId stream_id);
+using ReadyWork =
+    std::variant<EagerExecution, CompiledExecution, SnapshotRequest>;
+
+// Returns a list of work items that are ready to be processed for the given
+// device and stream.
+std::vector<ReadyWork> GetReadyWork(c10::DeviceIndex device_index,
+                                    c10::StreamId stream_id);
 
 // Sets the core pinning mode for the given stream.
 void SetCorePinningMode(c10::DeviceIndex device_index, c10::StreamId stream_id,
                         CorePinningMode pinned);
+
+void InsertGraphBreak(c10::DeviceIndex device_index, c10::StreamId stream_id,
+                      std::vector<SharedDeviceBufferList> must_materialize,
+                      MaterializationReason reason, GraphSplitMode mode);
+
+void WriteBackMaterializationFutures(c10::DeviceIndex device_index,
+                                     c10::StreamId stream_id,
+                                     std::vector<xla::Future<void>>&& futures);
 
 }  // namespace torch_tpu
 

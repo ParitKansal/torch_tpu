@@ -19,6 +19,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -51,10 +52,11 @@ namespace {
 
 auto SparseDenseMatmulBuilder(int64_t device_batch_size,
                               int64_t max_ids_per_partition,
-                              int64_t max_unique_ids_per_partition) {
+                              int64_t max_unique_ids_per_partition,
+                              bool enable_minibatching) {
   return [device_batch_size, max_ids_per_partition,
-          max_unique_ids_per_partition](
-             torch_tpu::FixedSizeSpan<mlir::MlirOp, 5> inputs)
+          max_unique_ids_per_partition,
+          enable_minibatching](torch_tpu::FixedSizeSpan<mlir::MlirOp, 5> inputs)
              -> absl::StatusOr<mlir::MlirOp> {
     mlir::MlirOp row_pointers = inputs[0];
     mlir::MlirOp embedding_ids = inputs[1];
@@ -87,7 +89,9 @@ auto SparseDenseMatmulBuilder(int64_t device_batch_size,
         op_builder.getNamedAttr("mhlo.frontend_attributes",
                                 op_builder.getDictionaryAttr(frontend_attrs));
 
-    std::string call_target = "SparseDenseMatmulOp";
+    std::string_view call_target = enable_minibatching
+                                       ? "SparseDenseMatmulWithMinibatchingOp"
+                                       : "SparseDenseMatmulOp";
 
     mlir::NamedAttribute call_target_attr = op_builder.getNamedAttr(
         "call_target_name", op_builder.getStringAttr(call_target));
@@ -103,9 +107,18 @@ auto SparseDenseMatmulBuilder(int64_t device_batch_size,
     int64_t embedding_dim = embedding_table_type.getShape()[1];
 
     // Operands
-    std::vector<mlir::Value> operands = {
-        row_pointers.getValue(), embedding_ids.getValue(),
-        sample_ids.getValue(), gains.getValue(), embedding_table.getValue()};
+    std::vector<mlir::Value> operands;
+    if (enable_minibatching) {
+      auto num_minibatches =
+          torch_tpu::MakeScalarConstant(builder, 1, op_builder.getI32Type());
+      operands = {row_pointers.getValue(),    embedding_ids.getValue(),
+                  sample_ids.getValue(),      gains.getValue(),
+                  num_minibatches.getValue(), embedding_table.getValue()};
+    } else {
+      operands = {row_pointers.getValue(), embedding_ids.getValue(),
+                  sample_ids.getValue(), gains.getValue(),
+                  embedding_table.getValue()};
+    }
 
     // Create activation_init operand (zero tensor of shape [device_batch_size,
     // embedding_dim])
@@ -134,11 +147,13 @@ at::Tensor AtenSparseDenseMatmul(
     const at::Tensor& row_pointers, const at::Tensor& embedding_ids,
     const at::Tensor& sample_ids, const at::Tensor& gains,
     const at::Tensor& embedding_table, int64_t device_batch_size,
-    int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition) {
+    int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition,
+    bool enable_minibatching) {
   TT_KERNEL(
       torch_tpu::OpName::kSparseDenseMatmul, param_keys,
       (row_pointers, embedding_ids, sample_ids, gains, embedding_table,
-       device_batch_size, max_ids_per_partition, max_unique_ids_per_partition),
+       device_batch_size, max_ids_per_partition, max_unique_ids_per_partition,
+       enable_minibatching),
       {
         std::array<torch_tpu::TensorHolder, 5> inputs = {
             row_pointers, embedding_ids, sample_ids, gains, embedding_table};
@@ -146,9 +161,9 @@ at::Tensor AtenSparseDenseMatmul(
         torch_tpu::Dimensions out_dims = {device_batch_size,
                                           embedding_table.size(1)};
 
-        auto builder_fn =
-            SparseDenseMatmulBuilder(device_batch_size, max_ids_per_partition,
-                                     max_unique_ids_per_partition);
+        auto builder_fn = SparseDenseMatmulBuilder(
+            device_batch_size, max_ids_per_partition,
+            max_unique_ids_per_partition, enable_minibatching);
 
         TT_ASSIGN_OR_THROW(mlir::ElementType out_dtype,
                            torch_tpu::ConvertTo<mlir::ElementType>(at::kFloat));

@@ -18,8 +18,10 @@ from unittest import mock
 
 from absl.testing import absltest
 import torch
+from torch_tpu._internal.utils import test_utils
 from perflab.model_utils import ragged_moe
 from tests import seed_test_utils
+from transformers.models.gemma4 import configuration_gemma4
 from transformers.models.qwen3_5_moe import configuration_qwen3_5_moe
 
 
@@ -119,6 +121,56 @@ class RaggedMoeTest(seed_test_utils.RepeatableTest):
         router_logits.shape,
         (batch_size * seq_len, self.config.num_experts),
     )
+
+
+class RaggedExpertsGemma4Test(seed_test_utils.RepeatableTest):
+
+  def setUp(self):
+    super().setUp()
+    self.config = configuration_gemma4.Gemma4TextConfig(
+        hidden_size=32,
+        moe_intermediate_size=48,
+        num_experts=4,
+        top_k_experts=2,
+        hidden_activation="gelu_pytorch_tanh",
+    )
+
+  def test_forward_matches_per_token_reference(self):
+    experts = ragged_moe.RaggedExpertsGemma4(
+        config=self.config, ragged_dot_impl=manual_ragged_dot
+    )
+    num_tokens = 6
+    hidden_states = torch.randn(num_tokens, self.config.hidden_size)
+    top_k_index = torch.stack([
+        torch.randperm(self.config.num_experts)[: self.config.top_k_experts]
+        for _ in range(num_tokens)
+    ])
+    top_k_weights = torch.softmax(
+        torch.randn(num_tokens, self.config.top_k_experts), dim=-1
+    )
+
+    output = experts(hidden_states, top_k_index, top_k_weights)
+
+    expected = torch.zeros_like(hidden_states)
+    for t in range(num_tokens):
+      for k in range(self.config.top_k_experts):
+        e = int(top_k_index[t, k])
+        x = hidden_states[t]
+        h = (x @ experts.up[e]) * experts.act_fn(x @ experts.gate[e])
+        expected[t] += top_k_weights[t, k] * (h @ experts.down[e])
+    test_utils.assert_close(output, expected, rtol=1e-4, atol=1e-5)
+
+  def test_missing_ragged_dot_impl_raises(self):
+    experts = ragged_moe.RaggedExpertsGemma4(config=self.config)
+    experts.ragged_dot_impl = None
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=Test runtime fallback.
+        RuntimeError, "torch.tpu.ops.ragged_dot is not available"
+    ):
+      experts(
+          torch.randn(2, self.config.hidden_size),
+          torch.zeros(2, self.config.top_k_experts, dtype=torch.long),
+          torch.ones(2, self.config.top_k_experts),
+      )
 
 
 if __name__ == "__main__":

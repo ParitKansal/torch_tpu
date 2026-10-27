@@ -388,12 +388,14 @@ std::shared_ptr<ContextedModule> PyBuildMlir(
     const std::vector<at::Tensor>& result_tensors,
     const std::vector<at::Tensor>& argument_tensors,
     bool use_stablehlo_bounds) {  // INT_VEC_OK
-  TT_ASSIGN_OR_THROW(ContextedModule module,
-                     ContextedModule::Make([&](mlir::MLIRContext& context) {
-                       return ExtractMlirFromGraph(context, argument_tensors,
-                                                   result_tensors,
-                                                   use_stablehlo_bounds);
-                     }));
+  TT_ASSIGN_OR_THROW(
+      ContextedModule module,
+      ContextedModule::Make([&]  // REF_CAPTURE_OK=called synchronously
+                            (mlir::MLIRContext& context) {
+                              return ExtractMlirFromGraph(
+                                  context, argument_tensors, result_tensors,
+                                  use_stablehlo_bounds);
+                            }));
 
   mlir::BaseScopedDiagnosticHandler diag_handler(&module.context());
   if (failed(mlir::verify(module.get()))) {
@@ -411,7 +413,8 @@ std::shared_ptr<ContextedModule> PyParseMlirText(const std::string& mlir_text) {
   TT_ASSIGN_OR_THROW(
       ContextedModule module,
       ContextedModule::Make(
-          [&](mlir::MLIRContext& context)
+          [&]  // REF_CAPTURE_OK=called synchronously
+          (mlir::MLIRContext& context)
               -> absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> {
             return mlir::parseSourceString<mlir::ModuleOp>(
                 llvm::StringRef(mlir_text.data(), mlir_text.size()),
@@ -940,10 +943,12 @@ void PyPrecompilePadModule(const std::vector<TensorInfo>& tensor_info,
   std::vector<Shape> dynamic_shapes =
       MakePadDynamicShapes(tensor_info, bounds_list);
 
-  MlirComputationBuilder pad_builder = [&](mlir::MLIRContext& mlir_context) {
-    return GetPadModule(mlir_context, dynamic_shapes,
-                        /*pad_only_module=*/true);
-  };
+  MlirComputationBuilder pad_builder =
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (mlir::MLIRContext& mlir_context) {
+        return GetPadModule(mlir_context, dynamic_shapes,
+                            /*pad_only_module=*/true);
+      };
 
   const auto compilation_mode = fast_compile ? CompilationMode::kFastCompile
                                              : CompilationMode::kFastRuntime;
@@ -997,9 +1002,12 @@ CompileResult PyGetOrCompilePadModule(
   std::vector<Shape> dynamic_shapes =
       MakePadDynamicShapes(tensor_info, bounds_list);
 
-  MlirComputationBuilder pad_builder = [&](mlir::MLIRContext& mlir_context) {
-    return GetPadModule(mlir_context, dynamic_shapes, /*pad_only_module=*/true);
-  };
+  MlirComputationBuilder pad_builder =
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (mlir::MLIRContext& mlir_context) {
+        return GetPadModule(mlir_context, dynamic_shapes,
+                            /*pad_only_module=*/true);
+      };
 
   const auto compilation_mode = fast_compile ? CompilationMode::kFastCompile
                                              : CompilationMode::kFastRuntime;
@@ -1058,9 +1066,11 @@ CompileResult PyGetDynamicPadModule(
   std::vector<Shape> dynamic_shapes =
       MakePadDynamicShapes(tensor_info, bounds_list);
 
-  MlirComputationBuilder pad_builder = [&](mlir::MLIRContext& mlir_context) {
-    return GetDynamicPadModule(mlir_context, dynamic_shapes);
-  };
+  MlirComputationBuilder pad_builder =
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (mlir::MLIRContext& mlir_context) {
+        return GetDynamicPadModule(mlir_context, dynamic_shapes);
+      };
 
   const auto compilation_mode = fast_compile ? CompilationMode::kFastCompile
                                              : CompilationMode::kFastRuntime;
@@ -1099,10 +1109,12 @@ void PyPrecompileSliceModule(
   SliceSubgraphInputs inputs =
       UnpackSliceInputs(target_shapes, padded_shapes, input_scalar_types);
 
-  MlirComputationBuilder slice_builder = [&](mlir::MLIRContext& mlir_context) {
-    return GetSliceModule(mlir_context, inputs.target_dims, inputs.padded_dims,
-                          inputs.element_types);
-  };
+  MlirComputationBuilder slice_builder =
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (mlir::MLIRContext& mlir_context) {
+        return GetSliceModule(mlir_context, inputs.target_dims,
+                              inputs.padded_dims, inputs.element_types);
+      };
 
   const auto compilation_mode = fast_compile ? CompilationMode::kFastCompile
                                              : CompilationMode::kFastRuntime;
@@ -1161,10 +1173,12 @@ CompileResult PyGetOrCompileSliceModule(
   SliceSubgraphInputs inputs =
       UnpackSliceInputs(target_shapes, padded_shapes, input_scalar_types);
 
-  MlirComputationBuilder slice_builder = [&](mlir::MLIRContext& mlir_context) {
-    return GetSliceModule(mlir_context, inputs.target_dims, inputs.padded_dims,
-                          inputs.element_types);
-  };
+  MlirComputationBuilder slice_builder =
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (mlir::MLIRContext& mlir_context) {
+        return GetSliceModule(mlir_context, inputs.target_dims,
+                              inputs.padded_dims, inputs.element_types);
+      };
 
   // For slice, the inputs to the compiled module are the padded shapes, and
   // outputs are target shapes.
@@ -1708,7 +1722,7 @@ class FxOutputReconstructor {
       return GetInputItemNewRef(inputs_ptr, entry.index);
     }
     const int idx = entry.index;
-    at::Tensor tensor = [&]() {
+    at::Tensor tensor = [&]() {  // REF_CAPTURE_OK=called locally
       if (entry.needs_clone) {
         return deduped_outputs[idx].clone();
       }
@@ -2344,6 +2358,13 @@ TT_PYBIND11_MODULE(tpu_torch_compile, m) {
         "Pops the current state of the enable_tracebacks context manager.");
   m.def("push_enable_tracebacks", &PyPushEnableTracebacks, py::arg("enabled"),
         "Pushes a new state onto the enable_tracebacks context manager.");
+  m.def("push_name_scopes", &ScopedPythonContextCapturer::PushNameScopes,
+        py::arg("scopes"),
+        "Pushes a full name scope hierarchy onto the PythonContext capturer "
+        "stack, replacing the active hierarchy until popped.");
+  m.def("pop_name_scopes", &ScopedPythonContextCapturer::PopNameScopes,
+        "Pops the top name scope hierarchy from the PythonContext capturer "
+        "stack, restoring the previous hierarchy.");
   m.def("serialize_executable", PySerializeExecutable, py::arg("executable"),
         "Serializes a PjRtLoadedExecutable to bytes for caching.");
   m.def("load_serialized_executable", PyLoadSerializedExecutable,

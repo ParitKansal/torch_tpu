@@ -2680,9 +2680,84 @@ Device-side assertion tracking was not enabled by user.""",
     with et.assert_raises_message(
         RuntimeError,
         gpu=""""addcmul_cuda" not implemented for 'Bool'""",
-        tpu="""addcmul(): expected no input tensor dtype to be bool, got input: bool, tensor1: bool, tensor2: bool""",
+        tpu="""addcmul(): expected result type not to be bool, got input: bool, tensor1: bool, tensor2: bool""",
+        message_reviewed_by="gunhyun",
     ):
       torch.addcmul(self_tensor, tensor1, tensor2, value=value)
+
+    out_b = torch.empty((5, 5), dtype=torch.bool, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu=""""addcmul_cuda" not implemented for 'Bool'""",
+        tpu="""addcmul(): expected result type not to be bool, got input: bool, tensor1: bool, tensor2: bool""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(self_tensor, tensor1, tensor2, value=True, out=out_b)
+
+  def test_addcmul_out_dtype_error(self):
+    s = torch.full((2,), 1.25, dtype=torch.float32, device=et.device())
+    t1 = torch.full((2,), 1.5, dtype=torch.float32, device=et.device())
+    t2 = torch.ones(2, dtype=torch.float32, device=et.device())
+    out = torch.empty(2, dtype=torch.int32, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""result type Float can't be cast to the desired output type Int""",
+        tpu="""addcmul(): result type float32 can't be cast to the desired output type int32""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s, t1, t2, out=out)
+
+    out_cpu = torch.empty(2, dtype=torch.float32, device="cpu")
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!""",
+        tpu="""addcmul(): expected out tensor to be on tpu, got cpu""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s, t1, t2, out=out_cpu)
+
+  def test_addcmul_out_inplace_broadcast_error(self):
+    s = torch.ones(1, 4, dtype=torch.float32, device=et.device())
+    t1 = torch.ones(3, 4, dtype=torch.float32, device=et.device())
+    t2 = torch.ones(3, 4, dtype=torch.float32, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""output with shape [1, 4] doesn't match the broadcast shape [3, 4]""",
+        tpu="""addcmul(): output with shape [1, 4] doesn't match the broadcast shape of the tensor being operated on in-place, which has shape [3, 4]""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s, t1, t2, out=s)
+
+  def test_addcmul_value_overflow_error(self):
+    s = torch.ones(2, dtype=torch.float32, device=et.device())
+    t1 = torch.ones(2, dtype=torch.float32, device=et.device())
+    t2 = torch.ones(2, dtype=torch.float32, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""value cannot be converted to type float without overflow""",
+        tpu="""addcmul(): value cannot be converted to type float32 without overflow""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s, t1, t2, value=1e40)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""value cannot be converted to type float without overflow""",
+        tpu="""addcmul(): value cannot be converted to type float32 without overflow""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s, t1, t2, value=1 + 2j)
+
+    s_i64 = torch.ones(2, dtype=torch.int64, device=et.device())
+    t1_i64 = torch.ones(2, dtype=torch.int64, device=et.device())
+    t2_i64 = torch.ones(2, dtype=torch.int64, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        gpu="""value cannot be converted to type int64_t without overflow""",
+        tpu="""addcmul(): value cannot be converted to type int64 without overflow""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.addcmul(s_i64, t1_i64, t2_i64, value=1e20)
 
   def test_index_put_too_many_indices_error(self):
     # TODO(mkkhanna): Fix exception type for TPU.
@@ -3522,20 +3597,34 @@ Device-side assertion tracking was not enabled by user.""",
 
   def test_logit_unsupported_complex(self):
     t = torch.tensor([1 + 1j], device=et.device(), dtype=torch.complex64)
+    real_t = torch.tensor([0.5], device=et.device(), dtype=torch.float32)
     out = torch.tensor([1 + 1j], device=et.device(), dtype=torch.complex64)
     funcs = [
         (lambda: torch.logit(t), "logit()"),
         (lambda: torch.logit(t, out=out), "logit()"),
         (lambda: torch.logit_(t), "logit_()"),
         (lambda: torch.ops.aten.logit_backward(t, t), "logit_backward()"),
+        (lambda: torch.ops.aten.logit_backward(real_t, t), "logit_backward()"),
+        (lambda: torch.ops.aten.logit_backward(t, real_t), "logit_backward()"),
     ]
     for func, op_prefix in funcs:
       with et.assert_raises_message(
           RuntimeError,
           tpu=f"{op_prefix}: expected non-complex dtype, got complex64",
           gpu=""""logit_cuda" not implemented for 'ComplexFloat'""",
+          message_reviewed_by="gunhyun",
       ):
         func()
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""logit_backward(): expected non-complex dtype, got complex64""",
+        gpu="""result type ComplexFloat can't be cast to the desired output type Float""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.logit_backward.grad_input(
+          t, real_t, grad_input=torch.empty_like(real_t)
+      )
 
   @parameterized.named_parameters(
       ("bool", torch.bool, "bool", "Bool"),
@@ -4100,17 +4189,13 @@ Device-side assertion tracking was not enabled by user.""",
       torch.linspace(0, 10, 5, out=out)
 
   def test_arange_infinite_inputs(self):
-    """Tests that arange fails on infinite inputs with expected error.
-
-    The test for when `step` is infinite is skipped because PyTorch CPU does not
-    error in this case. Such a test is in
-    `TpuErrorsTest.test_arange_infinite_step`.
-    """
+    """Tests that arange fails on infinite inputs with expected error."""
 
     with et.assert_raises_message(
         RuntimeError,
         tpu="""arange(): expected [start, end) interval to have finite bounds, got [inf, 0)""",
         gpu="""unsupported range: inf -> 0""",
+        message_reviewed_by="adivinpatel",
     ):
       torch.arange(float("inf"), 0, -1, device=et.device())
 
@@ -4118,6 +4203,7 @@ Device-side assertion tracking was not enabled by user.""",
         RuntimeError,
         tpu="""arange(): expected [start, end) interval to have finite bounds, got [0, inf)""",
         gpu="""unsupported range: 0 -> inf""",
+        message_reviewed_by="adivinpatel",
     ):
       torch.arange(0, float("inf"), 1, device=et.device())
 
@@ -4144,24 +4230,37 @@ Device-side assertion tracking was not enabled by user.""",
       torch.arange(10, 0, 1, device=et.device())
 
   def test_arange_invalid_inputs_with_infinite_step(self):
-    """Tests that arange fails on invalid sets of inputs with infinite step.
-
-    Tests whether the given `step` (infinite) sign is valid for the given
-    interval [start, end]. i.e. `step` should be negative infinity iff `start` >
-    `end`, but positive infinity iff `start` < `end`.
-    """
+    """Tests that arange fails on invalid sets of inputs with infinite step."""
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""arange(): expected step to be positive since start (0) < end (10), got step=-inf""",
+        tpu="""arange(): expected step to be finite, got inf""",
+        gpu="""step must be finite but got inf""",
+        message_reviewed_by="adivinpatel",
+    ):
+      torch.arange(10, 20, float("inf"), device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""arange(): expected step to be finite, got -inf""",
         gpu="""step must be finite but got -inf""",
+        message_reviewed_by="adivinpatel",
+    ):
+      torch.arange(20, 10, float("-inf"), device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""arange(): expected step to be finite, got -inf""",
+        gpu="""step must be finite but got -inf""",
+        message_reviewed_by="adivinpatel",
     ):
       torch.arange(0, 10, float("-inf"), device=et.device())
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""arange(): expected step to be negative since start (10) > end (0), got step=inf""",
+        tpu="""arange(): expected step to be finite, got inf""",
         gpu="""step must be finite but got inf""",
+        message_reviewed_by="adivinpatel",
     ):
       torch.arange(10, 0, float("inf"), device=et.device())
 
@@ -5783,6 +5882,23 @@ Supported combinations for non-constant padding:
       ):
         torch.erfinv(t)
 
+  def test_lgamma_unsupported_complex(self):
+    for dtype in (torch.complex64, torch.complex128):
+      with self.subTest(dtype=dtype):
+        t = torch.randn(2, 2, dtype=dtype, device=et.device())
+        with et.assert_raises_message(
+            RuntimeError,
+            tpu=re.compile(
+                r"lgamma(\.out)?\(\): expected self not to be complex, got"
+                r" complex(64|128)"
+            ),
+            gpu=re.compile(
+                r".*not implemented for ('ComplexFloat'|'ComplexDouble')"
+            ),
+            message_reviewed_by="gunhyun",
+        ):
+          torch.lgamma(t)
+
   def test_cat_out_invalid_cast(self):
     """Tests that cat fails when the out tensor has an incompatible dtype."""
     t_f32 = torch.tensor([1.0, 2.0], device=et.device(), dtype=torch.float32)
@@ -6850,6 +6966,244 @@ Supported combinations for non-constant padding:
     ):
       _run_convolution_backward(grad, inp, w)
 
+  @_parameterize_convolution_fwd_bwd(
+      forward={"tpu_fn": "convolution"},
+      backward={"tpu_fn": "convolution_backward"},
+  )
+  def test_convolution_zero_dim_input(self, convolution, tpu_fn: str):
+    inp = torch.ones(2, 3, 0, 8, device=et.device())
+    w = torch.ones(1, 3, 3, 3, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected non-zero input channels and spatial dimensions, got shape [2, 3, 0, 8]""",
+        gpu="""Only zero batch or zero channel inputs are supported, but got input shape: [2, 3, 0, 8]""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, padding=(2, 2))
+
+  @_parameterize_convolution_fwd_bwd(
+      forward={
+          "tpu_fn": "convolution",
+          "gpu_groups_msg": "non-positive groups is not supported",
+      },
+      backward={
+          "tpu_fn": "convolution_backward",
+          "gpu_groups_msg": (
+              "expected groups to be greater than 0, but got groups=0"
+          ),
+      },
+  )
+  def test_convolution_invalid_groups_and_weight(
+      self, convolution, tpu_fn: str, gpu_groups_msg: str
+  ):
+    inp = torch.ones(2, 3, 10, 10, device=et.device())
+    w = torch.ones(1, 3, 3, 3, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected groups to be greater than 0, got 0""",
+        gpu=gpu_groups_msg,
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, groups=0)
+
+    w_transposed = torch.ones(3, 1, 3, 3, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected in_channels to be divisible by groups, got in_channels=3 and groups=2""",
+        gpu="""Given groups=2, expected weight to be divisible by 2 at dimension 0, but got weight of size [[3, 1, 3, 3]] instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w_transposed, groups=2, transposed=True)
+
+    w_non_divisible_in = torch.ones(2, 1, 3, 3, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected in_channels to be divisible by groups, got in_channels=3 and groups=2""",
+        gpu="""Given groups=2, weight of size [2, 1, 3, 3], expected input[2, 3, 10, 10] to have 2 channels, but got 3 channels instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w_non_divisible_in, groups=2)
+
+    inp_grouped = torch.ones(2, 4, 10, 10, device=et.device())
+    w_grouped = torch.ones(3, 2, 3, 3, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected out_channels to be divisible by groups, got out_channels=3 and groups=2""",
+        gpu="""Given groups=2, expected weight to be divisible by 2 at dimension 0, but got weight of size [[3, 2, 3, 3]] instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp_grouped, w_grouped, groups=2)
+
+    w_zero = torch.ones(0, 3, 3, 3, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected non-zero weight dimensions, got shape [0, 3, 3, 3]""",
+        gpu="""Given groups=1, expected weight to be at least 1 at dimension 0, but got weight of size [0, 3, 3, 3] instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w_zero)
+
+  @_parameterize_convolution_fwd_bwd(
+      forward={"tpu_fn": "convolution"},
+      backward={"tpu_fn": "convolution_backward"},
+  )
+  def test_convolution_invalid_spatial_parameters(
+      self, convolution, tpu_fn: str
+  ):
+    inp = torch.ones(2, 3, 10, 10, device=et.device())
+    w = torch.ones(1, 3, 3, 3, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected stride to be greater than 0, got [0, 1]""",
+        gpu="""non-positive stride is not supported""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, stride=(0, 1))
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected padding to be non-negative, got [-1, 0]""",
+        gpu="""negative padding is not supported""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, padding=(-1, 0))
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected dilation to be greater than 0, got [0, 1]""",
+        gpu="""Dilation must be greater than 0 but got 0""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, dilation=(0, 1))
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected output_padding to be non-negative, got [-1, 0]""",
+        gpu="""negative output_padding is not supported""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w, output_padding=(-1, 0))
+
+    w_transposed = torch.ones(3, 1, 3, 3, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected output_padding to be smaller than either stride or dilation, got output_padding=[1, 0], stride=[1, 1], dilation=[1, 1]""",
+        gpu="""output padding must be smaller than either stride or dilation, but got output_padding_height: 1 output_padding_width: 0 stride_height: 1 stride_width: 1 dilation_height: 1 dilation_width: 1""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(
+          inp,
+          w_transposed,
+          stride=(1, 1),
+          dilation=(1, 1),
+          output_padding=(1, 0),
+          transposed=True,
+      )
+
+  @_parameterize_convolution_fwd_bwd(
+      forward={"tpu_fn": "convolution"},
+      backward={"tpu_fn": "convolution_backward"},
+  )
+  def test_convolution_output_size_too_small(self, convolution, tpu_fn: str):
+    inp = torch.ones(2, 3, 2, 8, device=et.device())
+    w = torch.ones(1, 3, 3, 3, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu=f"""{tpu_fn}(): expected calculated output spatial size to be at least 1, got -1 at spatial dimension 0""",
+        gpu="""Calculated padded input size per channel: (2 x 8). Kernel size: (3 x 3). Kernel size can't be greater than actual input size""",
+        message_reviewed_by="gunhyun",
+    ):
+      convolution(inp, w)
+
+  @et.gpu_crashes_or_raises(
+      reason=(
+          "cuDNN crashes with std::length_error when grad_output shape does not"
+          " match expected output shape"
+      )
+  )
+  def test_convolution_backward_invalid_grad_output_shape(self):
+    grad = torch.ones(2, 1, 7, 8, device=et.device())
+    inp = torch.ones(2, 3, 10, 10, device=et.device())
+    w = torch.ones(1, 3, 3, 3, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution_backward(): expected grad_output to have shape [2, 1, 8, 8], got [2, 1, 7, 8]""",
+        gpu="""Given input size [2, 3, 10, 10], weight size [1, 3, 3, 3], expected grad_output to have size [2, 1, 8, 8], but got [2, 1, 7, 8]""",
+        message_reviewed_by="gunhyun",
+    ):
+      _run_convolution_backward(grad, inp, w)
+
+  def test_convolution_mixed_dtypes(self):
+    inp = torch.ones(2, 3, 10, 10, device=et.device(), dtype=torch.float32)
+    w_bf16 = torch.ones(1, 3, 3, 3, device=et.device(), dtype=torch.bfloat16)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution(): expected input and weight to have the same dtype, got float32 and bfloat16""",
+        gpu="""Input type (torch.cuda.FloatTensor) and weight type (CUDABFloat16Type) should be the same""",
+        message_reviewed_by="gunhyun",
+    ):
+      _run_convolution(inp, w_bf16)
+
+    w = torch.ones(1, 3, 3, 3, device=et.device(), dtype=torch.float32)
+    bias_bf16 = torch.ones(1, device=et.device(), dtype=torch.bfloat16)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution(): expected input and bias to have the same dtype, got float32 and bfloat16""",
+        gpu="""Input type (torch.cuda.FloatTensor) and bias type (CUDABFloat16Type) should be the same""",
+        message_reviewed_by="gunhyun",
+    ):
+      _run_convolution(inp, w, bias=bias_bf16)
+
+    grad = torch.ones(2, 1, 8, 8, device=et.device(), dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution_backward(): expected input and weight to have the same dtype, got float32 and bfloat16""",
+        gpu="""Input type (torch.cuda.FloatTensor) and weight type (CUDABFloat16Type) should be the same""",
+        message_reviewed_by="gunhyun",
+    ):
+      _run_convolution_backward(grad, inp, w_bf16)
+
+    grad_bf16 = torch.ones(2, 1, 8, 8, device=et.device(), dtype=torch.bfloat16)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution_backward(): expected input and grad_output to have the same dtype, got float32 and bfloat16""",
+        gpu="""Expected tensor for argument #1 'grad_output' to have the same type as tensor for argument #2 'weight'; but type CUDABFloat16Type does not equal torch.cuda.FloatTensor (while checking arguments for cudnn_convolution_backward_input)""",
+        message_reviewed_by="gunhyun",
+    ):
+      _run_convolution_backward(grad_bf16, inp, w)
+
+  def test_convolution_out_invalid_dtype(self):
+    inp = torch.ones(2, 3, 10, 10, device=et.device(), dtype=torch.float32)
+    w = torch.ones(1, 3, 3, 3, device=et.device(), dtype=torch.float32)
+    out_bool = torch.empty(2, 1, 8, 8, device=et.device(), dtype=torch.bool)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution(): expected the dtype of the out tensor to be neither long nor bool, got bool""",
+        gpu="""Expected out tensor to have dtype float, but got bool instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.convolution.out(
+          inp, w, None, (1, 1), (0, 0), (1, 1), False, (0, 0), 1, out=out_bool
+      )
+
+    out_bf16 = torch.empty(2, 1, 8, 8, device=et.device(), dtype=torch.bfloat16)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""convolution(): expected the output dtype to be float32, got bfloat16""",
+        gpu="""Expected out tensor to have dtype float, but got c10::BFloat16 instead""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.convolution.out(
+          inp, w, None, (1, 1), (0, 0), (1, 1), False, (0, 0), 1, out=out_bf16
+      )
+
   @parameterized.named_parameters(
       {"testcase_name": "min", "op": torch.min, "op_name": "min"},
       {"testcase_name": "max", "op": torch.max, "op_name": "max"},
@@ -7546,6 +7900,21 @@ Supported combinations for non-constant padding:
               [[0, 1, 2, 3, 4]], dtype=torch.int64, device=et.device()
           ),
           torch.tensor([0, 1], dtype=torch.int64, device=et.device()),
+      )
+
+  def test_embedding_bag_include_last_offset_empty_offsets(self):
+    weight = torch.randn(5, 3, dtype=torch.float32, device=et.device())
+    indices = torch.tensor([], dtype=torch.int64, device=et.device())
+    offsets = torch.tensor([], dtype=torch.int64, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""embedding_bag(): expected offsets to have at least 1 element when include_last_offset is true, got 0""",
+        gpu="""include_last_offset: numBags should be at least 1""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._embedding_bag(
+          weight, indices, offsets, False, 0, False, None, True, -1
       )
 
   def test_embedding_sparse_scale_grad_by_freq_error(self):
@@ -8945,6 +9314,76 @@ Device-side assertion tracking was not enabled by user.""",
     ):
       torch.ops.aten.adaptive_avg_pool2d.out(inp, tuple(out.shape), out=out)
 
+  def test_adaptive_avg_pool2d_empty_spatial_dim(self):
+    inp_empty_h = torch.ones(1, 0, 4, device=et.device())
+    inp_empty_w = torch.ones(1, 4, 0, device=et.device())
+    out = torch.empty(1, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d(): expected input to have non-zero size for non-batch dimensions, got [1, 0, 4] with dimension 1 being empty""",
+        gpu="""adaptive_avg_pool2d(): Expected input to have non-zero size for non-batch dimensions, but input has sizes [1, 0, 4] with dimension 1 being empty""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool2d.out(inp_empty_h, [2, 2], out=out)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d(): expected input to have non-zero size for non-batch dimensions, got [1, 4, 0] with dimension 2 being empty""",
+        gpu="""adaptive_avg_pool2d(): Expected input to have non-zero size for non-batch dimensions, but input has sizes [1, 4, 0] with dimension 2 being empty""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool2d.out(inp_empty_w, [2, 2], out=out)
+
+  def test_adaptive_avg_pool2d_invalid_output_size(self):
+    inp = torch.ones(1, 1, 4, 4, device=et.device())
+    out = torch.empty(1, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d(): expected output_size to have 1 or 2 elements, got 0""",
+        gpu="""adaptive_avg_pool2d: output_size must be 2""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool2d.out(inp, [], out=out)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d(): expected output_size to have 1 or 2 elements, got 3""",
+        gpu="""adaptive_avg_pool2d: output_size must be 2""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool2d.out(inp, [1, 2, 3], out=out)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d(): expected output_size elements to be non-negative, got [-1, 2]""",
+        gpu="""numel: integer multiplication overflow""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool2d.out(inp, [-1, 2], out=out)
+
+  def test_adaptive_avg_pool2d_backward_invalid_grad_output(self):
+    inp = torch.ones(2, 3, 4, 4, device=et.device())
+    grad_empty = torch.ones(2, 3, 0, 0, device=et.device())
+    grad_3d = torch.ones(3, 2, 2, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d_backward(): expected grad_output to have non-zero size for non-batch dimensions, got [2, 3, 0, 0] with dimension 2 being empty""",
+        gpu="""adaptive_avg_pool2d_backward(): Expected grad_output to have non-zero size for non-batch dimensions, but grad_output has sizes [2, 3, 0, 0] with dimension 2 being empty""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._adaptive_avg_pool2d_backward(grad_empty, inp)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool2d_backward(): expected grad_output to have 4 dimensions, got 3""",
+        gpu="""adaptive_avg_pool2d_backward_out_cuda_template: Expected dimensions 4 for `gradOutput_` but got dimensions 3""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._adaptive_avg_pool2d_backward(grad_3d, inp)
+
   def test_adaptive_avg_pool3d_invalid_rank(self):
     inp = torch.ones(10, 10, 10, device=et.device())
     out = torch.empty(5, 5, 5, device=et.device())
@@ -8963,6 +9402,76 @@ Device-side assertion tracking was not enabled by user.""",
         gpu="""adaptive_avg_pool3d_cuda(): Expected 4D or 5D tensor, but got [10, 10, 10]""",
     ):
       torch.ops.aten.adaptive_avg_pool3d(inp, tuple(out.shape))
+
+  def test_adaptive_avg_pool3d_empty_spatial_dim(self):
+    inp_empty_d = torch.ones(1, 0, 4, 4, device=et.device())
+    inp_empty_w = torch.ones(1, 4, 4, 0, device=et.device())
+    out = torch.empty(1, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool3d(): expected input to have non-zero size for non-batch dimensions, got [1, 0, 4, 4] with dimension 1 being empty""",
+        gpu="""adaptive_avg_pool3d_cuda(): Expected input to have non-zero size for non-batch dimensions, but input has sizes [1, 0, 4, 4] with dimension 1 being empty""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool3d.out(inp_empty_d, [2, 2, 2], out=out)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool3d(): expected input to have non-zero size for non-batch dimensions, got [1, 4, 4, 0] with dimension 3 being empty""",
+        gpu="""adaptive_avg_pool3d_cuda(): Expected input to have non-zero size for non-batch dimensions, but input has sizes [1, 4, 4, 0] with dimension 3 being empty""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool3d.out(inp_empty_w, [2, 2, 2], out=out)
+
+  def test_adaptive_avg_pool3d_invalid_output_size(self):
+    inp = torch.ones(1, 1, 4, 4, 4, device=et.device())
+    out = torch.empty(1, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool3d(): expected output_size to have 1 or 3 elements, got 0""",
+        gpu="""adaptive_avg_pool3d: internal error: output_size.size() must be 1 or 3""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool3d.out(inp, [], out=out)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool3d(): expected output_size to have 1 or 3 elements, got 2""",
+        gpu="""adaptive_avg_pool3d: internal error: output_size.size() must be 1 or 3""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool3d.out(inp, [1, 2], out=out)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool3d(): expected output_size elements to be non-negative, got [-1, 2, 2]""",
+        gpu="""numel: integer multiplication overflow""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.adaptive_avg_pool3d.out(inp, [-1, 2, 2], out=out)
+
+  def test_adaptive_avg_pool3d_backward_invalid_grad_output(self):
+    inp = torch.ones(2, 3, 4, 4, 4, device=et.device())
+    grad_empty = torch.ones(2, 3, 0, 2, 2, device=et.device())
+    grad_4d = torch.ones(3, 2, 2, 2, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool3d_backward(): expected grad_output to have non-zero size for non-batch dimensions, got [2, 3, 0, 2, 2] with dimension 2 being empty""",
+        gpu="""adaptive_avg_pool3d_backward(): Expected grad_output to have non-zero size for non-batch dimensions, but grad_output has sizes [2, 3, 0, 2, 2] with dimension 2 being empty""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._adaptive_avg_pool3d_backward(grad_empty, inp)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""adaptive_avg_pool3d_backward(): expected grad_output to have 5 dimensions, got 4""",
+        gpu="""adaptive_avg_pool3d_backward_out_cuda_template: Expected dimensions 5 for `gradOutput_` but got dimensions 4""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._adaptive_avg_pool3d_backward(grad_4d, inp)
 
   def test_max_pool2d_with_indices_invalid_rank(self):
     inp = torch.ones(10, 10, device=et.device())
@@ -9187,6 +9696,82 @@ Device-side assertion tracking was not enabled by user.""",
     ):
       torch.ops.aten.silu_backward.grad_input(
           grad, self_val, grad_input=grad_input
+      )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="bool",
+          dtype=torch.bool,
+          tpu_dtype="bool",
+          gpu_dtype="Bool",
+      ),
+      dict(
+          testcase_name="int32",
+          dtype=torch.int32,
+          tpu_dtype="int32",
+          gpu_dtype="Int",
+      ),
+      dict(
+          testcase_name="int64",
+          dtype=torch.int64,
+          tpu_dtype="int64",
+          gpu_dtype="Long",
+      ),
+  )
+  def test_tanh_backward_unsupported_dtypes(
+      self, dtype: torch.dtype, tpu_dtype: str, gpu_dtype: str
+  ):
+    grad = torch.ones(4, device=et.device(), dtype=dtype)
+    output = torch.zeros(4, device=et.device(), dtype=dtype)
+
+    with et.assert_raises_message(
+        NotImplementedError,
+        tpu=f"""tanh_backward(): not implemented for {tpu_dtype}""",
+        gpu=f""""tanh_backward_cuda" not implemented for '{gpu_dtype}'""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.tanh_backward(grad, output)
+
+  def test_tanh_backward_grad_input_dtype_mismatch(self):
+    grad = torch.ones(4, device=et.device(), dtype=torch.float32)
+    output = torch.full((4,), 0.5, device=et.device(), dtype=torch.float32)
+    grad_input = torch.empty(4, device=et.device(), dtype=torch.int32)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""tanh_backward(): result type float32 can't be cast to the desired output type int32""",
+        gpu="""result type Float can't be cast to the desired output type Int""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.tanh_backward.grad_input(
+          grad, output, grad_input=grad_input
+      )
+
+  def test_tanh_backward_grad_input_broadcast_alias(self):
+    grad = torch.ones((2, 3), device=et.device(), dtype=torch.float32)
+    output = torch.full((1, 3), 0.5, device=et.device(), dtype=torch.float32)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""tanh_backward(): output with shape [2, 3] doesn't match the broadcast shape of the tensor being operated on in-place, which has shape [1, 3]""",
+        gpu="""output with shape [1, 3] doesn't match the broadcast shape [2, 3]""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.tanh_backward.grad_input(grad, output, grad_input=output)
+
+  def test_tanh_backward_grad_input_cpu_tensor(self):
+    grad = torch.ones((2, 3), device=et.device(), dtype=torch.float32)
+    output = torch.full((2, 3), 0.5, device=et.device(), dtype=torch.float32)
+    grad_input_cpu = torch.empty((2, 3), device="cpu", dtype=torch.float32)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""tanh_backward(): expected out tensor to be on tpu, got cpu""",
+        gpu="""Expected all tensors to be on the same device, but got grad_output is on cuda:0, different from other tensors on cpu (when checking argument in method wrapper_CUDA_tanh_backward_out_grad_input)""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten.tanh_backward.grad_input(
+          grad, output, grad_input=grad_input_cpu
       )
 
   def test_acos_out_dtype_mismatch(self):
@@ -13122,7 +13707,7 @@ Device-side assertion tracking was not enabled by user.""",
     out = torch.empty(4, device="cpu")
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""add(): expected output tensor to be on 'tpu' device, got 'cpu'""",
+        tpu="""add(): expected out tensor to be on tpu, got cpu""",
         gpu="""Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!""",
         message_reviewed_by="wan",
     ):
@@ -13143,6 +13728,86 @@ Device-side assertion tracking was not enabled by user.""",
         message_reviewed_by="wan",
     ):
       torch.add(tpu_tensor1, tpu_tensor2, out=cpu_tensor)
+
+  def test_add_alpha_dtype_mismatch(self):
+    a_i32 = torch.ones(2, dtype=torch.int32, device=et.device())
+    b_i32 = torch.ones(2, dtype=torch.int32, device=et.device())
+    out_i32 = torch.empty(2, dtype=torch.int32, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""add(): for integral input tensors, argument alpha must not be a floating point number""",
+        gpu="""For integral input tensors, argument alpha must not be a floating point number.""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.add(a_i32, b_i32, alpha=2.5, out=out_i32)
+
+    a_f32 = torch.ones(2, dtype=torch.float32, device=et.device())
+    b_f32 = torch.ones(2, dtype=torch.float32, device=et.device())
+    out_f32 = torch.empty(2, dtype=torch.float32, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""add(): boolean alpha only supported for boolean results""",
+        gpu="""Boolean alpha only supported for Boolean results.""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.add(a_f32, b_f32, alpha=True, out=out_f32)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""add(): for non-complex input tensors, argument alpha must not be a complex number""",
+        gpu="""For non-complex input tensors, argument alpha must not be a complex number.""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.add(a_f32, b_f32, alpha=1 + 2j, out=out_f32)
+
+  def test_add_alpha_overflow(self):
+    a_i8 = torch.ones(2, dtype=torch.int8, device=et.device())
+    b_i8 = torch.ones(2, dtype=torch.int8, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""add(): value cannot be converted to type int8 without overflow""",
+        gpu="""value cannot be converted to type int8_t without overflow""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.add(a_i8, b_i8, alpha=1000)
+
+    for dtype in (torch.float32, torch.float16, torch.bfloat16):
+      with self.subTest(dtype=dtype):
+        a = torch.ones(2, dtype=dtype, device=et.device())
+        b = torch.ones(2, dtype=dtype, device=et.device())
+        with et.assert_raises_message(
+            RuntimeError,
+            tpu="""add(): value cannot be converted to type float32 without overflow""",
+            gpu="""value cannot be converted to type float without overflow""",
+            message_reviewed_by="gunhyun",
+        ):
+          torch.add(a, b, alpha=1e40)
+
+  def test_add_out_non_0d_cpu_tensor(self):
+    out = torch.empty(0, dtype=torch.float32, device=et.device())
+    tpu_0d = torch.tensor(1.0, device=et.device())
+    cpu_2d = torch.ones(1, 1, device="cpu")
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""add(): expected tensor to be on tpu, got cpu""",
+        gpu="""Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.add(tpu_0d, cpu_2d, out=out)
+
+  def test_add_out_all_cpu_scalars(self):
+    out = torch.empty((), dtype=torch.float32, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""add(): expected tensor to be on tpu, got cpu""",
+        gpu="""Trying to pass too many CPU scalars to non-CPU kernel!""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.add(
+          torch.tensor(1.0, device="cpu"),
+          torch.tensor(2.0, device="cpu"),
+          out=out,
+      )
 
   def test_add_dev_and_cpu_tensors(self):
     dev_tensor = torch.tensor([1, 2, 3], device=et.device())
@@ -13967,7 +14632,7 @@ Device-side assertion tracking was not enabled by user.""",
   def test_current_stream_device_index_above_max_devices(self):
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""Device index 8 is out of bounds of the maximum device count 8""",
+        tpu="""device index 8 is out of bounds of the maximum device count 8""",
         gpu="""Device index value 8 is out of index range [0, 1)""",
     ):
       torch.accelerator.current_stream(f"{et.device().type}:8")
@@ -13982,7 +14647,7 @@ Device-side assertion tracking was not enabled by user.""",
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu=f"""Device index {actual_device_count} is out of bounds of the number of addressable devices {actual_device_count}""",
+        tpu=f"""device index {actual_device_count} is out of bounds of the number of addressable devices {actual_device_count}""",
         gpu=f"""Device index value {actual_device_count} is out of index range [0, {actual_device_count})""",
     ):
       torch.accelerator.current_stream(
@@ -13999,7 +14664,7 @@ Device-side assertion tracking was not enabled by user.""",
 
     with et.assert_raises_message(
         RuntimeError,
-        tpu=f"""Device index {actual_device_count} is out of bounds of the maximum device count 8""",
+        tpu=f"""device index {actual_device_count} is out of bounds of the maximum device count 8""",
         gpu=f"""Device index value {actual_device_count} is out of index range [0, {actual_device_count})""",
     ):
       torch.accelerator.current_stream(
@@ -15186,6 +15851,21 @@ Device-side assertion tracking was not enabled by user.""",
     ):
       torch.ops.ao.reload(x, torch.device("cpu"))
 
+  def test_pinned_host_oom(self):
+    if et.is_on_gpu():
+      # GPU test raises this error:
+      # RuntimeError: pin_memory=True requires a CUDA or other accelerator
+      # backend; no pinned memory allocator is available on this system.
+      self.skipTest("GPU allocation can't find host allocator")
+    ONE_HUNDRED_TB = 100 * 1024 * 1024 * 1024 * 1024
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""failed to allocate 109951162777600 bytes of pinned host memory""",
+    ):
+      torch.zeros(
+          ONE_HUNDRED_TB, dtype=torch.uint8, device="cpu", pin_memory=True
+      )
+
 
 class InputPreprocessingErrorTest(et.ErrorTestBase):
 
@@ -15309,7 +15989,6 @@ class ComputeStatsErrorTest(et.ErrorTestBase):
         tpu="""Invalid offsets range [0, 10) for indices size 3""",
     ):
       torch.ops.tpu.compute_sparse_dense_matmul_stats(indices, offsets, 1, 4)
-
 
 class MaskedSoftmaxErrorTest(et.ErrorTestBase):
 
@@ -15527,6 +16206,75 @@ class MaskedSoftmaxErrorTest(et.ErrorTestBase):
           dim=1,
       )
 
+  def test_unique_dim_zero_rank(self):
+    with et.assert_raises_message(
+        IndexError,
+        tpu="""unique_dim(): expected tensor with at least 1 dimension, got 0""",
+        gpu="""Dimension specified as 0 but tensor has no dimensions""",
+    ):
+      torch.unique(
+          torch.tensor(0.0, device=et.device()),
+          dim=0,
+      )
+
+  def test_unique_dim_out_of_bounds(self):
+    with et.assert_raises_message(
+        IndexError,
+        tpu="""unique_dim(): expected dimension to be in range [-2, 1], got 5""",
+        gpu="""Dimension out of range (expected to be in range of [-2, 1], but got 5)""",
+    ):
+      torch.unique(
+          torch.ones(2, 3, device=et.device()),
+          dim=5,
+      )
+
+  def test_unique_dim_multiple_zero_dims(self):
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""unique_dim(): expected at most 1 zero sized dimension when applying unique on a zero sized dimension, got 2""",
+        gpu="""Number of zero sized dimensions is more than one, so unique cannot be applied """,
+    ):
+      torch.unique(
+          torch.empty(0, 0, 3, device=et.device()),
+          dim=0,
+      )
+
+  def test_unique_dim_unselected_zero_dim(self):
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""unique_dim(): expected 0 unselected zero sized dimensions, got 1""",
+        gpu="""There are 0 sized dimensions, and they aren't selected, so unique cannot be applied""",
+    ):
+      torch.unique(
+          torch.empty(0, 3, device=et.device()),
+          dim=1,
+      )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="complex64",
+          dtype=torch.complex64,
+          tpu_dtype="complex64",
+          gpu_dtype="ComplexFloat",
+      ),
+      dict(
+          testcase_name="float8_e4m3fn",
+          dtype=torch.float8_e4m3fn,
+          tpu_dtype="float8_e4m3fn",
+          gpu_dtype="Float8_e4m3fn",
+      ),
+  )
+  def test_unique_dim_unsupported_dtypes(self, dtype, tpu_dtype, gpu_dtype):
+    with et.assert_raises_message(
+        NotImplementedError,
+        tpu=f"""unique_dim(): not implemented for {tpu_dtype}""",
+        gpu=f""""unique_dim" not implemented for '{gpu_dtype}'""",
+    ):
+      torch.unique(
+          torch.empty(0, 3, dtype=dtype, device=et.device()),
+          dim=0,
+      )
+
   def test_pow_unsupported_dtypes(self):
     """Tests that pow with unsupported bool tensor inputs fails with expected error."""
     base = torch.tensor([True, False], dtype=torch.bool, device=et.device())
@@ -15537,6 +16285,27 @@ class MaskedSoftmaxErrorTest(et.ErrorTestBase):
         gpu=""""pow_cuda" not implemented for 'Bool'""",
     ):
       torch.pow(base, exp)
+
+  def test_pow_negative_integer_scalar_exponent(self):
+    for dtype in (torch.int32, torch.int64):
+      with self.subTest(dtype=dtype):
+        base = torch.tensor([2, 3], dtype=dtype, device=et.device())
+        out = torch.empty_like(base)
+        with et.assert_raises_message(
+            RuntimeError,
+            tpu="""pow(): integers to negative integer powers are not allowed""",
+            gpu="""Integers to negative integer powers are not allowed.""",
+            message_reviewed_by="gunhyun",
+        ):
+          torch.pow(base, -2, out=out)
+
+        with et.assert_raises_message(
+            RuntimeError,
+            tpu="""Integers to negative integer powers are not allowed.""",
+            gpu="""Integers to negative integer powers are not allowed.""",
+            message_reviewed_by="gunhyun",
+        ):
+          base.pow_(-2)
 
   def test_gather_out_dtype_mismatch(self):
     inp = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
@@ -16375,6 +17144,94 @@ class UpsampleBilinear2dAaErrorTest(et.ErrorTestBase):
       torch.ops.aten._upsample_bilinear2d_aa.out(
           t, [10, 10], False, None, None, out=out
       )
+
+  def test_addcdiv_errors(self):
+    with self.subTest("out_on_cpu"):
+      s = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      out = torch.empty(2, 2, device="cpu", dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): expected out tensor to be on tpu, got cpu""",
+          gpu="""Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=out)
+
+    with self.subTest("out_dtype_mismatch"):
+      s = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      out = torch.empty(2, 2, device=et.device(), dtype=torch.int32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): result type float32 can't be cast to the desired output type int32""",
+          gpu="""result type Float can't be cast to the desired output type Int""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=out)
+
+    with self.subTest("integral_tensor1_and_tensor2"):
+      s = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 2, device=et.device(), dtype=torch.int32)
+      t2 = torch.ones(2, 2, device=et.device(), dtype=torch.int32)
+      out = torch.empty(2, 2, device=et.device(), dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): integer division with addcdiv is no longer supported; use (input + value * torch.trunc(tensor1 / tensor2)).to(input.dtype) for integer inputs and (input + value * tensor1 / tensor2) for float inputs""",
+          gpu="""Integer division with addcdiv is no longer supported, and in a future  release addcdiv will perform a true division of tensor1 and tensor2. The historic addcdiv behavior can be implemented as (input + value * torch.trunc(tensor1 / tensor2)).to(input.dtype) for integer inputs and as (input + value * tensor1 / tensor2) for float inputs. The future addcdiv behavior is just the latter implementation: (input + value * tensor1 / tensor2), for all dtypes.""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=out)
+
+    with self.subTest("inplace_broadcast_self"):
+      s = torch.ones(2, 1, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): output with shape [2, 1] doesn't match the broadcast shape of the tensor being operated on in-place, which has shape [2, 3]""",
+          gpu="""output with shape [2, 1] doesn't match the broadcast shape [2, 3]""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=s)
+
+    with self.subTest("inplace_broadcast_tensor1"):
+      s = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(1, 3, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): output with shape [1, 3] doesn't match the broadcast shape of the tensor being operated on in-place, which has shape [2, 3]""",
+          gpu="""output with shape [1, 3] doesn't match the broadcast shape [2, 3]""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=t1)
+
+    with self.subTest("inplace_broadcast_tensor2"):
+      s = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 3, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(1, 3, device=et.device(), dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): output with shape [1, 3] doesn't match the broadcast shape of the tensor being operated on in-place, which has shape [2, 3]""",
+          gpu="""output with shape [1, 3] doesn't match the broadcast shape [2, 3]""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, out=t2)
+
+    with self.subTest("value_overflow"):
+      s = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t1 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      t2 = torch.ones(2, 2, device=et.device(), dtype=torch.float32)
+      with et.assert_raises_message(
+          RuntimeError,
+          tpu="""addcdiv(): value cannot be converted to type float32 without overflow""",
+          gpu="""value cannot be converted to type float without overflow""",
+          message_reviewed_by="gunhyun",
+      ):
+        torch.addcdiv(s, t1, t2, value=1e40)
 
 
 if __name__ == "__main__":

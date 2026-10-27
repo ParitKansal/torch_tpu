@@ -143,7 +143,7 @@ absl::StatusOr<mlir::MlirOp> BuildZeta(mlir::MlirOp x, mlir::MlirOp q,
   // While loop for S: state: [i, acc, S]
   auto s_loop = mlir::stablehlo::While(
       builder, {zero_i32, q, s_init},
-      [&](mlir::RegionBuilder& cond) {
+      [&](mlir::RegionBuilder& cond) {  // REF_CAPTURE_OK=called synchronously
         mlir::MlirBuilder cond_builder(cond.getOpBuilder(),
                                        cond.getOpBuilder().getUnknownLoc());
         auto args = mlir::stablehlo::Arguments(
@@ -152,7 +152,7 @@ absl::StatusOr<mlir::MlirOp> BuildZeta(mlir::MlirOp x, mlir::MlirOp q,
             args[0], nine_i32, mlir::stablehlo::ComparisonDirection::LT);
         mlir::stablehlo::Return(cond, cond_val);
       },
-      [&](mlir::RegionBuilder& body) {
+      [&](mlir::RegionBuilder& body) {  // REF_CAPTURE_OK=called synchronously
         mlir::MlirBuilder body_builder(body.getOpBuilder(),
                                        body.getOpBuilder().getUnknownLoc());
         auto args = mlir::stablehlo::Arguments(
@@ -203,7 +203,7 @@ absl::StatusOr<mlir::MlirOp> BuildZeta(mlir::MlirOp x, mlir::MlirOp q,
   // While loop for T: state: [i, horner_sum]
   auto t_loop = mlir::stablehlo::While(
       builder, {zero_i32, horner_sum_init},
-      [&](mlir::RegionBuilder& cond) {
+      [&](mlir::RegionBuilder& cond) {  // REF_CAPTURE_OK=called synchronously
         mlir::MlirBuilder cond_builder(cond.getOpBuilder(),
                                        cond.getOpBuilder().getUnknownLoc());
         auto args = mlir::stablehlo::Arguments(
@@ -212,7 +212,7 @@ absl::StatusOr<mlir::MlirOp> BuildZeta(mlir::MlirOp x, mlir::MlirOp q,
             args[0], eleven_i32, mlir::stablehlo::ComparisonDirection::LT);
         mlir::stablehlo::Return(cond, cond_val);
       },
-      [&](mlir::RegionBuilder& body) {
+      [&](mlir::RegionBuilder& body) {  // REF_CAPTURE_OK=called synchronously
         auto args = mlir::stablehlo::Arguments(
             body, body.getOp<mlir::stablehlo::WhileOp>());
 

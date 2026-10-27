@@ -69,7 +69,8 @@ jobs:
           include-only-assigned: true
 
           # Any comment, push, or edit clears the label and restarts the
-          # staleness clock.
+          # staleness clock. Comments also clear the label immediately via
+          # `remove_stale_label.yml`.
           remove-stale-when-updated: true
 
           # Work through the least recently updated items first, so the
@@ -98,8 +99,8 @@ jobs:
             comments or pull requests.
 
 
-            The workflow will remove the `stale` label on its next daily run
-            after any update.
+            Commenting removes the `stale` label right away. Other updates
+            clear it on the next daily run.
 
           close-issue-message: >-
             This issue is being closed because it received no activity in the
@@ -122,8 +123,8 @@ jobs:
             directly if they are not responsive in code reviews.
 
 
-            The workflow will remove the `stale` label on its next daily run
-            after any update.
+            Commenting removes the `stale` label right away. Other updates
+            clear it on the next daily run.
 
           close-pr-message: >-
             This pull request is being closed because it received no activity

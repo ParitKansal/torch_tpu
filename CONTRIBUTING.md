@@ -53,6 +53,23 @@ If you have already signed the Google CLA for another open-source project, you
 likely do not need to sign it again. A CLA bot checks pull requests
 automatically and guides you if action is needed.
 
+### Claiming an Issue
+
+To help avoid duplicate work, please follow these practices before starting on
+an existing issue:
+
+*   **Check for existing work**: Check whether the issue has an assignee, read
+    its comments, and look for linked pull requests. If someone is assigned to
+    it, has said they are working on it, or has already opened a pull request
+    referencing it, someone is likely already working on it.
+    -   If an assigned issue has had no recent activity, feel free to ask in a
+        comment whether it is free to pick up.
+*   **Comment before you start**: If the issue is unassigned, leave a comment on
+    it to express your interest in working on it. A maintainer *may* then assign
+    the issue to you.
+*   **Overlapping fixes**: If several fixes for the same issue are proposed
+    anyway, maintainers may choose the one that best addresses the issue.
+
 ### Review Our Community Guidelines
 
 This project follows
@@ -193,8 +210,9 @@ A constructive review process relies on mutual respect for time and attention.
 
 *   **Small, focused PRs**: Submit pull requests that do one thing well. A
     concise 100-line diff gets reviewed far faster than a 1,000-line rewrite.
-*   **Clear context**: Explain what your change does and why it is needed. Link
-    to the relevant GitHub issue.
+*   **Clear context**: Explain what your change does and why it is needed. All
+    non-trivial PRs must link to the relevant GitHub issue
+    [using keywords](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/using-keywords-in-issues-and-pull-requests).
 *   **Shepherd your change**: Keep an eye on CI checks, address reviewer notes,
     and let us know if you get blocked or need to step away.
 

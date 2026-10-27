@@ -79,8 +79,8 @@ at::Tensor& AtenUniform_(at::Tensor& self, double from, double to,
 
     TT_THROW_IF_ERROR(DispatchRngOp(
         self_real, generator,
-        [&](at::Tensor rng_input_state)
-            -> absl::StatusOr<std::vector<DeviceBufferRef>> {
+        [&](at::Tensor rng_input_state)  // REF_CAPTURE_OK=called synchronously
+        -> absl::StatusOr<std::vector<DeviceBufferRef>> {
           TT_ASSIGN_OR_RETURN(
               auto buf, (DispatchOp<1, 1>(
                             GetUniformFunctional(dims, output_dtype, from, to),

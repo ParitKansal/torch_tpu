@@ -57,7 +57,8 @@ at::Tensor AtenSparseDenseMatmul(
     const at::Tensor& row_pointers, const at::Tensor& embedding_ids,
     const at::Tensor& sample_ids, const at::Tensor& gains,
     const at::Tensor& embedding_table, int64_t device_batch_size,
-    int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition);
+    int64_t max_ids_per_partition, int64_t max_unique_ids_per_partition,
+    bool enable_minibatching = false);
 
 }  // namespace torch_tpu
 

@@ -35,11 +35,15 @@ bash ./launch.sh
 
 Or run via the Python elastic launcher:
 
+<!-- doc-test: launch_doc_test -->
+
 ```bash
 python3 ./launch.py
 ```
 
 To run the ZeRO-3 memory verification test:
+
+<!-- doc-test: manual_fsdp_memory_doc_test -->
 
 ```bash
 python3 ./manual_fsdp_memory_test.py

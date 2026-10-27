@@ -265,7 +265,8 @@ absl::StatusOr<AttentionPrepResults> PrepareAttentionLogits(
   if (head_count_ratio > 1 && !(query_tensor_type.hasStaticShape() &&
                                 GetTensorTypeOrDie(key).hasStaticShape() &&
                                 GetTensorTypeOrDie(value).hasStaticShape())) {
-    auto replicate = [&](mlir::MlirOp input) -> absl::StatusOr<mlir::MlirOp> {
+    auto replicate = [&]  // REF_CAPTURE_OK=called locally
+        (mlir::MlirOp input) -> absl::StatusOr<mlir::MlirOp> {
       mlir::stablehlo::Dimensions target_shape = GetDimensions(input);
       target_shape.insert(target_shape.begin() + 2,
                           mlir::stablehlo::DimensionInfo{head_count_ratio});

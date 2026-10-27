@@ -534,12 +534,30 @@ SymVal EvalSymbolicOp(mlir::Operation& op,
   if (op.getNumOperands() == 1) {
     const SymVal a = get_arg(0);
     return llvm::TypeSwitch<mlir::Operation*, SymVal>(&op)
-        .Case<mlir::stablehlo::ConvertOp>([&](auto) { return a; })
-        .Case<mlir::stablehlo::NegOp>([&](auto) { return EvalNeg(a); })
-        .Case<mlir::stablehlo::AbsOp>([&](auto) { return EvalAbs(a); })
-        .Case<mlir::stablehlo::ExpOp>([&](auto) { return EvalExp(a); })
-        .Case<mlir::stablehlo::LogOp>([&](auto) { return EvalLog(a); })
-        .Case<mlir::stablehlo::Log1pOp>([&](auto) { return EvalLog1p(a); })
+        .Case<mlir::stablehlo::ConvertOp>(
+            [&](auto) {  // REF_CAPTURE_OK=called synchronously
+              return a;
+            })
+        .Case<mlir::stablehlo::NegOp>(
+            [&](auto) {  // REF_CAPTURE_OK=called synchronously
+              return EvalNeg(a);
+            })
+        .Case<mlir::stablehlo::AbsOp>(
+            [&](auto) {  // REF_CAPTURE_OK=called synchronously
+              return EvalAbs(a);
+            })
+        .Case<mlir::stablehlo::ExpOp>(
+            [&](auto) {  // REF_CAPTURE_OK=called synchronously
+              return EvalExp(a);
+            })
+        .Case<mlir::stablehlo::LogOp>(
+            [&](auto) {  // REF_CAPTURE_OK=called synchronously
+              return EvalLog(a);
+            })
+        .Case<mlir::stablehlo::Log1pOp>(
+            [&](auto) {  // REF_CAPTURE_OK=called synchronously
+              return EvalLog1p(a);
+            })
         .Default([](mlir::Operation*) { return SymVal::Unknown(); });
   }
   if (op.getNumOperands() != 2) {
@@ -553,14 +571,30 @@ SymVal EvalSymbolicOp(mlir::Operation& op,
   // `AndOp` is deliberately absent: its identity is all-ones, which none of the
   // `IdentityKind`s materialize for signed integers (`kMaxValue` is INT_MAX).
   return llvm::TypeSwitch<mlir::Operation*, SymVal>(&op)
-      .Case<mlir::stablehlo::AddOp>([&](auto) { return EvalAdd(lhs, rhs); })
+      .Case<mlir::stablehlo::AddOp>(
+          [&](auto) {  // REF_CAPTURE_OK=called synchronously
+            return EvalAdd(lhs, rhs);
+          })
       .Case<mlir::stablehlo::SubtractOp>(
-          [&](auto) { return EvalSubtract(lhs, rhs); })
-      .Case<mlir::stablehlo::MulOp>([&](auto) { return EvalMul(lhs, rhs); })
-      .Case<mlir::stablehlo::MaxOp>([&](auto) { return EvalMax(lhs, rhs); })
-      .Case<mlir::stablehlo::MinOp>([&](auto) { return EvalMin(lhs, rhs); })
+          [&](auto) {  // REF_CAPTURE_OK=called synchronously
+            return EvalSubtract(lhs, rhs);
+          })
+      .Case<mlir::stablehlo::MulOp>(
+          [&](auto) {  // REF_CAPTURE_OK=called synchronously
+            return EvalMul(lhs, rhs);
+          })
+      .Case<mlir::stablehlo::MaxOp>(
+          [&](auto) {  // REF_CAPTURE_OK=called synchronously
+            return EvalMax(lhs, rhs);
+          })
+      .Case<mlir::stablehlo::MinOp>(
+          [&](auto) {  // REF_CAPTURE_OK=called synchronously
+            return EvalMin(lhs, rhs);
+          })
       .Case<mlir::stablehlo::OrOp, mlir::stablehlo::XorOp>(
-          [&](auto) { return EvalOrXor(lhs, rhs); })
+          [&](auto) {  // REF_CAPTURE_OK=called synchronously
+            return EvalOrXor(lhs, rhs);
+          })
       .Default([](mlir::Operation*) { return SymVal::Unknown(); });
 }
 

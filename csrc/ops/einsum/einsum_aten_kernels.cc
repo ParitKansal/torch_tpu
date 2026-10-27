@@ -1428,7 +1428,7 @@ at::Tensor AtenEinsumAutograd(c10::string_view equation, at::TensorList tensors,
     }
   }
 
-  at::Tensor output = ([&]() {
+  at::Tensor output = ([&]() {  // REF_CAPTURE_OK=called locally
     at::AutoDispatchBelowADInplaceOrView guard;
     return at::einsum(equation, tensors, path);
   })();

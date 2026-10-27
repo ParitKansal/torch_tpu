@@ -138,24 +138,6 @@ template <typename OtherType>
 absl::Status BinaryOpOut(const at::Tensor& tensor, const OtherType& other,
                          at::Tensor& out, MlirBinaryOpBuilder op_builder,
                          BinaryOpOptions opts) {
-  at::ScalarType expected_result_type;
-  if (opts.result_dtype.has_value()) {
-    expected_result_type = ConvertTo<at::ScalarType>(*opts.result_dtype);
-  } else {
-    expected_result_type = at::result_type(tensor, other);
-    // For operations that require floating-point computation (e.g., true
-    // division or ldexp), PyTorch promotes integral inputs to the default
-    // float dtype. The expected mathematical result dtype is therefore the
-    // default float dtype rather than the integral promoted type, ensuring
-    // ValidateOutDtype catches invalid downcasts to `out`.
-    if (opts.force_float_inputs &&
-        c10::isIntegralType(expected_result_type, /*includeBool=*/true)) {
-      expected_result_type = c10::get_default_dtype_as_scalartype();
-    }
-  }
-  TT_RETURN_IF_ERROR(
-      ValidateOutDtype(out, expected_result_type, opts.allow_out_dtype_cast));
-
   return internal::DispatchBinaryOpOut(tensor, other, out,
                                        std::move(op_builder), std::move(opts));
 }

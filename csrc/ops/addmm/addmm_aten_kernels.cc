@@ -237,13 +237,15 @@ absl::StatusOr<DeviceBufferRef> AddMm(
   return DispatchAddmm<absl::StatusOr<DeviceBufferRef>>(
       self, mat1, mat2, std::move(beta), std::move(alpha), out_scalar_type,
       param_keys, /*use_gelu=*/std::nullopt,
-      [&](auto op_builder, const at::Tensor& alpha_tensor, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, const at::Tensor& alpha_tensor, auto options) {
         return DispatchOp<4>(std::move(op_builder),
                              {self, mat1, mat2, alpha_tensor},
                              std::move(options));
       },
-      [&](auto op_builder, const at::Tensor& beta_tensor,
-          const at::Tensor& alpha_tensor, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, const at::Tensor& beta_tensor,
+       const at::Tensor& alpha_tensor, auto options) {
         return DispatchOp<5>(std::move(op_builder),
                              {self, mat1, mat2, beta_tensor, alpha_tensor},
                              std::move(options));
@@ -257,13 +259,15 @@ absl::Status AddMmOut(const at::Tensor& self, const at::Tensor& mat1,
   return DispatchAddmm<absl::Status>(
       self, mat1, mat2, std::move(beta), std::move(alpha), out_scalar_type,
       param_keys, /*use_gelu=*/std::nullopt,
-      [&](auto op_builder, const at::Tensor& alpha_tensor, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, const at::Tensor& alpha_tensor, auto options) {
         return DispatchOpOut<4>(std::move(op_builder),
                                 {self, mat1, mat2, alpha_tensor}, out,
                                 std::move(options));
       },
-      [&](auto op_builder, const at::Tensor& beta_tensor,
-          const at::Tensor& alpha_tensor, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, const at::Tensor& beta_tensor,
+       const at::Tensor& alpha_tensor, auto options) {
         return DispatchOpOut<5>(std::move(op_builder),
                                 {self, mat1, mat2, beta_tensor, alpha_tensor},
                                 out, std::move(options));
@@ -278,13 +282,15 @@ absl::Status AddMmActivationOut(const at::Tensor& self, const at::Tensor& mat1,
   return DispatchAddmm<absl::Status>(
       self, mat1, mat2, std::move(beta), std::move(alpha), out_scalar_type,
       param_keys, use_gelu,
-      [&](auto op_builder, const at::Tensor& alpha_tensor, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, const at::Tensor& alpha_tensor, auto options) {
         return DispatchOpOut<4>(std::move(op_builder),
                                 {self, mat1, mat2, alpha_tensor}, out,
                                 std::move(options));
       },
-      [&](auto op_builder, const at::Tensor& beta_tensor,
-          const at::Tensor& alpha_tensor, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, const at::Tensor& beta_tensor,
+       const at::Tensor& alpha_tensor, auto options) {
         return DispatchOpOut<5>(std::move(op_builder),
                                 {self, mat1, mat2, beta_tensor, alpha_tensor},
                                 out, std::move(options));

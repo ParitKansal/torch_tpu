@@ -110,7 +110,10 @@ class DeviceModuleBase(
 
   def test_reset_memory_stats(self):
     """Tests that resetting memory stats works correctly."""
-    # 1. Reset stats to establish a clean baseline where peak == current
+    # 1. Reset stats to establish a clean baseline where peak == current.
+    # Collect garbage first so that tensors left over from earlier tests are
+    # not freed while the allocation below is being measured.
+    gc.collect()
     torch.accelerator.synchronize()
     torch.accelerator.reset_peak_memory_stats()
 
@@ -146,6 +149,10 @@ class DeviceModuleBase(
 
   def test_memory_allocation(self):
     """Tests that memory allocation works with the device."""
+    # Collect garbage first so that tensors left over from earlier tests are
+    # not freed while the allocation below is being measured.
+    gc.collect()
+    torch.accelerator.synchronize()
     torch.accelerator.reset_peak_memory_stats()
     # Get initial state
     allocated_before = torch.accelerator.memory_allocated()

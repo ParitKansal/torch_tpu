@@ -554,8 +554,7 @@ absl::StatusOr<mlir::MlirOp> ViewPrimitiveShlo(mlir::MlirOp input,
 
   // Get the real values first
   Indices start_indices(input_type.getRank(), 0);
-  Indices limit_indices(input_type.getShape().begin(),
-                        input_type.getShape().end());
+  Indices limit_indices = CopyIntVector(input_type.getShape());
   Indices strides(input_type.getRank(), 1);
   strides.back() = 2;
 

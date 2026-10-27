@@ -175,7 +175,8 @@ at::Tensor AtenMaskedFillScalar(const at::Tensor& self, const at::Tensor& mask,
         at::Tensor result,
         ResolveScalarValueAndDispatch<absl::StatusOr<at::Tensor>>(
             self.scalar_type(), promoted_value,
-            [&](const at::Tensor& value_tensor) {
+            [&]  // REF_CAPTURE_OK=called synchronously
+            (const at::Tensor& value_tensor) {
               return DispatchOutOfPlace(self, mask, value_tensor);
             }));
     return result;
@@ -188,7 +189,9 @@ at::Tensor AtenMaskedFillTensor(const at::Tensor& self, const at::Tensor& mask,
     TT_ASSIGN_OR_THROW(
         at::Tensor result,
         ResolveTensorValueAndDispatch<absl::StatusOr<at::Tensor>>(
-            self.scalar_type(), value, [&](const at::Tensor& value_tensor) {
+            self.scalar_type(), value,
+            [&]  // REF_CAPTURE_OK=called synchronously
+            (const at::Tensor& value_tensor) {
               return DispatchOutOfPlace(self, mask, value_tensor);
             }));
     return result;
@@ -201,7 +204,8 @@ at::Tensor& AtenMaskedFill_Scalar(at::Tensor& self, const at::Tensor& mask,
   TT_KERNEL(OpName::kMaskedFill_Scalar, _, (self, mask, promoted_value), {
     TT_THROW_IF_ERROR(ResolveScalarValueAndDispatch<absl::Status>(
         self.scalar_type(), promoted_value,
-        [&](const at::Tensor& value_tensor) {
+        [&]  // REF_CAPTURE_OK=called synchronously
+        (const at::Tensor& value_tensor) {
           return DispatchInPlace(self, mask, value_tensor);
         }));
     return self;
@@ -212,7 +216,9 @@ at::Tensor& AtenMaskedFill_Tensor(at::Tensor& self, const at::Tensor& mask,
                                   const at::Tensor& value) {
   TT_KERNEL(OpName::kMaskedFill_Tensor, _, (self, mask, value), {
     TT_THROW_IF_ERROR(ResolveTensorValueAndDispatch<absl::Status>(
-        self.scalar_type(), value, [&](const at::Tensor& value_tensor) {
+        self.scalar_type(), value,
+        [&]  // REF_CAPTURE_OK=called synchronously
+        (const at::Tensor& value_tensor) {
           return DispatchInPlace(self, mask, value_tensor);
         }));
     return self;

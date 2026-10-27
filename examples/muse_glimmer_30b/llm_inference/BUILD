@@ -12,7 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("//build_files:build_defs.bzl", "torch_tpu_package_end", "torch_tpu_py_library", "torch_tpu_py_test")
+load(
+    "//build_files:build_defs.bzl",
+    "torch_tpu_oss_doc_test",
+    "torch_tpu_package_end",
+    "torch_tpu_py_library",
+    "torch_tpu_py_test",
+)
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -187,6 +193,59 @@ torch_tpu_py_test(
 torch_tpu_py_test(
     name = "kv_cache_test",
     srcs = ["kv_cache_test.py"],
+    deps = [
+        ":kv_cache",
+        ":model",
+        ":runner_dynamic",
+        "//shims/absl_py/testing:absltest",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+    ],
+)
+
+# OSS only: run the documented commands for the tests above as a user would;
+# see torch_tpu_oss_doc_test. swa_cache_doc_test also covers
+# swa_cache_tpu_test, which runs the same script.
+torch_tpu_oss_doc_test(
+    name = "swa_cache_doc_test",
+    doc = "README.md",
+    deps = [
+        ":kv_cache",
+        ":model",
+        "//shims/absl_py/testing:absltest",
+        "//shims/absl_py/testing:parameterized",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+    ],
+)
+
+torch_tpu_oss_doc_test(
+    name = "single_tpu_inference_dynamic_doc_test",
+    data = ["launch.sh"],
+    doc = "README.md",
+    notest_oss = True,  # NOTEST_OSS_OK=Mirrors :single_tpu_inference_dynamic_test, which is notap.
+    deps = [
+        ":runner_dynamic",
+        "//shims/absl_py/testing:absltest",
+        "//src/torch_tpu",
+    ],
+)
+
+torch_tpu_oss_doc_test(
+    name = "single_tpu_inference_static_doc_test",
+    data = ["launch.sh"],
+    doc = "README.md",
+    notest_oss = True,  # NOTEST_OSS_OK=Mirrors :single_tpu_inference_static_test, which is notap.
+    deps = [
+        ":runner_static",
+        "//shims/absl_py/testing:absltest",
+        "//src/torch_tpu",
+    ],
+)
+
+torch_tpu_oss_doc_test(
+    name = "kv_cache_doc_test",
+    doc = "README.md",
     deps = [
         ":kv_cache",
         ":model",

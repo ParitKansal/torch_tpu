@@ -1093,6 +1093,32 @@ presubmit {
       "comment `// RAW_PYBIND_OK=<reason>` on the same line."
     check_delta_only: true
   }
+
+  # Avoid [&] and [&, ...] captures in lambdas in non-test C++ code.
+  check_contents {
+    base {
+      id: "CheckDefaultRefLambdaCapture"
+      disable_tags: "ROLLBACK_OF"  # Don't require for rollback CLs.
+    }
+    prohibited_regexp: "\\[&(\\]|,)"
+    suppression_regexp:
+      # Allow suppression with REF_CAPTURE_OK=<reason>.
+      "\\bREF_CAPTURE_OK=\\S|"
+      # Ignore occurrences in comments.
+      "//.*\\[&(\\]|,)"
+    failure_message:
+      "Please avoid [&] and [&, ...] captures in lambdas in non-test C++ "
+      "code (see go/cstyle#Lambda_expressions). Use default capture by "
+      "reference only when the lifetime of the lambda is obviously shorter "
+      "than any potential captures; otherwise, explicitly list the captured "
+      "variables (or use [] if nothing is captured).\n\n"
+      "If it is obvious that the default reference capture is safe, add a "
+      "short `// REF_CAPTURE_OK=<reason>` comment (e.g. "
+      "`// REF_CAPTURE_OK=called locally` or "
+      "`// REF_CAPTURE_OK=called synchronously`) on the same line as the "
+      "capture list."
+    check_delta_only: true  # Only check new/changed lines.
+  }
 }
 
 # Checks for explicit use of Precision::DEFAULT, Precision::HIGH or
@@ -1461,6 +1487,8 @@ presubmit {
   path_expression_exclusion: "torch_tpu/examples/..."
   # Documentation tooling tests don't use RNGs.
   path_expression_exclusion: "torch_tpu/google/docs/..."
+  # Internal tooling tests don't use RNGs.
+  path_expression_exclusion: "torch_tpu/google/tools/..."
   path_expression_exclusion: "torch_tpu/oss/ci/..."
   # go/keep-sorted end
   check_contents {

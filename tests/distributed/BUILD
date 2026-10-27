@@ -161,6 +161,7 @@ torch_tpu_py_test(
     name = "sparse_core_collectives_test",
     timeout = "long",
     srcs = ["sparse_core_collectives_test.py"],
+    nopresubmit_oss = "TODO(b/568095515): Flaking in GitHub TPU v7 presubmit with START_SESSION failed.",
     oss_presubmit_tpu_generation = tpu_gen(
         "v7",
         reason = "Only multi-core-per-chip TPU v7x has a non-identity rank-to-device mapping",
@@ -169,6 +170,8 @@ torch_tpu_py_test(
         ["exclusive"],
         [],
     ) + [
+        # Every test runs SparseCore programs; TPU v5e has no SparseCore.
+        "fails-on-tpu-v5",
         "noasan",  # TODO(b/497035517): fix the test in asan mode.
         "nomsan",  # TODO(b/497035517): fix the test in msan mode.
         "notsan",  # TODO(b/497035517): fix the test in tsan mode.
@@ -176,7 +179,7 @@ torch_tpu_py_test(
         "requires-tpu-v7x:4",
     ],
     deps = [
-        ":distributed_utils",
+        ":continuous_test_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
@@ -184,7 +187,6 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/distributed:spmd_util",
         "//src/torch_tpu/_internal/utils:test_utils",
         "//tests:oss_utils",
-        "//tests:seed_test_utils",
     ],
 )
 
@@ -192,6 +194,7 @@ torch_tpu_py_test(
     name = "compile_cache_process_groups_test",
     timeout = "long",
     srcs = ["compile_cache_process_groups_test.py"],
+    nopresubmit_oss = "TODO(b/568095515): Flaking in GitHub TPU v7 presubmit with START_SESSION failed.",
     oss_presubmit_tpu_generation = tpu_gen(
         "v7",
         reason = "Only multi-core-per-chip TPU v7x has a non-identity rank-to-device mapping",
@@ -207,14 +210,13 @@ torch_tpu_py_test(
         "requires-tpu-v7x:4",
     ],
     deps = [
-        ":distributed_utils",
+        ":continuous_test_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/distributed:spmd_util",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:seed_test_utils",
     ],
 )
 
@@ -263,7 +265,6 @@ torch_tpu_py_test(
     name = "torchcomm_multi_tpu_test",
     srcs = ["torchcomm_multi_tpu_test.py"],
     nobuild_oss = True,  # NOBUILD_OSS_OK=torchcomms is not yet available in OSS
-    shard_count = 7,
     tags = if_oss(
         ["exclusive"],
         [],
@@ -277,7 +278,7 @@ torch_tpu_py_test(
         [],
         ["@pypi//torchcomms"],
     ) + [
-        ":distributed_utils",
+        ":continuous_test_utils",
         "//shims/absl_py/logging",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
@@ -382,6 +383,7 @@ torch_tpu_py_test(
 torch_tpu_py_test(
     name = "collective_ops_device_order_test",
     srcs = ["collective_ops_device_order_test.py"],
+    nopresubmit_oss = "TODO(b/568095515): Flaking in GitHub TPU v7 presubmit with START_SESSION failed.",
     oss_presubmit_tpu_generation = tpu_gen(
         "v7",
         reason = "Only multi-core-per-chip TPU v7x has a non-identity rank-to-device mapping",
@@ -397,13 +399,12 @@ torch_tpu_py_test(
         "requires-tpu-v7x:4",
     ],
     deps = [
-        ":distributed_utils",
+        ":continuous_test_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:seed_test_utils",
     ],
 )
 
@@ -501,7 +502,7 @@ torch_tpu_py_test(
     ],
     env = TEST_COV_ENV,
     main = "collective_errors_test.py",
-    notap = "Run by error_coverage_test in the torch_tpu.error_coverage Guitar workflow.",
+    notap = "Run as a data dep by //tests:error_coverage_test.",
     tags = if_oss(
         ["exclusive"],
         [],
@@ -660,6 +661,7 @@ torch_tpu_py_test(
     name = "mixed_group_programs_test",
     timeout = "long",
     srcs = ["mixed_group_programs_test.py"],
+    nopresubmit_oss = "TODO(b/568095515): Flaking in GitHub TPU v7 presubmit with START_SESSION failed.",
     oss_presubmit_tpu_generation = tpu_gen(
         "v7",
         reason = "Only multi-core-per-chip TPU v7x has a non-identity rank-to-device mapping",
@@ -676,13 +678,12 @@ torch_tpu_py_test(
         "requires-tpu-v7x:4",
     ],
     deps = [
-        ":distributed_utils",
+        ":continuous_test_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:seed_test_utils",
     ],
 )
 
@@ -690,6 +691,7 @@ torch_tpu_py_test(
     name = "subgroup_launch_order_test",
     timeout = "long",
     srcs = ["subgroup_launch_order_test.py"],
+    nopresubmit_oss = "TODO(b/568095515): Flaking in GitHub TPU v7 presubmit with START_SESSION failed.",
     oss_presubmit_tpu_generation = tpu_gen(
         "v7",
         reason = "Only multi-core-per-chip TPU v7x has a non-identity rank-to-device mapping",
@@ -706,7 +708,7 @@ torch_tpu_py_test(
         "requires-tpu-v7x:4",
     ],
     deps = [
-        ":distributed_utils",
+        ":continuous_test_utils",
         "//shims/absl_py/logging",
         "//shims/absl_py/testing:absltest",
         "//shims/absl_py/testing:parameterized",
@@ -715,8 +717,8 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/distributed:spmd_util",
         "//src/torch_tpu/_internal/pallas",
+        "//src/torch_tpu/_internal/utils:hardware",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:seed_test_utils",
         "@pypi//jax",
     ],
 )
@@ -778,7 +780,7 @@ torch_tpu_py_test(
         "noasan",  # Disabled due to b/497035517.
         "nomsan",  # Disabled due to b/516945438.
         "notsan",  # Disabled due to b/497035517.
-        "requires-tpu-v5lite:8",
+        REQUIRES_V5_MULTI_DEVICE,
     ],
     deps = [
         ":distributed_utils",
@@ -834,7 +836,6 @@ torch_tpu_py_test(
 torch_tpu_py_test(
     name = "dcp_test",
     srcs = ["dcp_test.py"],
-    shard_count = 2,
     tags = if_oss(
         ["exclusive"],
         [],
@@ -845,6 +846,7 @@ torch_tpu_py_test(
         "notsan",  # TODO(b/497035517): fix the test in tsan mode.
     ],
     deps = [
+        ":continuous_test_utils",
         ":distributed_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
@@ -882,7 +884,6 @@ torch_tpu_py_test(
     name = "ragged_all_to_all_test",
     timeout = "long",
     srcs = ["ragged_all_to_all_test.py"],
-    shard_count = 3,
     tags = if_oss(
         ["exclusive"],
         [],
@@ -893,13 +894,12 @@ torch_tpu_py_test(
         "requires-tpu-v5lite:8",
     ],
     deps = [
-        ":distributed_utils",
+        ":continuous_test_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:seed_test_utils",
     ],
 )
 
@@ -955,18 +955,16 @@ torch_tpu_py_test(
     exec_properties = {
         "test.mem": "28g",
     },
-    shard_count = 4,
     tags = if_oss(
         ["exclusive"],
         [],
     ) + [
+        REQUIRES_V5_MULTI_DEVICE,
         "noasan",  # TODO(b/555734615): fix the test in asan mode.
         "notsan",  # TODO(b/555734615): fix the time-out in tsan mode.
-        # Exactly 8 chips are required because the test hardcodes _world_size = 8 to match the
-        # topology and avoid uninitialized chips in OSS CI.
-        "requires-tpu-v5lite:8",
     ],
     deps = [
+        ":continuous_test_utils",
         ":distributed_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
@@ -978,7 +976,6 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal/distributed:collective_ops",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:seed_test_utils",
     ],
 )
 
@@ -1032,7 +1029,6 @@ torch_tpu_py_test(
         {"MASTER_ADDR": "127.0.0.1"},
         {},
     ),
-    shard_count = 8,
     tags = if_oss(
         ["exclusive"],
         [],
@@ -1043,13 +1039,12 @@ torch_tpu_py_test(
         "notsan",  # TODO(b/497035517)
     ],
     deps = [
-        ":distributed_utils",
+        ":continuous_test_utils",
         "//shims/absl_py/testing:absltest",
         "//shims/absl_py/testing:parameterized",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/compile",
-        "//src/torch_tpu/_internal/distributed:handshake",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/utils:test_utils",
         "@pypi//portpicker",

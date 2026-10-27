@@ -361,11 +361,13 @@ absl::Status ThnnFusedGruCellOutImpl(
   return DispatchThnnFusedGruCellCommon<absl::Status>(
       input_gates, hidden_gates, hx, input_bias, hidden_bias,
       std::move(param_keys),
-      [&](auto op_builder, auto inputs, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, auto inputs, auto options) {
         return DispatchOpOut<5, 2>(std::move(op_builder), inputs, {out0, out1},
                                    std::move(options));
       },
-      [&](auto op_builder, auto inputs, auto options) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, auto inputs, auto options) {
         return DispatchOpOut<3, 2>(std::move(op_builder), inputs, {out0, out1},
                                    std::move(options));
       });

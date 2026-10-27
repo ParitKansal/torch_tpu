@@ -366,7 +366,7 @@ absl::StatusOr<mlir::ElementType> ToElementType(mlir::Type type) {
             }
             return std::nullopt;
           })
-          .Default([&](mlir::Type) { return std::nullopt; });
+          .Default([](mlir::Type) { return std::nullopt; });
 
   if (!element_type) {
     return TT_ERROR(error::kInvalidArgument)
@@ -502,8 +502,8 @@ at::ScalarType ToScalarType(mlir::Type type) {
           .Case<mlir::ComplexType>([](mlir::ComplexType complex_type) {
             return ToScalarType(complex_type);
           })
-          .Default([&](mlir::Type) {
-            ABSL_LOG(FATAL)  // CRASH_OK
+          .Default([&](mlir::Type) {  // REF_CAPTURE_OK=called synchronously
+            ABSL_LOG(FATAL)           // CRASH_OK
                 << "cannot convert MLIR type " << ::torch_tpu::ToString(type)
                 << " to a PyTorch type";
             // Unreachable. Just to make the compiler happy.

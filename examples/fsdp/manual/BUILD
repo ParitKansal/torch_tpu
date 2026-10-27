@@ -20,6 +20,7 @@ load(
     "//build_files:build_defs.bzl",
     "REQUIRES_V5_MULTI_DEVICE",
     "if_oss",
+    "torch_tpu_oss_doc_test",
     "torch_tpu_package_end",
     "torch_tpu_py_library",
     "torch_tpu_py_test",
@@ -95,6 +96,29 @@ torch_tpu_py_library(
     ],
     deps = [
         "//shims/torch:pytorch",
+    ],
+)
+
+# OSS only: run the documented commands for the tests above as a user would;
+# see torch_tpu_oss_doc_test.
+torch_tpu_oss_doc_test(
+    name = "launch_doc_test",
+    doc = "README.md",
+    deps = [
+        ":manual_fsdp_worker",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+    ],
+)
+
+torch_tpu_oss_doc_test(
+    name = "manual_fsdp_memory_doc_test",
+    doc = "README.md",
+    deps = [
+        ":model",
+        "//shims/absl_py/logging",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
     ],
 )
 

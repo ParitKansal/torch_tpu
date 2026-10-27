@@ -41,6 +41,7 @@ torch_tpu_cc_library(
     hdrs = ["convolution.h"],
     deps = [
         ":convolution_checks",
+        "//csrc/common:aten_utils",
         "//csrc/common:dimension_types",
         "//csrc/common:error_utils",
         "//csrc/common:to_string",
@@ -76,6 +77,7 @@ torch_tpu_cc_library(
         "//csrc/common:fixed_size_span",
         "//csrc/common:to_string",
         "//csrc/eager:device_buffer",
+        "//csrc/eager:eager_mode",
         "//csrc/eager:op_dispatcher",
         "//csrc/eager:tensor_to_buffer",
         "//csrc/ops:op_builder_utils",
@@ -89,6 +91,7 @@ torch_tpu_cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
+        "@llvm-project//mlir:IR",
         "@stablehlo//:stablehlo_ops",
         "@stablehlo//stablehlo/integrations/cpp/builder:attr_type_builder_util",
         "@stablehlo//stablehlo/integrations/cpp/builder:mlir_builder",

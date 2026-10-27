@@ -181,8 +181,9 @@ absl::StatusOr<DeviceBufferRef> Bucketize(const at::Tensor& self,
                                           OpParamCacheKeys param_keys) {
   return DispatchBucketize<absl::StatusOr<DeviceBufferRef>>(
       self, boundaries, out_int32, right, std::move(param_keys),
-      [&](auto op_builder, mlir::ElementType out_dtype,
-          OpParamCacheKeys param_keys) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, mlir::ElementType out_dtype,
+       OpParamCacheKeys param_keys) {
         return DispatchOp<2>(std::move(op_builder), {self, boundaries},
                              {.out_dtype = out_dtype,
                               .out_dims = CopyIntVector(self.sizes()),
@@ -198,8 +199,9 @@ absl::Status BucketizeOut(const at::Tensor& self, const at::Tensor& boundaries,
       /*allow_out_dtype_cast=*/false));
   return DispatchBucketize<absl::Status>(
       self, boundaries, out_int32, right, std::move(param_keys),
-      [&](auto op_builder, mlir::ElementType out_dtype,
-          OpParamCacheKeys param_keys) {
+      [&]  // REF_CAPTURE_OK=called synchronously
+      (auto op_builder, mlir::ElementType out_dtype,
+       OpParamCacheKeys param_keys) {
         return DispatchOpOut<2>(std::move(op_builder), {self, boundaries}, out,
                                 {.out_dtype = out_dtype,
                                  .out_dims = CopyIntVector(self.sizes()),

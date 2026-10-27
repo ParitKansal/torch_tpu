@@ -77,7 +77,8 @@ absl::StatusOr<int64_t> ComputeToValue(at::ScalarType dtype) {
   if (at::isFloatingType(dtype)) {
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half, at::ScalarType::BFloat16, dtype,
-        "random_float_to_value_calc", [&] {
+        "random_float_to_value_calc",
+        [&] {  // REF_CAPTURE_OK=called synchronously
           constexpr int64_t scalar_t_max =
               static_cast<int64_t>(1) << std::numeric_limits<scalar_t>::digits;
           maybe_to = scalar_t_max > std::numeric_limits<int64_t>::max()
@@ -85,7 +86,8 @@ absl::StatusOr<int64_t> ComputeToValue(at::ScalarType dtype) {
                          : static_cast<int64_t>(scalar_t_max);
         });
   } else if (at::isIntegralType(dtype, /*includeBool=*/true)) {
-    AT_DISPATCH_V2(dtype, "random_integral_to_value_calc", AT_WRAP([&] {
+    AT_DISPATCH_V2(dtype, "random_integral_to_value_calc",
+                   AT_WRAP([&] {  // REF_CAPTURE_OK=called locally
                      if constexpr (std::is_same_v<scalar_t, bool>) {
                        maybe_to = static_cast<int64_t>(true);
                      } else {
@@ -125,8 +127,8 @@ absl::Status Random(at::Tensor& self, c10::optional<at::Generator> generator,
 
   return DispatchRngOp(
       self, generator,
-      [&](at::Tensor rng_input_state)
-          -> absl::StatusOr<std::vector<DeviceBufferRef>> {
+      [&](at::Tensor rng_input_state)  // REF_CAPTURE_OK=called synchronously
+      -> absl::StatusOr<std::vector<DeviceBufferRef>> {
         TT_ASSIGN_OR_RETURN(
             auto buf,
             (DispatchOp<1, 1>(GetRandomFunctional(dims, output_dtype, from, to),

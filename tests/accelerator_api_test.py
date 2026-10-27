@@ -252,6 +252,87 @@ class AcceleratorDeviceTest(seed_test_utils.RepeatableTest):
     y = fn(x)
     utils.assert_close(y.cpu(), torch.full((4,), 2.0))
 
+  def test_invalid_tpu_device_index_raises(self):
+    """Verifies out-of-range or invalid TPU device indices raise errors."""
+    bad_idx = max(7, torch.accelerator.device_count())
+    invalid_ops = [
+        ("zeros_str", lambda: torch.zeros(2, device=f"tpu:{bad_idx}")),
+        (
+            "zeros_device",
+            lambda: torch.zeros(2, device=torch.device("tpu", bad_idx)),
+        ),
+        ("ones", lambda: torch.ones(2, device=f"tpu:{bad_idx}")),
+        ("empty", lambda: torch.empty(2, device=f"tpu:{bad_idx}")),
+        ("full", lambda: torch.full((2,), 1.0, device=f"tpu:{bad_idx}")),
+        (
+            "empty_strided",
+            lambda: torch.empty_strided((2,), (1,), device=f"tpu:{bad_idx}"),
+        ),
+        (
+            "tril_indices",
+            lambda: torch.tril_indices(2, 2, device=f"tpu:{bad_idx}"),
+        ),
+        (
+            "efficientzerotensor",
+            lambda: torch._efficientzerotensor((2,), device=f"tpu:{bad_idx}"),
+        ),
+        ("cpu_to_int", lambda: torch.zeros(2).to(bad_idx)),
+        ("cpu_to_str", lambda: torch.zeros(2).to(f"tpu:{bad_idx}")),
+        (
+            "cpu_to_device",
+            lambda: torch.zeros(2).to(torch.device("tpu", bad_idx)),
+        ),
+        ("tpu_to_int", lambda: torch.zeros(2, device="tpu:0").to(bad_idx)),
+        (
+            "tpu_to_str",
+            lambda: torch.zeros(2, device="tpu:0").to(f"tpu:{bad_idx}"),
+        ),
+        (
+            "get_memory_info_int",
+            lambda: torch.accelerator.get_memory_info(bad_idx),
+        ),
+        (
+            "get_memory_info_str",
+            lambda: torch.accelerator.get_memory_info(f"tpu:{bad_idx}"),
+        ),
+        (
+            "get_memory_info_neg",
+            lambda: torch.accelerator.get_memory_info(-2),
+        ),
+    ]
+    for name, fn in invalid_ops:
+      with self.subTest(op=name):
+        with self.assertRaises(  # ASSERT_RAISES_OK=Invalid device index check
+            (RuntimeError, ValueError)
+        ):
+          fn()
+
+  def test_valid_tpu_device_index_succeeds(self):
+    """Verifies valid TPU device specifications succeed."""
+    for dev in ("tpu", "tpu:0", torch.device("tpu", 0)):
+      with self.subTest(device=dev):
+        self.assertEqual(torch.zeros(2, device=dev).device.index, 0)
+        self.assertEqual(torch.ones(2, device=dev).device.index, 0)
+        self.assertEqual(torch.empty(2, device=dev).device.index, 0)
+        self.assertEqual(torch.full((2,), 1.0, device=dev).device.index, 0)
+        self.assertEqual(
+            torch.empty_strided((2,), (1,), device=dev).device.index, 0
+        )
+        self.assertEqual(torch.tril_indices(2, 2, device=dev).device.index, 0)
+        self.assertEqual(
+            torch._efficientzerotensor((2,), device=dev).device.index, 0
+        )
+
+    for to_target in ("tpu", "tpu:0", torch.device("tpu", 0), 0):
+      with self.subTest(to_target=to_target):
+        cpu_to_tpu = torch.zeros(2).to(to_target)
+        self.assertEqual(cpu_to_tpu.device, torch.device("tpu", 0))
+        tpu_to_tpu = torch.zeros(2, device="tpu:0").to(to_target)
+        self.assertEqual(tpu_to_tpu.device, torch.device("tpu", 0))
+        free_bytes, total_bytes = torch.accelerator.get_memory_info(to_target)
+        self.assertGreater(total_bytes, 0)
+        self.assertGreaterEqual(free_bytes, 0)
+
 
 class AcceleratorStreamAndSyncTest(seed_test_utils.RepeatableTest):
   """Tests stream and synchronization APIs in torch.accelerator."""

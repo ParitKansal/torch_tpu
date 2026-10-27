@@ -106,12 +106,15 @@ void CheckSliceMerge(const SlicePrimitive& first,
   Dimensions dimensions(first.slice_dims.size());
   absl::c_transform(first.slice_dims, dimensions.begin(), ComputeNewSize);
 
-  CheckSlice(second, dimensions, /* get_error_message_suffix= */ [&]() {
-    return absl::StrCat(
-        "; calling Merge() with first=", ToString(first),
-        " and second=", ToString(second),
-        GetViewPrimitiveErrorSuffix(second, {.leading_semicolon = false}));
-  });
+  CheckSlice(
+      second, dimensions,
+      /* get_error_message_suffix= */
+      [&]() {  // REF_CAPTURE_OK=called synchronously
+        return absl::StrCat(
+            "; calling Merge() with first=", ToString(first),
+            " and second=", ToString(second),
+            GetViewPrimitiveErrorSuffix(second, {.leading_semicolon = false}));
+      });
 }
 
 }  // namespace
@@ -134,7 +137,8 @@ std::ostream& operator<<(std::ostream& os, const SlicePrimitive& slice) {
 
 bool UpdateLayout(StridedLayout& layout, const SlicePrimitive& slice) {
   CheckSlice(slice, GetSizes(layout),
-             /* get_error_message_suffix= */ [&]() {
+             /* get_error_message_suffix= */
+             [&]() {  // REF_CAPTURE_OK=called synchronously
                return GetUpdateLayoutBugSuffix(slice, layout);
              });
   bool updated = false;
@@ -211,7 +215,8 @@ absl::StatusOr<mlir::MlirOp> ViewPrimitiveShlo(mlir::MlirOp input,
   }
 
   CheckSlice(slice, input_sizes,
-             /* get_error_message_suffix= */ [&]() {
+             /* get_error_message_suffix= */
+             [&]() {  // REF_CAPTURE_OK=called synchronously
                return GetViewPrimitiveShloErrorSuffix(slice,
                                                       input_type.getShape());
              });

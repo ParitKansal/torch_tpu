@@ -494,7 +494,8 @@ absl::StatusOr<AsyncCompileResult> TraverseAndCompile(
                          // happens
         auto contexted_module,
         ContextedModule::Make(
-            [&](mlir::MLIRContext& mlir_context)
+            [&]  // REF_CAPTURE_OK=called synchronously
+            (mlir::MLIRContext& mlir_context)
                 -> absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> {
               return traversal->BuildMlirModule(
                   mlir_context, options.use_stablehlo_bounds,
@@ -559,7 +560,8 @@ absl::StatusOr<SharedLoadedExecutableWithMetadata> CompileMlirExecutable(
   TT_ASSIGN_OR_RETURN(
       ContextedModule module,
       ContextedModule::Make(
-          [&](mlir::MLIRContext& mlir_context)
+          [&]  // REF_CAPTURE_OK=called synchronously
+          (mlir::MLIRContext& mlir_context)
               -> absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> {
             return mlir::stablehlo::deserializePortableArtifact(
                 {mlir_module_bytecode.data(), mlir_module_bytecode.size()},
@@ -578,10 +580,8 @@ absl::StatusOr<SharedLoadedExecutableWithMetadata> CompileMlirExecutable(
       [module = std::move(module)](
           xla::PjRtClient& client,
           UniqueCompileOptions compile_options) mutable {
-        return AdaptXlaError(
-            CompileAndLoadMaybeSubslice(client, std::move(module),
-                                        std::move(*compile_options)),
-            /* context= */ "failed to compile MLIR module");
+        return CompileAndLoadMlirModule(client, std::move(module),
+                                        std::move(*compile_options));
       };
   return Compile(*client, std::move(executable_builder),
                  std::move(compile_options));

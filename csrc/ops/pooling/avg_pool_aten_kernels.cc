@@ -82,8 +82,8 @@ absl::StatusOr<mlir::MlirOp> ScaleAvgPoolOutput(
   const mlir::Type element_type = dividend_type.getElementType();
 
   // Helper to scale dividend by a constant integer divisor.
-  auto scale_by_constant_divisor =
-      [&](int64_t divisor_val) -> absl::StatusOr<mlir::MlirOp> {
+  auto scale_by_constant_divisor = [&]  // REF_CAPTURE_OK=called synchronously
+      (int64_t divisor_val) -> absl::StatusOr<mlir::MlirOp> {
     if (divisor_val == 1) {
       return dividend;
     }

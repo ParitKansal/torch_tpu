@@ -84,6 +84,9 @@ class Kernel {
 
 // Low-level entry point taking an assembled `KernelSpec`. Prefer `CreateKernel`
 // below, which unpacks each spec into a `Ref` parameter on the body callback.
+//
+// `body` is invoked synchronously before `BuildKernel` returns and is not
+// retained afterwards, so capturing local variables by reference is safe.
 absl::StatusOr<Kernel> BuildKernel(const KernelSpec& spec,
                                    absl::FunctionRef<void()> body);
 
@@ -135,7 +138,9 @@ absl::StatusOr<Kernel> CreateKernelImpl(GridSpec grid,
   // registered in the exact order they were passed.
   std::tuple resolvers{RegisterSpec(spec, std::get<Is>(all_args))...};
 
-  return BuildKernel(spec, [&] { body(std::get<Is>(resolvers)()...); });
+  return BuildKernel(spec, [&] {  // REF_CAPTURE_OK=called synchronously
+    body(std::get<Is>(resolvers)()...);
+  });
 }
 
 }  // namespace internal
@@ -146,9 +151,13 @@ absl::StatusOr<Kernel> CreateKernelImpl(GridSpec grid,
 // parameters receive the corresponding `Ref` (or `std::optional<Ref>`) values:
 //
 //   CreateKernel(grid_spec, in0, in1, opt_mask, out0, scratch0,
-//                [&](Ref a, Ref b, std::optional<Ref> mask, Ref c, Ref acc) {
+//                [](Ref a, Ref b, std::optional<Ref> mask, Ref c, Ref acc) {
 //                  ...
 //                });
+//
+// The body callback is invoked synchronously before `CreateKernel` returns and
+// is not retained afterwards, so capturing local variables by reference is
+// safe.
 template <typename... SpecsAndBody>
   requires(sizeof...(SpecsAndBody) >= 1)
 absl::StatusOr<Kernel> CreateKernel(GridSpec grid,

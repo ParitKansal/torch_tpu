@@ -22,7 +22,6 @@
 #include <vector>
 
 #include "ATen/core/ATen_fwd.h"
-#include "ATen/core/CachingHostAllocator.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -172,11 +171,16 @@ at::Tensor MakeTensor(
 //    enable_autodonation: if true and the base buffer of the tensor has only
 //      one live data pointer that is about to be overwritten, then donate the
 //      base buffer to the result if possible.
+//    bump_version: if true, bumps the version counter of the tensor, like
+//      in-place ops do. Pass false only for writes that PyTorch's CPU and CUDA
+//      kernels make without bumping it, e.g. `native_batch_norm` updating the
+//      running statistics that autograd saves for the backward.
 // Requires:
 //    result_buf and tensor must have the same shape and dtype.
 absl::Status AssignBufferToAtTensor(DeviceBufferRef result_buf,
                                     const at::Tensor& tensor,
-                                    bool enable_autodonation = false);
+                                    bool enable_autodonation = false,
+                                    bool bump_version = true);
 
 // Returns true if `tensor` is a pure reinterpretation of all the bytes of
 // `base` (the base DeviceBufferRef of its storage).
@@ -193,16 +197,13 @@ absl::Status AssignBufferAsStorageBase(DeviceBufferRef new_base,
                                        const at::Tensor& tensor);
 
 // Returns the C10 allocator singleton for TPU.
+// Not to be confused with TpuPinnedAllocator (see host_allocator.h) which is
+// the host-side allocator; this allocator is for device-side memory that is
+// managed by the TPU backend.
 c10::Allocator* GetTpuAllocator();
 
-// Returns the Tpu pinned memory allocator.
-at::HostAllocator* GetTpuPinnedAllocator();
-
-// Returns true if the given pointer was allocated by the Tpu pinned memory
-// allocator.
-bool IsTpuPinnedPtr(const void* ptr);
-
-// Registers the TpuAllocator as the allocator for the PrivateUse1 device.
+// Registers the TpuAllocator as the allocator for the PrivateUse1 device,
+// and the TpuPinnedAllocator as the pinned host allocator.
 // This must be called before using the allocator for any device operations.
 void RegisterTpuAllocator();
 

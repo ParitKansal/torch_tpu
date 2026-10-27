@@ -127,7 +127,8 @@ std::tuple<at::Tensor, at::Tensor> AtenDropoutCommonImpl(
       auto results,
       DispatchRngOpGeneral(
           generator,
-          [&](at::Tensor rng_input_state) {
+          [&]  // REF_CAPTURE_OK=called synchronously
+          (at::Tensor rng_input_state) {
             return DispatchOp<2, 2>(
                 GetDropoutFunctional(input, p), {rng_input_state, input},
                 {.out_dtypes = {output_dtype, mlir::ElementType::PRED},

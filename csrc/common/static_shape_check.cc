@@ -143,7 +143,7 @@ absl::Status ValidateStaticShape(const at::Tensor& tensor,
   absl::Span<const BoundedDynamicDimension> dynamic_dimensions_info =
       buffer_ref.dynamic_dimensions();
 
-  auto get_extra_error_message = [&]() {
+  auto get_extra_error_message = [&]() {  // REF_CAPTURE_OK=called synchronously
     if (tensor.sizes() != buffer_ref.dimensions()) {
       // TODO: make sure that the BoundedDynamicDimension information gets
       // propagated into view tensors.

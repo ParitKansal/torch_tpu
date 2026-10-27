@@ -1095,12 +1095,16 @@ absl::StatusOr<std::vector<std::vector<uint8_t>>> AllGatherViaNodeLocalStore(
   if (use_local && local_rank != 0) {
     const std::string up_key =
         absl::StrCat("local_up:", scope_key, ":", local_rank);
-    TT_RETURN_IF_ERROR(CallStore(absl::StrCat("local_store set ", up_key), [&] {
-      local_store->set(up_key, PackKeyAndValue(my_key, my_value));
-    }));
+    TT_RETURN_IF_ERROR(
+        CallStore(absl::StrCat("local_store set ", up_key),
+                  [&] {  // REF_CAPTURE_OK=called synchronously
+                    local_store->set(up_key, PackKeyAndValue(my_key, my_value));
+                  }));
     TT_ASSIGN_OR_RETURN(const ByteVector table,
                         CallStore(absl::StrCat("local_store get ", down_key),
-                                  [&] { return local_store->get(down_key); }));
+                                  [&] {  // REF_CAPTURE_OK=called synchronously
+                                    return local_store->get(down_key);
+                                  }));
     return DecodeTable(table, peer_keys.size());
   }
 
@@ -1115,7 +1119,8 @@ absl::StatusOr<std::vector<std::vector<uint8_t>>> AllGatherViaNodeLocalStore(
   int64_t num_nodes = 0;
 
   // Reads node blobs until every peer key is filled. Collector only.
-  const auto collect = [&]() -> absl::StatusOr<std::vector<ByteVector>> {
+  const auto collect = [&]  // REF_CAPTURE_OK=called locally
+      () -> absl::StatusOr<std::vector<ByteVector>> {
     absl::flat_hash_map<std::string_view, size_t> key_to_index;
     key_to_index.reserve(peer_keys.size());
     for (size_t i = 0; i < peer_keys.size(); ++i) {
@@ -1124,16 +1129,20 @@ absl::StatusOr<std::vector<std::vector<uint8_t>>> AllGatherViaNodeLocalStore(
     std::vector<ByteVector> values(peer_keys.size());
     std::vector<bool> filled(peer_keys.size(), false);
     int64_t num_filled = 0;
-    const auto run = [&]() -> absl::Status {
+    const auto run = [&]() -> absl::Status {  // REF_CAPTURE_OK=called locally
       while (num_filled < num_peers) {
         const std::string next_key = node_key(num_nodes);
         TT_RETURN_IF_ERROR(
             CallStore(absl::StrCat("world_store wait ", next_key),
-                      [&] { world_store->wait({next_key}); }));
+                      [&] {  // REF_CAPTURE_OK=called synchronously
+                        world_store->wait({next_key});
+                      }));
         TT_ASSIGN_OR_RETURN(
             const int64_t avail,
             CallStore(absl::StrCat("world_store add ", count_key),
-                      [&] { return world_store->add(count_key, 0); }));
+                      [&] {  // REF_CAPTURE_OK=called synchronously
+                        return world_store->add(count_key, 0);
+                      }));
         TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=internal invariant: slots are
                        // claimed only by this gather's peers
             avail <= num_peers, error::kFailedPrecondition)
@@ -1144,10 +1153,12 @@ absl::StatusOr<std::vector<std::vector<uint8_t>>> AllGatherViaNodeLocalStore(
         for (int64_t slot = num_nodes; slot < avail; ++slot) {
           batch_keys.push_back(node_key(slot));
         }
-        TT_ASSIGN_OR_RETURN(const std::vector<ByteVector> blobs,
-                            CallStore("world_store multiGet node blobs", [&] {
-                              return world_store->multiGet(batch_keys);
-                            }));
+        TT_ASSIGN_OR_RETURN(
+            const std::vector<ByteVector> blobs,
+            CallStore("world_store multiGet node blobs",
+                      [&] {  // REF_CAPTURE_OK=called synchronously
+                        return world_store->multiGet(batch_keys);
+                      }));
         for (const ByteVector& blob : blobs) {
           TT_ASSIGN_OR_RETURN(const std::vector<ByteVector> entries,
                               UnpackAllValues(blob));
@@ -1190,7 +1201,8 @@ absl::StatusOr<std::vector<std::vector<uint8_t>>> AllGatherViaNodeLocalStore(
   };
 
   // The leader's whole sequence. Any error is forwarded below.
-  const auto lead = [&]() -> absl::StatusOr<std::vector<ByteVector>> {
+  const auto lead = [&]  // REF_CAPTURE_OK=called locally
+      () -> absl::StatusOr<std::vector<ByteVector>> {
     std::vector<ByteVector> node_entries = {PackKeyAndValue(my_key, my_value)};
     if (use_local) {
       std::vector<std::string> up_keys;
@@ -1200,7 +1212,9 @@ absl::StatusOr<std::vector<std::vector<uint8_t>>> AllGatherViaNodeLocalStore(
       }
       absl::StatusOr<std::vector<ByteVector>> up_entries =
           CallStore("local_store multiGet",
-                    [&] { return local_store->multiGet(up_keys); });
+                    [&] {  // REF_CAPTURE_OK=called synchronously
+                      return local_store->multiGet(up_keys);
+                    });
       if (!up_entries.ok()) {
         return TT_ERROR(  // ERROR_COV_INFEASIBLE=needs a local rank that never
                           // joins; blocks for the 300s FileStore timeout
@@ -1220,10 +1234,11 @@ absl::StatusOr<std::vector<std::vector<uint8_t>>> AllGatherViaNodeLocalStore(
     }
 
     // Publish this node's entries as one blob in a slot claimed with add().
-    TT_ASSIGN_OR_RETURN(
-        const int64_t count,
-        CallStore(absl::StrCat("world_store add ", count_key),
-                  [&] { return world_store->add(count_key, 1); }));
+    TT_ASSIGN_OR_RETURN(const int64_t count,
+                        CallStore(absl::StrCat("world_store add ", count_key),
+                                  [&] {  // REF_CAPTURE_OK=called synchronously
+                                    return world_store->add(count_key, 1);
+                                  }));
     const int64_t slot = count - 1;
     TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=internal invariant: slots are
                    // claimed only by this gather's peers
@@ -1231,9 +1246,11 @@ absl::StatusOr<std::vector<std::vector<uint8_t>>> AllGatherViaNodeLocalStore(
         << "claimed node slot " << slot << " but there are only " << num_peers
         << " peer keys (scope " << scope_key << " reused, or too many nodes)";
     const std::string blob_key = node_key(slot);
-    TT_RETURN_IF_ERROR(CallStore(
-        absl::StrCat("world_store set ", blob_key),
-        [&] { world_store->set(blob_key, PackValueList(node_entries)); }));
+    TT_RETURN_IF_ERROR(CallStore(absl::StrCat("world_store set ", blob_key),
+                                 [&] {  // REF_CAPTURE_OK=called synchronously
+                                   world_store->set(
+                                       blob_key, PackValueList(node_entries));
+                                 }));
     ABSL_VLOG(1) << "AllGatherViaNodeLocalStore(" << scope_key
                  << "): leader published " << node_entries.size()
                  << " entries in node slot " << slot;
@@ -1242,19 +1259,24 @@ absl::StatusOr<std::vector<std::vector<uint8_t>>> AllGatherViaNodeLocalStore(
     if (is_collector) {
       TT_ASSIGN_OR_RETURN(const std::vector<ByteVector> values, collect());
       table = EncodeOkTable(values);
-      TT_RETURN_IF_ERROR(
-          CallStore(absl::StrCat("world_store set ", table_key),
-                    [&] { world_store->set(table_key, table); }));
+      TT_RETURN_IF_ERROR(CallStore(absl::StrCat("world_store set ", table_key),
+                                   [&] {  // REF_CAPTURE_OK=called synchronously
+                                     world_store->set(table_key, table);
+                                   }));
       world_table_written = true;
     } else {
       TT_ASSIGN_OR_RETURN(
           table, CallStore(absl::StrCat("world_store get ", table_key),
-                           [&] { return world_store->get(table_key); }));
+                           [&] {  // REF_CAPTURE_OK=called synchronously
+                             return world_store->get(table_key);
+                           }));
     }
     // Forward the table before decoding it so workers also see errors.
     if (use_local) {
       TT_RETURN_IF_ERROR(CallStore(absl::StrCat("local_store set ", down_key),
-                                   [&] { local_store->set(down_key, table); }));
+                                   [&] {  // REF_CAPTURE_OK=called synchronously
+                                     local_store->set(down_key, table);
+                                   }));
       local_down_written = true;
     }
     return DecodeTable(table, peer_keys.size());
@@ -1266,14 +1288,20 @@ absl::StatusOr<std::vector<std::vector<uint8_t>>> AllGatherViaNodeLocalStore(
     const ByteVector err_table = EncodeErrTable(absl::StrCat(
         "node leader (my_key=", my_key, "): ", result.status().message()));
     if (is_collector && !world_table_written) {
-      CallStore("world_store set error table", [&] {
-        world_store->set(table_key, err_table);
-      }).IgnoreError();  // IGNORE_ERROR_OK=best effort; original error returned
+      CallStore("world_store set error table",
+                [&] {  // REF_CAPTURE_OK=called synchronously
+                  world_store->set(table_key, err_table);
+                })
+          .IgnoreError();  // IGNORE_ERROR_OK=best effort; original error
+                           // returned
     }
     if (use_local && !local_down_written) {
-      CallStore("local_store set error table", [&] {
-        local_store->set(down_key, err_table);
-      }).IgnoreError();  // IGNORE_ERROR_OK=best effort; original error returned
+      CallStore("local_store set error table",
+                [&] {  // REF_CAPTURE_OK=called synchronously
+                  local_store->set(down_key, err_table);
+                })
+          .IgnoreError();  // IGNORE_ERROR_OK=best effort; original error
+                           // returned
     }
     return result.status();
   }
@@ -1524,7 +1552,9 @@ absl::StatusOr<DeviceGroup> ProcessGroupTpu::GatherMemberWorldRanks() {
     }
     TT_ASSIGN_OR_RETURN(const std::vector<std::vector<uint8_t>> values,
                         CallStore("store multiGet local_rank:*",
-                                  [&] { return store_->multiGet(keys); }));
+                                  [&] {  // REF_CAPTURE_OK=called synchronously
+                                    return store_->multiGet(keys);
+                                  }));
     for (int64_t i = 1; i < size_; ++i) {
       const std::string_view value(
           reinterpret_cast<const char*>(values[i - 1].data()),
@@ -1539,21 +1569,26 @@ absl::StatusOr<DeviceGroup> ProcessGroupTpu::GatherMemberWorldRanks() {
           << "world rank " << member_world_ranks[i]
           << " out of range for world size " << world_size;
     }
-    TT_RETURN_IF_ERROR(CallStore("store set local_subgroup_ranks", [&] {
-      store_->set("local_subgroup_ranks",
-                  absl::StrJoin(member_world_ranks, ","));
-    }));
+    TT_RETURN_IF_ERROR(CallStore("store set local_subgroup_ranks",
+                                 [&] {  // REF_CAPTURE_OK=called synchronously
+                                   store_->set(
+                                       "local_subgroup_ranks",
+                                       absl::StrJoin(member_world_ranks, ","));
+                                 }));
     return member_world_ranks;
   }
 
   const std::string my_key = absl::StrFormat("local_rank:%d", rank_);
-  TT_RETURN_IF_ERROR(CallStore(absl::StrCat("store set ", my_key), [&] {
-    store_->set(my_key, std::to_string(topo.world_rank));
-  }));
+  TT_RETURN_IF_ERROR(CallStore(absl::StrCat("store set ", my_key),
+                               [&] {  // REF_CAPTURE_OK=called synchronously
+                                 store_->set(my_key,
+                                             std::to_string(topo.world_rank));
+                               }));
   TT_ASSIGN_OR_RETURN(const std::vector<uint8_t> bytes,
-                      CallStore("store get local_subgroup_ranks", [&] {
-                        return store_->get("local_subgroup_ranks");
-                      }));
+                      CallStore("store get local_subgroup_ranks",
+                                [&] {  // REF_CAPTURE_OK=called synchronously
+                                  return store_->get("local_subgroup_ranks");
+                                }));
   const std::string_view csv(reinterpret_cast<const char*>(bytes.data()),
                              bytes.size());
   member_world_ranks.reserve(size_);
@@ -1595,32 +1630,36 @@ absl::StatusOr<DeviceGroupList> ProcessGroupTpu::GatherAllSubgroups(
   if (rank_ == 0) {
     const std::string count_key =
         absl::StrFormat("subgroup_count:%d", gather_id);
-    TT_ASSIGN_OR_RETURN(
-        const int64_t count,
-        CallStore(absl::StrCat("root_store add ", count_key),
-                  [&] { return root_store->add(count_key, 1); }));
+    TT_ASSIGN_OR_RETURN(const int64_t count,
+                        CallStore(absl::StrCat("root_store add ", count_key),
+                                  [&] {  // REF_CAPTURE_OK=called synchronously
+                                    return root_store->add(count_key, 1);
+                                  }));
     const std::string my_subgroup_key =
         absl::StrFormat("subgroup:%d:%d", gather_id, count - 1);
     TT_RETURN_IF_ERROR(
-        CallStore(absl::StrCat("root_store set ", my_subgroup_key), [&] {
-          root_store->set(my_subgroup_key,
-                          absl::StrJoin(member_world_ranks, ","));
-        }));
+        CallStore(absl::StrCat("root_store set ", my_subgroup_key),
+                  [&] {  // REF_CAPTURE_OK=called synchronously
+                    root_store->set(my_subgroup_key,
+                                    absl::StrJoin(member_world_ranks, ","));
+                  }));
     std::vector<std::string> peer_keys(num_subgroups);
     for (int64_t s = 0; s < num_subgroups; ++s) {
       peer_keys[s] = absl::StrFormat("subgroup:%d:%d", gather_id, s);
     }
     TT_ASSIGN_OR_RETURN(const std::vector<std::vector<uint8_t>> peer_values,
-                        CallStore("root_store multiGet subgroup:*", [&] {
-                          return root_store->multiGet(peer_keys);
-                        }));
+                        CallStore("root_store multiGet subgroup:*",
+                                  [&] {  // REF_CAPTURE_OK=called synchronously
+                                    return root_store->multiGet(peer_keys);
+                                  }));
     for (const auto& bytes : peer_values) {
       subgroup_csvs.emplace_back(reinterpret_cast<const char*>(bytes.data()),
                                  bytes.size());
     }
     if (size_ > 1) {
-      TT_RETURN_IF_ERROR(
-          CallStore(absl::StrCat("store set ", subgroup_store_key), [&] {
+      TT_RETURN_IF_ERROR(CallStore(
+          absl::StrCat("store set ", subgroup_store_key),
+          [&] {  // REF_CAPTURE_OK=called synchronously
             store_->set(subgroup_store_key, absl::StrJoin(subgroup_csvs, ";"));
           }));
     }
@@ -1628,7 +1667,9 @@ absl::StatusOr<DeviceGroupList> ProcessGroupTpu::GatherAllSubgroups(
     TT_ASSIGN_OR_RETURN(
         const std::vector<uint8_t> raw_bytes,
         CallStore(absl::StrCat("store get ", subgroup_store_key),
-                  [&] { return store_->get(subgroup_store_key); }));
+                  [&] {  // REF_CAPTURE_OK=called synchronously
+                    return store_->get(subgroup_store_key);
+                  }));
     const std::string_view all_payload(
         reinterpret_cast<const char*>(raw_bytes.data()), raw_bytes.size());
     for (std::string_view csv :

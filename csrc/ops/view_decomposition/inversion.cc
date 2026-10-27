@@ -461,7 +461,7 @@ bool UpdateLayout(StridedLayout& layout,
 absl::StatusOr<mlir::MlirOp> InverseViewPrimitiveShlo(
     mlir::MlirOp input, const InverseViewPrimitive& primitive) {
   return std::visit(
-      [&](const auto& primitive) {
+      [&](const auto& primitive) {  // REF_CAPTURE_OK=called synchronously
         return ViewPrimitiveShlo(input, ViewPrimitive(primitive));
       },
       primitive);

@@ -6090,7 +6090,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> AtenLstmInputForward(
                     const std::vector<DeviceBufferRef> result_buffers,
                     DispatchRngOpGeneral(
                         /*generator=*/std::nullopt,
-                        [&](at::Tensor rng_state)
+                        [&]  // REF_CAPTURE_OK=called synchronously
+                        (at::Tensor rng_state)
                             -> absl::StatusOr<std::vector<DeviceBufferRef>> {
                           TT_ASSIGN_OR_RETURN(
                               DeviceBufferRefArray<3> bufs,
@@ -6151,7 +6152,8 @@ AtenLstmInputForwardCached(const at::Tensor& input, const at::TensorList hx,
                     const std::vector<DeviceBufferRef> result_buffers,
                     DispatchRngOpGeneral(
                         /*generator=*/std::nullopt,
-                        [&](at::Tensor rng_state) {
+                        [&]  // REF_CAPTURE_OK=called synchronously
+                        (at::Tensor rng_state) {
                           saved_rng_state = rng_state;
                           return LstmInputForwardCachedImpl(
                               input, hx, params, has_biases, num_layers,

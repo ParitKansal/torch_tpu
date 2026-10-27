@@ -18,25 +18,23 @@
 #define TORCH_TPU_CSRC_OPS_SCALED_DOT_PRODUCT_ATTENTION_FLASH_ATTENTION_KERNEL_H_
 
 #include "absl/status/statusor.h"
+#include "csrc/internal/mosaic/kiln/kiln.h"
 #include "csrc/ops/scaled_dot_product_attention/flash_attention_config.h"
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/MLIRContext.h"
-#include "mlir/IR/OwningOpRef.h"
 
-namespace mlir::torch_tpu {  // NON_TORCH_TPU_OK=TODO(willfroom): migrate this.
+namespace torch_tpu {
 
-// Creates the flash attention kernel for the given configuration.
-absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> CreateKernel(
-    MLIRContext* context, const FlashAttnConfig& config, const Tiling& tiling);
+// Creates the flash attention forward kernel.
+absl::StatusOr<kiln::Kernel> CreateKernel(const FlashAttnConfig& config,
+                                          const Tiling& tiling);
 
-// Creates the flash attention backward DKV kernel for the given configuration.
-absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> CreateBackwardDkvKernel(
-    MLIRContext* context, const FlashAttnConfig& config, const Tiling& tiling);
+// Creates the flash attention backward DKV kernel.
+absl::StatusOr<kiln::Kernel> CreateBackwardDkvKernel(
+    const FlashAttnConfig& config, const Tiling& tiling);
 
-// Creates the flash attention backward DQ kernel for the given configuration.
-absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> CreateBackwardDqKernel(
-    MLIRContext* context, const FlashAttnConfig& config, const Tiling& tiling);
+// Creates the flash attention backward DQ kernel.
+absl::StatusOr<kiln::Kernel> CreateBackwardDqKernel(
+    const FlashAttnConfig& config, const Tiling& tiling);
 
-}  // namespace mlir::torch_tpu
+}  // namespace torch_tpu
 
 #endif  // TORCH_TPU_CSRC_OPS_SCALED_DOT_PRODUCT_ATTENTION_FLASH_ATTENTION_KERNEL_H_

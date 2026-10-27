@@ -118,12 +118,14 @@ def _compute_loss(
     loss = torch.nn.functional.mse_loss(out, targets)
   elif hasattr(out, "loss") and out.loss is not None:
     loss = out.loss
-  elif isinstance(out, dict) and "loss" in out:
+  elif isinstance(out, dict) and out.get("loss") is not None:
     loss = out["loss"]
   elif hasattr(out, "logits") and out.logits is not None:
     loss = torch.mean(out.logits)
   elif hasattr(out, "sample") and out.sample is not None:
     loss = torch.mean(out.sample)
+  elif isinstance(out, dict) and out.get("sample") is not None:
+    loss = torch.mean(out["sample"])
   else:
     flat_out, _ = _pytree.tree_flatten(out)
     for item in flat_out:

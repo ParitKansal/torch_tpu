@@ -315,55 +315,58 @@ absl::Status TileOperationOverGroups(mlir::Operation* absl_nonnull root_op,
   }
 
   absl::Status status = absl::OkStatus();
-  const auto tile = [&](mlir::DenseIntElementsAttr attr, std::string_view name,
-                        bool sort_rows) {
-    std::optional<mlir::DenseIntElementsAttr> tiled =
-        TileReplicaGroupsAttr(attr, tiles, sort_rows);
-    if (!tiled.has_value()) {
-      status = TT_ERROR(  // ERROR_COV_INFEASIBLE=collectives emit positions
-                          // inside their group
-                   error::kInternal)
-               << "cannot tile " << name << " of an op on devices "
-               << VectorToString(op_da);
-      return attr;
-    }
-    return *tiled;
-  };
-  root_op->walk([&](mlir::Operation* op) {
-    if (auto rg_attr =
-            op->getAttrOfType<mlir::DenseIntElementsAttr>("replica_groups")) {
-      op->setAttr("replica_groups",
-                  tile(rg_attr, "replica_groups", /*sort_rows=*/true));
-    }
-    if (auto st_attr = op->getAttrOfType<mlir::DenseIntElementsAttr>(
-            "source_target_pairs")) {
-      op->setAttr("source_target_pairs",
-                  tile(st_attr, "source_target_pairs", /*sort_rows=*/false));
-    }
-    if (!mlir::isa<mlir::stablehlo::CustomCallOp>(op)) {
-      return;
-    }
-    auto dict_attr = op->getAttrOfType<mlir::DictionaryAttr>("backend_config");
-    auto rg_attr = dict_attr
-                       ? mlir::dyn_cast_or_null<mlir::DenseIntElementsAttr>(
-                             dict_attr.get("replica_groups"))
-                       : nullptr;
-    if (!rg_attr) {
-      return;
-    }
-    llvm::SmallVector<mlir::NamedAttribute> new_attrs;
-    for (const mlir::NamedAttribute& named_attr : dict_attr) {
-      if (named_attr.getName() == "replica_groups") {
-        new_attrs.emplace_back(
-            named_attr.getName(),
-            tile(rg_attr, "replica_groups", /*sort_rows=*/true));
-      } else {
-        new_attrs.push_back(named_attr);
-      }
-    }
-    op->setAttr("backend_config",
-                mlir::DictionaryAttr::get(op->getContext(), new_attrs));
-  });
+  const auto tile = [&]  // REF_CAPTURE_OK=called locally
+      (mlir::DenseIntElementsAttr attr, std::string_view name, bool sort_rows) {
+        std::optional<mlir::DenseIntElementsAttr> tiled =
+            TileReplicaGroupsAttr(attr, tiles, sort_rows);
+        if (!tiled.has_value()) {
+          status = TT_ERROR(  // ERROR_COV_INFEASIBLE=collectives emit positions
+                              // inside their group
+                       error::kInternal)
+                   << "cannot tile " << name << " of an op on devices "
+                   << VectorToString(op_da);
+          return attr;
+        }
+        return *tiled;
+      };
+  root_op->walk(
+      [&](mlir::Operation* op) {  // REF_CAPTURE_OK=called synchronously
+        if (auto rg_attr = op->getAttrOfType<mlir::DenseIntElementsAttr>(
+                "replica_groups")) {
+          op->setAttr("replica_groups",
+                      tile(rg_attr, "replica_groups", /*sort_rows=*/true));
+        }
+        if (auto st_attr = op->getAttrOfType<mlir::DenseIntElementsAttr>(
+                "source_target_pairs")) {
+          op->setAttr(
+              "source_target_pairs",
+              tile(st_attr, "source_target_pairs", /*sort_rows=*/false));
+        }
+        if (!mlir::isa<mlir::stablehlo::CustomCallOp>(op)) {
+          return;
+        }
+        auto dict_attr =
+            op->getAttrOfType<mlir::DictionaryAttr>("backend_config");
+        auto rg_attr = dict_attr
+                           ? mlir::dyn_cast_or_null<mlir::DenseIntElementsAttr>(
+                                 dict_attr.get("replica_groups"))
+                           : nullptr;
+        if (!rg_attr) {
+          return;
+        }
+        llvm::SmallVector<mlir::NamedAttribute> new_attrs;
+        for (const mlir::NamedAttribute& named_attr : dict_attr) {
+          if (named_attr.getName() == "replica_groups") {
+            new_attrs.emplace_back(
+                named_attr.getName(),
+                tile(rg_attr, "replica_groups", /*sort_rows=*/true));
+          } else {
+            new_attrs.push_back(named_attr);
+          }
+        }
+        op->setAttr("backend_config",
+                    mlir::DictionaryAttr::get(op->getContext(), new_attrs));
+      });
   return status;
 }
 
@@ -437,19 +440,20 @@ absl::Status RewriteAndTileOperationForSubgroup(
     return TileOperationOverGroups(root_op, op_da, global_da, resolved_da);
   }
 
-  root_op->walk([&](mlir::Operation* op) {
-    if (auto rg_attr =
-            op->getAttrOfType<mlir::DenseIntElementsAttr>("replica_groups")) {
-      op->setAttr("replica_groups",
-                  RewriteReplicaGroupsAttr(rg_attr, *rank_to_partition));
-    }
-    if (auto st_attr = op->getAttrOfType<mlir::DenseIntElementsAttr>(
-            "source_target_pairs")) {
-      op->setAttr("source_target_pairs",
-                  RewriteSourceTargetPairsAttr(st_attr, *rank_to_partition));
-    }
-    RewriteCustomCallBackendConfig(op, *rank_to_partition);
-  });
+  root_op->walk(
+      [&](mlir::Operation* op) {  // REF_CAPTURE_OK=called synchronously
+        if (auto rg_attr = op->getAttrOfType<mlir::DenseIntElementsAttr>(
+                "replica_groups")) {
+          op->setAttr("replica_groups",
+                      RewriteReplicaGroupsAttr(rg_attr, *rank_to_partition));
+        }
+        if (auto st_attr = op->getAttrOfType<mlir::DenseIntElementsAttr>(
+                "source_target_pairs")) {
+          op->setAttr("source_target_pairs", RewriteSourceTargetPairsAttr(
+                                                 st_attr, *rank_to_partition));
+        }
+        RewriteCustomCallBackendConfig(op, *rank_to_partition);
+      });
 
   return absl::OkStatus();
 }

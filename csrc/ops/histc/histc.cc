@@ -48,10 +48,11 @@ mlir::MlirOp BuildReduce(mlir::MlirOp input_op, mlir::Attribute init_attr) {
       mlir::RankedTensorType::get({}, input_type.getElementType()), init_attr);
   mlir::MlirOp value_init = stablehlo::Constant(builder, value_init_attr);
 
-  auto reduce_builder = [&](mlir::RegionBuilder& rb) {
-    stablehlo::buildReduceBody<ReduceOp>(input_type.getElementType(),
-                                         rb.getRegion(), rb.getOpBuilder());
-  };
+  auto reduce_builder =
+      [&](mlir::RegionBuilder& rb) {  // REF_CAPTURE_OK=called synchronously
+        stablehlo::buildReduceBody<ReduceOp>(input_type.getElementType(),
+                                             rb.getRegion(), rb.getOpBuilder());
+      };
   auto result = stablehlo::Reduce(builder, {input_op}, {value_init},
                                   reduce_builder, GetAllDimensions(input_op));
   // Reducing over all dimensions yields a single result.
@@ -160,10 +161,11 @@ mlir::MlirOp BuildScatterAdd(mlir::MlirOp clamped_indices,
   // Create a region builder callback for scatter-add.
   // The scatter operation will compute:
   //   output[scatter_indices[i]] += scatter_update[i]
-  auto scatter_builder = [&](mlir::RegionBuilder& builder) {
-    stablehlo::buildReduceBody<stablehlo::AddOp>(out_dtype, builder.getRegion(),
-                                                 builder.getOpBuilder());
-  };
+  auto scatter_builder =
+      [&](mlir::RegionBuilder& builder) {  // REF_CAPTURE_OK=called locally
+        stablehlo::buildReduceBody<stablehlo::AddOp>(
+            out_dtype, builder.getRegion(), builder.getOpBuilder());
+      };
 
   auto scatter_dimension_numbers =
       mlir::stablehlo::ScatterDimensionNumbersAttr::get(

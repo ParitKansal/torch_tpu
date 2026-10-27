@@ -460,7 +460,7 @@ def _is_valid_sequence_element_type(elem_type: Any) -> bool:
 
 def _is_valid_argument_type(annotation: Any) -> bool:
   """Returns True if the argument type is valid for a wrapped JAX function."""
-  underlying, is_optional = _strip_optional(annotation)
+  underlying, _ = _strip_optional(annotation)
   if _is_valid_base_type(underlying):
     return True
   elem_type = _get_sequence_element_type(underlying)

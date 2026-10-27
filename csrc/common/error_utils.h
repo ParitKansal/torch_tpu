@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "ATen/core/ATen_fwd.h"
+#include "absl/algorithm/container.h"
 #include "absl/base/no_destructor.h"
 #include "absl/base/optimization.h"
 #include "absl/log/absl_check.h"
@@ -102,6 +103,18 @@ inline constexpr absl::StatusCode kPythonRuntimeError =
 // go/keep-sorted end
 
 }  // namespace error
+
+// Enables error message format checks for internal builds.
+//
+// When this is true, TorchTPU will hard crash if any error is raised with an
+// error message that doesn't conform to the TorchTPU error handling guidelines.
+// This should help us maintain the quality and consistency of error messages in
+// the project.
+//
+// This is a constexpr bool rather than a preprocessor macro so that the error
+// format check code is always compiled (and thus kept compilable), even in
+// builds where it's disabled (e.g. the OSS build).
+inline constexpr bool kCheckErrorFormat = TT_IS_INTERNAL_TORCH_TPU;
 
 // Sentinel string for XLA compiler errors.
 //
@@ -206,6 +219,10 @@ void WaitForPendingAssertionChecks();
 // Blocks until all pending asynchronous assertion checks have completed, and
 // throws a C++ exception if any sticky error has been recorded.
 void SyncAndCheckStickyError();
+
+// Blocks until all pending asynchronous assertion checks have completed, and
+// returns the error status if any was recorded.
+absl::Status SyncAndReturnStickyError();
 
 // Adapts an external error from OpenXLA to comply to TorchTPU error guidelines.
 //

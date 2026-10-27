@@ -16,7 +16,13 @@
 # pgmoka
 # leehowes
 
-load("//build_files:build_defs.bzl", "torch_tpu_package_end", "torch_tpu_py_library", "torch_tpu_py_test")
+load(
+    "//build_files:build_defs.bzl",
+    "torch_tpu_oss_doc_test",
+    "torch_tpu_package_end",
+    "torch_tpu_py_library",
+    "torch_tpu_py_test",
+)
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -92,6 +98,44 @@ torch_tpu_py_test(
         "requires-net:external",
         "requires-tpu-v6e",
     ],
+    deps = [
+        ":splash_attention",
+        "//shims/absl_py/logging",
+        "//shims/absl_py/testing:absltest",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+    ],
+)
+
+# OSS only: run the documented commands for the tests above as a user would;
+# see torch_tpu_oss_doc_test.
+torch_tpu_oss_doc_test(
+    name = "flux_doc_test",
+    doc = "README.md",
+    deps = [
+        ":flux",
+        "//shims/absl_py/flags",
+        "//shims/absl_py/logging",
+        "//shims/absl_py/testing:absltest",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+    ],
+)
+
+torch_tpu_oss_doc_test(
+    name = "flux_rope_parity_doc_test",
+    doc = "README.md",
+    deps = [
+        ":flux",
+        "//shims/absl_py/testing:absltest",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+    ],
+)
+
+torch_tpu_oss_doc_test(
+    name = "splash_attention_doc_test",
+    doc = "README.md",
     deps = [
         ":splash_attention",
         "//shims/absl_py/logging",

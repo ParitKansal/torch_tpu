@@ -41,6 +41,7 @@
 #include "csrc/eager/device_gen_impl.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/tensor_to_buffer.h"
+#include "csrc/ops/copy_from/copy_common.h"
 #include "csrc/ops/copy_from/tpu_to_cpu.h"
 #include "csrc/ops/macros/kernel.h"
 #include "csrc/ops/min_max/min_max.h"
@@ -271,8 +272,10 @@ absl::Status ValidateNormalStdPreconditions(const at::Tensor& std,
   TT_ASSIGN_OR_RETURN(DeviceBufferRef min_buf,
                       DispatchUnaryMinMax(std, MinMaxOp::kMin, OpName::kMin));
   // Blocking copy so that we can immediately call .item() and check the value.
-  TT_ASSIGN_OR_RETURN(at::Tensor cpu_min,
-                      CopyDeviceBufferRefToCpuTensor(min_buf));
+  TT_ASSIGN_OR_RETURN(
+      at::Tensor cpu_min,
+      CopyDeviceBufferRefToCpuTensor(
+          min_buf, GetTransferSyncMode(/*non_blocking=*/false)));
   TT_RET_CHECK(cpu_min.item<double>() >= 0.0, error::kInvalidArgument)
       << "expected all elements of std >= 0.0, got min element: "
       << cpu_min.item();
@@ -344,7 +347,8 @@ absl::Status DispatchNormal2Out(c10::optional<at::Generator> generator,
                                 llvm::ArrayRef<int64_t> out_dims,
                                 OpParamCacheKeys param_keys) {
   return DispatchRngOpOut(out, generator, mlir_type,
-                          [&](at::Tensor rng_input_state) -> absl::Status {
+                          [&]  // REF_CAPTURE_OK=called synchronously
+                          (at::Tensor rng_input_state) -> absl::Status {
                             return DispatchOpOut<2, 1>(
                                 std::move(builder),
                                 {input_tensor, rng_input_state}, out,
@@ -418,7 +422,8 @@ absl::Status DispatchNormal3Out(c10::optional<at::Generator> generator,
                                 llvm::ArrayRef<int64_t> out_dims,
                                 OpParamCacheKeys param_keys) {
   return DispatchRngOpOut(out, generator, mlir_type,
-                          [&](at::Tensor rng_input_state) -> absl::Status {
+                          [&]  // REF_CAPTURE_OK=called synchronously
+                          (at::Tensor rng_input_state) -> absl::Status {
                             return DispatchOpOut<3, 1>(
                                 std::move(builder),
                                 {input_tensor1, input_tensor2, rng_input_state},

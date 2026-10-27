@@ -142,7 +142,9 @@ class CompileApiTest(seed_test_utils.RepeatableTest):
     )
     self.assertLen(results_fail, 1)
 
-    with self.assertRaises(RuntimeError) as err:
+    with self.assertRaises(  # ASSERT_RAISES_OK=verifying behavior not message
+        RuntimeError
+    ) as err:
       results_fail[0].cpu()
 
     self.assertIn('layout', str(err.exception).lower())
@@ -1698,8 +1700,10 @@ class CompileApiTest(seed_test_utils.RepeatableTest):
     utils.assert_close(res[0].cpu(), expected_add)
     utils.assert_close(res[1].cpu(), expected_mul)
 
-    with self.assertRaisesRegex(
-        RuntimeError, 'INVALID_ARGUMENT: Buffer has been deleted or donated'
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=verify buffer donation
+        RuntimeError,
+        r'to_copy\(\): cannot start a device to host copy from a donated or'
+        r' deleted buffer',
     ):
       x.cpu()
 
@@ -1853,7 +1857,9 @@ class CompileApiTest(seed_test_utils.RepeatableTest):
 
     # Donated input 0 should be consumed
     with self.assertRaisesRegex(  # ASSERT_RAISES_OK=verify buffer donation
-        RuntimeError, 'INVALID_ARGUMENT: Buffer has been deleted or donated'
+        RuntimeError,
+        r'to_copy\(\): cannot start a device to host copy from a donated or'
+        r' deleted buffer',
     ):
       table.cpu()
 
@@ -1918,12 +1924,16 @@ class CompileApiTest(seed_test_utils.RepeatableTest):
     utils.assert_close(res[1].cpu(), expected_t2)
 
     with self.assertRaisesRegex(  # ASSERT_RAISES_OK=verify buffer donation
-        RuntimeError, 'INVALID_ARGUMENT: Buffer has been deleted or donated'
+        RuntimeError,
+        r'to_copy\(\): cannot start a device to host copy from a donated or'
+        r' deleted buffer',
     ):
       t1.cpu()
 
     with self.assertRaisesRegex(  # ASSERT_RAISES_OK=verify buffer donation
-        RuntimeError, 'INVALID_ARGUMENT: Buffer has been deleted or donated'
+        RuntimeError,
+        r'to_copy\(\): cannot start a device to host copy from a donated or'
+        r' deleted buffer',
     ):
       t2.cpu()
 
@@ -2125,7 +2135,9 @@ class CompileApiTest(seed_test_utils.RepeatableTest):
     utils.assert_close(res.cpu(), expected)
 
     with self.assertRaisesRegex(  # ASSERT_RAISES_OK=verify buffer donation
-        RuntimeError, 'INVALID_ARGUMENT: Buffer has been deleted or donated'
+        RuntimeError,
+        r'to_copy\(\): cannot start a device to host copy from a donated or'
+        r' deleted buffer',
     ):
       table.cpu()
 

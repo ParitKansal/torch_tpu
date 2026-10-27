@@ -560,7 +560,7 @@ void PopulateAdamOutputs(
   out_dtypes.reserve(out_count * num_tensors);
   out_dims_list.reserve(out_count * num_tensors);
 
-  auto append = [&](at::TensorList tensors) {
+  auto append = [&](at::TensorList tensors) {  // REF_CAPTURE_OK=called locally
     AppendDtypes(tensors, out_dtypes);
     AppendDims(tensors, out_dims_list);
   };

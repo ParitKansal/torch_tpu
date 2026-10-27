@@ -157,6 +157,17 @@ std::vector<xla::Future<std::shared_ptr<EventSnapshot>>> MaterializeDevice(
     GraphSplitMode mode = GraphSplitMode::kSplitGraph,
     absl::Span<const SharedDeviceBufferList> must_materialize = {});
 
+void EagerlyExecuteStream(
+    c10::DeviceIndex device_index, c10::StreamId stream_id,
+    MaterializationReason reason,
+    GraphSplitMode mode = GraphSplitMode::kSplitGraph,
+    absl::Span<const SharedDeviceBufferList> must_materialize = {});
+
+void EagerlyExecuteCurrentStream(
+    MaterializationReason reason,
+    GraphSplitMode mode = GraphSplitMode::kSplitGraph,
+    absl::Span<const SharedDeviceBufferList> must_materialize = {});
+
 }  // namespace torch_tpu
 
 #endif  // TORCH_TPU_CSRC_EAGER_MATERIALIZE_H_

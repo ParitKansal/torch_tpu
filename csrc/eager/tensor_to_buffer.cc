@@ -30,15 +30,11 @@
 #include "absl/algorithm/container.h"
 #include "absl/base/no_destructor.h"
 #include "absl/base/nullability.h"
-#include "absl/base/thread_annotations.h"
-#include "absl/container/flat_hash_map.h"
-#include "absl/container/flat_hash_set.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/absl_log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_join.h"
-#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "c10/core/Allocator.h"
 #include "c10/core/CachingDeviceAllocator.h"
@@ -51,6 +47,8 @@
 #include "c10/core/StorageImpl.h"
 #include "c10/core/Stream.h"
 #include "c10/core/TensorImpl.h"
+#include "c10/core/impl/DeviceGuardImplInterface.h"
+#include "c10/core/impl/VirtualGuardImpl.h"
 #include "c10/util/Optional.h"
 #include "c10/util/UniqueVoidPtr.h"
 #include "c10/util/intrusive_ptr.h"
@@ -64,6 +62,7 @@
 #include "csrc/common/warnings.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/device_buffer_utils.h"
+#include "csrc/eager/host_allocator.h"
 #include "csrc/eager/materialize.h"
 #include "csrc/eager/split_traversal.h"
 #include "csrc/eager/structured_log_buffer.h"
@@ -71,12 +70,10 @@
 #include "csrc/ops/python_context.h"
 #include "csrc/pjrt/pjrt_state.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
-#include "torch/headeronly/core/DeviceType.h"
 #include "torch/headeronly/core/Layout.h"
 #include "torch/headeronly/core/MemoryFormat.h"
 #include "torch/headeronly/core/ScalarType.h"
 #include "tsl/profiler/lib/traceme.h"
-#include "xla/pjrt/host_memory_allocator.h"
 
 namespace torch_tpu {
 
@@ -132,7 +129,8 @@ void OverwriteDataPtr(const c10::DataPtr& data_ptr,
 
 absl::Status AssignBufferToAtTensor(DeviceBufferRef result_buf,
                                     const at::Tensor& tensor,
-                                    bool enable_autodonation) {
+                                    bool enable_autodonation,
+                                    bool bump_version) {
   TT_RET_CHECK(tensor.device().type() == GetPrivateUse1DeviceType(),
                error::kInvalidArgument)
       << "expected tensor to be on " << GetPrivateUse1DeviceDebugName()
@@ -249,8 +247,11 @@ absl::Status AssignBufferToAtTensor(DeviceBufferRef result_buf,
                      std::move(new_base_buffer_ref));
   }
 
-  // Bump the version to tell PyTorch how to handle functionalization
-  tensor.unsafeGetTensorImpl()->bump_version();
+  // Bump the version counter for autograd in-place tracking and
+  // functionalization.
+  if (bump_version) {
+    tensor.unsafeGetTensorImpl()->bump_version();
+  }
 
   ABSL_VLOG(1) << "[AssignBufferToAtTensor] Final tensor after assignment:"
                << ToString(tensor)
@@ -513,6 +514,7 @@ class TpuAllocator final : public c10::DeviceAllocator {
 
   c10::CachingDeviceAllocator::DeviceStats getDeviceStats(
       c10::DeviceIndex device) override {
+    ValidateDevice(device);
     c10::CachingDeviceAllocator::DeviceStats stats;
     auto pjrt_stats_or = PjrtBackend::GetInstance().GetAllocatorStats();
     if (!pjrt_stats_or.ok()) {
@@ -549,6 +551,7 @@ class TpuAllocator final : public c10::DeviceAllocator {
   }
 
   void resetAccumulatedStats(c10::DeviceIndex device) override {
+    ValidateDevice(device);
     TT_WARN_ONCE(
         WarningCategory::kTorchTpu,
         "torch.accelerator.memory.reset_accumulated_memory_stats is not "
@@ -556,6 +559,7 @@ class TpuAllocator final : public c10::DeviceAllocator {
   }
 
   void resetPeakStats(c10::DeviceIndex device) override {
+    ValidateDevice(device);
     auto status = PjrtBackend::GetInstance().ClearAllocatorStats();
     if (!status.ok()) {
       TT_WARN(WarningCategory::kPerformance,
@@ -565,6 +569,7 @@ class TpuAllocator final : public c10::DeviceAllocator {
 
   std::pair<size_t, size_t>  // STD_PAIR_OK=dictated by PyTorch.
   getMemoryInfo(c10::DeviceIndex device) override {
+    ValidateDevice(device);
     auto pjrt_stats_or = PjrtBackend::GetInstance().GetAllocatorStats();
     if (!pjrt_stats_or.ok()) {
       TT_WARN(WarningCategory::kPerformance,
@@ -576,105 +581,20 @@ class TpuAllocator final : public c10::DeviceAllocator {
     size_t used = pjrt_stats.bytes_in_use;
     return {limit - used, limit};
   }
-};
-
-class TpuPinnedAllocator final : public at::HostAllocator {
- public:
-  c10::DataPtr allocate(size_t nbytes) override {
-    if (nbytes == 0) {
-      return {nullptr, nullptr, &DeleteTpuPinnedBufferStatic,
-              c10::Device(c10::DeviceType::CPU)};
-    }
-    TT_ASSIGN_OR_THROW(xla::HostMemoryAllocator * host_allocator,
-                       PjrtBackend::GetInstance().GetHostAllocator(),
-                       _ << "Failed to get PJRT host allocator");
-    xla::HostMemoryAllocator::OwnedPtr data = host_allocator->Allocate(nbytes);
-    TT_CHECK_THROW(data != nullptr, error::kResourceExhausted)
-        << "Failed to allocate " << nbytes << " bytes of pinned host memory";
-
-    void* raw_ptr = data.get();
-    {
-      absl::MutexLock lock(mutex_);
-      pinned_ptrs_.emplace(raw_ptr, std::move(data));
-    }
-
-    return {raw_ptr, raw_ptr, &DeleteTpuPinnedBufferStatic,
-            c10::Device(c10::DeviceType::CPU)};
-  }
-
-  void copy_data(void* dest, const void* src,
-                 std::size_t count) const override {
-    default_copy_data(dest, src, count);
-  }
-
-  c10::DeleterFnPtr raw_deleter() const override {
-    return &DeleteTpuPinnedBufferStatic;
-  }
-
-  bool record_event(void* ptr, void* ctx, c10::Stream stream) override {
-    // TPU does not yet support asynchronous stream-based events for pinned
-    // memory in the same way CUDA does. Returning false indicates that
-    // this allocator does not support event recording.
-    return false;
-  }
-
-  // This allocator does not cache allocations, so there is nothing to do here.
-  void empty_cache() override {
-    TT_WARN_ONCE(WarningCategory::kTorchTpu,
-                 "TpuPinnedAllocator::empty_cache is not implemented for TPU.");
-  }
-
-  at::HostStats get_stats() override { return {}; }
-
-  void reset_accumulated_stats() override {}
-
-  void reset_peak_stats() override {}
-
-  bool is_pinned_ptr(const void* ptr) {
-    absl::ReaderMutexLock lock(mutex_);
-    return pinned_ptrs_.contains(ptr);
-  }
-
-  void free_ptr(void* ptr) {
-    if (ptr) {
-      decltype(pinned_ptrs_)::node_type data;
-      {
-        absl::MutexLock lock(mutex_);
-        data = pinned_ptrs_.extract(ptr);
-      }
-    }
-  }
 
  private:
-  static void DeleteTpuPinnedBufferStatic(void* ptr);
-
-  absl::Mutex mutex_;
-  absl::flat_hash_map<const void*, xla::HostMemoryAllocator::OwnedPtr>
-      pinned_ptrs_ ABSL_GUARDED_BY(mutex_);
+  static void ValidateDevice(c10::DeviceIndex device) {
+    if (c10::impl::hasDeviceGuardImpl(GetPrivateUse1DeviceType())) {
+      c10::impl::VirtualGuardImpl guard_impl(GetPrivateUse1DeviceType());
+      guard_impl.getDefaultStream(
+          c10::Device(GetPrivateUse1DeviceType(), device));
+    }
+  }
 };
-
-at::HostAllocator* GetTpuPinnedAllocatorInternal() {
-  static absl::NoDestructor<TpuPinnedAllocator> g_tpu_pinned_allocator;
-  return g_tpu_pinned_allocator.get();
-}
-
-void TpuPinnedAllocator::DeleteTpuPinnedBufferStatic(void* ptr) {
-  static_cast<TpuPinnedAllocator*>(GetTpuPinnedAllocatorInternal())
-      ->free_ptr(ptr);
-}
 
 c10::Allocator* GetTpuAllocator() {
   static absl::NoDestructor<TpuAllocator> g_tpu_allocator;
   return g_tpu_allocator.get();
-}
-
-at::HostAllocator* GetTpuPinnedAllocator() {
-  return GetTpuPinnedAllocatorInternal();
-}
-
-bool IsTpuPinnedPtr(const void* ptr) {
-  return static_cast<TpuPinnedAllocator*>(GetTpuPinnedAllocatorInternal())
-      ->is_pinned_ptr(ptr);
 }
 
 void RegisterTpuAllocator() {

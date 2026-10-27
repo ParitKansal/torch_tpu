@@ -65,13 +65,13 @@ absl::StatusOr<mlir::MlirOp> BuildGeluApproximateShlo(mlir::MlirOp input_op) {
 // The erfc form avoids the cancellation in 1 + erf(...) for negative x, where
 // erf(...) is close to -1.
 absl::StatusOr<mlir::MlirOp> BuildGeluNoneShlo(mlir::MlirOp input_op) {
-  auto k_0_5 = MakeConstantLike(input_op, 0.5);
-  auto k_neg_alpha = MakeConstantLike(
+  mlir::MlirOp k_0_5 = MakeConstantLike(input_op, 0.5);
+  mlir::MlirOp k_neg_alpha = MakeConstantLike(
       input_op, -0.5 * std::numbers::sqrt2);  // -1/sqrt(2) == -sqrt(2)/2
 
-  auto self_neg_alpha = stablehlo::Mul(input_op, k_neg_alpha);
-  auto erfc_out = chlo::Erfc(self_neg_alpha);
-  auto half_x = stablehlo::Mul(k_0_5, input_op);
+  mlir::MlirOp self_neg_alpha = stablehlo::Mul(input_op, k_neg_alpha);
+  mlir::MlirOp erfc_out = chlo::Erfc(self_neg_alpha);
+  mlir::MlirOp half_x = stablehlo::Mul(k_0_5, input_op);
   return stablehlo::Mul(half_x, erfc_out);
 }
 
@@ -147,7 +147,7 @@ absl::StatusOr<mlir::MlirOp> BuildGeluBackwardGradInputApproximateShlo(
 //   PDF(x) = (1 / sqrt(2*pi)) * exp(-x^2 / 2)
 absl::StatusOr<mlir::MlirOp> BuildGeluBackwardGradInputNoneShlo(
     mlir::MlirOp grad_output_op, mlir::MlirOp input_op) {
-  auto k_neg_alpha = MakeConstantLike(
+  mlir::MlirOp k_neg_alpha = MakeConstantLike(
       input_op, -0.5 * std::numbers::sqrt2);  // -1/sqrt(2) == -sqrt(2)/2
   // kBeta = 1 / sqrt(2 * pi)
   auto k_beta =

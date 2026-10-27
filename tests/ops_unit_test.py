@@ -1566,16 +1566,16 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
     # in float64 too below about x = -8.
     cdf = 0.5 * torch.special.erfc(-x / math.sqrt(2.0))
     pdf = torch.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
-    want_out = x * cdf
-    want_grad = cdf + x * pdf
+    want_out = (x * cdf).to(torch.float32)
+    want_grad = (cdf + x * pdf).to(torch.float32)
 
     x_tpu = x.to(torch.float32).to("tpu")
     out = torch.nn.functional.gelu(x_tpu, approximate="none")
     grad = torch.ops.aten.gelu_backward(
         torch.ones_like(x_tpu), x_tpu, approximate="none"
     )
-    utils.assert_close(out.cpu().double(), want_out, rtol=1e-4, atol=0.0)
-    utils.assert_close(grad.cpu().double(), want_grad, rtol=1e-4, atol=0.0)
+    utils.assert_close(out.cpu(), want_out, rtol=1e-4, atol=0.0)
+    utils.assert_close(grad.cpu(), want_grad, rtol=1e-4, atol=0.0)
 
   def test_complex_abs_out_dtype(self):
     device = torch.device("tpu")

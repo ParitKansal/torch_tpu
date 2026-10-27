@@ -2769,18 +2769,23 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
 
   @parameterized.product(
       op_name=["native_batch_norm", "_native_batch_norm_legit"],
-      input_dtype=[torch.float32, torch.bfloat16],
+      dtypes=[
+          (torch.float32, torch.float32),
+          (torch.bfloat16, torch.float32),
+          (torch.bfloat16, torch.bfloat16),
+      ],
   )
   def test_batch_norm_training_updates_running_stats_in_place(
-      self, op_name, input_dtype
+      self, op_name, dtypes
   ):
     """Tests that training-mode batch norm updates running stats in place."""
+    input_dtype, stats_dtype = dtypes
     c = 3
-    input_val = (torch.randn(4, c, 5, 6) * 2 + 5).to(input_dtype)
-    weight = torch.randn(c)
-    bias = torch.randn(c)
-    running_mean = torch.randn(c)
-    running_var = torch.rand(c) + 0.5
+    input_val = torch.randn(4, c, 5, 6, dtype=input_dtype)
+    weight = torch.randn(c, dtype=stats_dtype)
+    bias = torch.randn(c, dtype=stats_dtype)
+    running_mean = torch.randn(c, dtype=stats_dtype)
+    running_var = torch.rand(c, dtype=stats_dtype) + 0.5
 
     def run_forward(device):
       # Clone, since `.to("cpu")` returns the same tensor and the op updates it
@@ -2799,27 +2804,60 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
       )
       return (*outputs, mean, var)
 
-    # Comparison results: (output, save_mean, save_invstd, running_mean,
-    # running_var). The running stats must match the CPU's in-place update.
-    if input_dtype == torch.bfloat16:
-      self.assert_close_tpu_vs_cpu(run_forward, rtol=3e-2, atol=2e-2)
-    else:
+    # Results: (output, save_mean, save_invstd, running_mean, running_var).
+    # The running stats must match the CPU's in-place update.
+    if stats_dtype == torch.float32:
       self.assert_close_tpu_vs_cpu(run_forward)
+      return
+
+    def pick(*indices, to_float=False):
+      def fn(device):
+        results = run_forward(device)
+        return tuple(
+            results[i].float() if to_float else results[i] for i in indices
+        )
+
+      return fn
+
+    # With bfloat16 weight and bias, the CPU computes in bfloat16, while
+    # TorchTPU computes in float32 and rounds once, so the bfloat16 results can
+    # differ by one bfloat16 step.
+    self.assert_close_tpu_vs_cpu(pick(0, 3, 4), rtol=1e-2, atol=1e-2)
+    # Like CUDA, TorchTPU returns save_mean and save_invstd in float32; the CPU
+    # returns them in bfloat16 here. Compare the values.
+    self.assertEqual(run_forward("tpu")[1].dtype, torch.float32)
+    self.assert_close_tpu_vs_cpu(
+        pick(1, 2, to_float=True), rtol=1e-2, atol=1e-2
+    )
 
   @parameterized.product(momentum=[0.1, None], compiled=[False, True])
   def test_batch_norm_module_training_updates_running_stats(
       self, momentum, compiled
   ):
-    """Tests that nn.BatchNorm2d running stats match the CPU after training."""
-    inputs = [torch.randn(8, 3, 16, 16) * 2 + 5 for _ in range(3)]
+    """Tests that nn.BatchNorm2d running stats match the CPU after training.
+
+    Also tests that later steps do not compile again, although
+    `momentum=None` passes a new momentum (1 / num_batches_tracked) each step.
+    The first two steps are warm-up: the first TPU step in a process can
+    compile a one-off program.
+    """
+    inputs = [torch.randn(8, 3, 16, 16) for _ in range(4)]
+    cache_misses_after_warm_up = []
 
     def run_training(device):
       bn = torch.nn.BatchNorm2d(3, momentum=momentum).to(device).train()
+      on_tpu = torch.device(device).type == "tpu"
       step = bn
-      if compiled and torch.device(device).type == "tpu":
+      if compiled and on_tpu:
         step = torch.compile(bn, backend="tpu")
-      for x in inputs:
+      for i, x in enumerate(inputs):
         output = step(x.to(device))
+        if on_tpu and i == 1:
+          start_misses = torch.tpu._get_cache_misses()
+      if on_tpu:
+        cache_misses_after_warm_up.append(
+            torch.tpu._get_cache_misses() - start_misses
+        )
       # Inference uses the running stats.
       bn.eval()
       return (
@@ -2831,6 +2869,7 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
       )
 
     self.assert_close_tpu_vs_cpu(run_training)
+    self.assertEqual(cache_misses_after_warm_up, [0])
 
   def test_native_batch_norm_legit_no_stats_out(self):
     input_dtype = torch.float32

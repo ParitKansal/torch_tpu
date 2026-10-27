@@ -169,8 +169,11 @@ bool ShouldUpdateRunningStats(const at::Tensor& input,
 }
 
 // Allocates (out, save_mean, save_invstd) for the batch norm of `input`.
+// Validates `input` first, so no device buffers are allocated for it when it
+// is invalid.
 absl::StatusOr<std::tuple<at::Tensor, at::Tensor, at::Tensor>>
 MakeBatchNormOutputs(const at::Tensor& input) {
+  TT_RETURN_IF_ERROR(ValidateIsFloating(input, /*arg_name=*/"input"));
   const auto acc_type = ToAccumulateType(input.scalar_type());
   const Dimensions features_dims = {input.size(kTorchFeaturesDimensionIndex)};
   TT_ASSIGN_OR_RETURN(
@@ -412,7 +415,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> AtenNativeBatchNorm(
     double momentum, double eps) {
   TT_KERNEL(OpName::kNativeBatchNorm, param_keys,
             (input, weight, bias, running_mean, running_variance, training,
-             IgnoreInCacheKey(momentum, "Doesn't affect SHLO"), eps),
+             IgnoreInCacheKey(momentum, "Passed as a tensor input when used"),
+             eps),
             {
               if (ShouldUpdateRunningStats(
                       input, SanitizeOptionalTensor(running_mean),
@@ -449,8 +453,8 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> AtenNativeBatchNormOut(
   TT_KERNEL(
       OpName::kNativeBatchNormOut, param_keys,
       (input, weight, bias, running_mean, running_variance, training,
-       IgnoreInCacheKey(momentum, "Doesn't affect SHLO"), eps, out, save_mean,
-       save_invstd),
+       IgnoreInCacheKey(momentum, "Passed as a tensor input when used"), eps,
+       out, save_mean, save_invstd),
       {
         TT_THROW_IF_ERROR(TpuBatchNormOut(
             input, SanitizeOptionalTensor(weight), SanitizeOptionalTensor(bias),
@@ -506,8 +510,8 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> AtenNativeBatchNormLegitOut(
   TT_KERNEL(
       OpName::kNativeBatchNormLegitOut, param_keys,
       (input, weight, bias, running_mean, running_variance, training,
-       IgnoreInCacheKey(momentum, "Doesn't affect SHLO"), eps, out, save_mean,
-       save_invstd),
+       IgnoreInCacheKey(momentum, "Passed as a tensor input when used"), eps,
+       out, save_mean, save_invstd),
       {
         TT_THROW_IF_ERROR(TpuBatchNormOut(
             input, SanitizeOptionalTensor(weight), SanitizeOptionalTensor(bias),

@@ -397,11 +397,8 @@ absl::StatusOr<MlirOpResults<3>> BuildBatchNorm(
     std::optional<mlir::MlirOp> running_mean_opt,
     std::optional<mlir::MlirOp> running_variance_opt, bool training,
     double momentum, double eps, mlir::ElementType acc_dtype) {
-  // TODO: Parameter momentum is not used in the logic below and still
-  // tests/ops_tests pass. We should figure out if/when such parameter is
-  // needed. See
-  // https://docs.pytorch.org/docs/stable/generated/torch.nn.BatchNorm1d.html#torch.nn.BatchNorm1d.momentum
-  // for more details.
+  // `momentum` is not used here: it only matters when the running stats are
+  // updated, which BuildBatchNormTrainingAndUpdateStats does.
 
   ABSL_VLOG(1) << "BuildBatchNorm "
                << " input=" << input.ToString() << " training=" << training

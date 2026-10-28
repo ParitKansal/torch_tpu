@@ -2944,10 +2944,9 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
 
     Each step runs the backward too: autograd saves the running stats, so
     updating them must not bump their version counters. Also tests that later
-    steps do not compile again, although
-    `momentum=None` passes a new momentum (1 / num_batches_tracked) each step.
-    The first two steps are warm-up: the first TPU step in a process can
-    compile a one-off program.
+    steps do not compile again, although `momentum=None` passes a new momentum
+    (1 / num_batches_tracked) each step. The first two steps are warm-up: the
+    first TPU step in a process can compile a one-off program.
     """
     inputs = [torch.randn(8, 3, 16, 16) for _ in range(4)]
     cache_misses_after_warm_up = []

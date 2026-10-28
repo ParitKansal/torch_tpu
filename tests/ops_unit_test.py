@@ -1212,6 +1212,62 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
       self.assertEqual(pivots_tpu, pivots_cpu)
       self.assertEqual(info_tpu, info_cpu)
 
+  def test_linalg_lu_zero_sized_matrix(self):
+    device = torch.device("tpu")
+    shapes = [
+        (0, 0),
+        (0, 3),
+        (3, 0),
+        (2, 3, 0),
+        (2, 0, 3),
+        (0, 3, 5),
+        (0, 0, 0),
+    ]
+    for shape in shapes:
+      with self.subTest(shape=shape):
+        a_cpu = torch.empty(shape, dtype=torch.float32)
+        a_tpu = a_cpu.to(device)
+        p_cpu, l_cpu, u_cpu = torch.linalg.lu(a_cpu)
+        p_tpu, l_tpu, u_tpu = torch.linalg.lu(a_tpu)
+        self.assertEqual(p_tpu.shape, p_cpu.shape)
+        self.assertEqual(l_tpu.shape, l_cpu.shape)
+        self.assertEqual(u_tpu.shape, u_cpu.shape)
+        utils.assert_close(p_tpu.cpu(), p_cpu)
+        utils.assert_close(l_tpu.cpu(), l_cpu)
+        utils.assert_close(u_tpu.cpu(), u_cpu)
+
+        lu_cpu, piv_cpu = torch.linalg.lu_factor(a_cpu)
+        lu_tpu, piv_tpu = torch.linalg.lu_factor(a_tpu)
+        for unpack_data, unpack_pivots in [
+            (True, True),
+            (True, False),
+            (False, True),
+            (False, False),
+        ]:
+          with self.subTest(
+              shape=shape,
+              unpack_data=unpack_data,
+              unpack_pivots=unpack_pivots,
+          ):
+            p_cpu, l_cpu, u_cpu = torch.lu_unpack(
+                lu_cpu,
+                piv_cpu,
+                unpack_data=unpack_data,
+                unpack_pivots=unpack_pivots,
+            )
+            p_tpu, l_tpu, u_tpu = torch.lu_unpack(
+                lu_tpu,
+                piv_tpu,
+                unpack_data=unpack_data,
+                unpack_pivots=unpack_pivots,
+            )
+            self.assertEqual(p_tpu.shape, p_cpu.shape)
+            self.assertEqual(l_tpu.shape, l_cpu.shape)
+            self.assertEqual(u_tpu.shape, u_cpu.shape)
+            utils.assert_close(p_tpu.cpu(), p_cpu)
+            utils.assert_close(l_tpu.cpu(), l_cpu)
+            utils.assert_close(u_tpu.cpu(), u_cpu)
+
   def test_assert_close_partial_override(self):
     """Tests that utils.assert_close works with partial numeric overrides.
 
@@ -1832,6 +1888,56 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
     self.assertEqual(res_i8_i32.dtype, torch.int32)
     utils.assert_close(
         res_i8_i32.cpu(), torch.tensor([10000, 10000], dtype=torch.int32)
+    )
+
+  def test_addcdiv_default_value_build_mlir(self):
+    """Verifies addcdiv with value=1 traces without extra parameter."""
+    for value_kwargs in ({}, {"value": 1}, {"value": 1.0}):
+      with self.subTest(value_kwargs=value_kwargs):
+        s = torch.ones(2, 2, device="tpu")
+        t1 = torch.ones(2, 2, device="tpu")
+        t2 = torch.ones(2, 2, device="tpu")
+        torch.accelerator.synchronize()
+        with execution_mode.set_eager_mode(
+            execution_mode.EagerMode.DEFER_AND_FUSE
+        ):
+          z = torch.addcdiv(s, t1, t2, **value_kwargs)
+        mlir_text = tpu_torch_compile.serialize_mlir_text(
+            tpu_torch_compile.build_mlir([z], [s, t1, t2])
+        )
+        self.assertIn("stablehlo.divide", mlir_text)
+        self.assertNotIn("stablehlo.multiply", mlir_text)
+        utils.assert_close(
+            z.cpu(), torch.full((2, 2), 2.0, dtype=torch.float32)
+        )
+
+  def test_addcmul_default_value_build_mlir(self) -> None:
+    """Verifies addcmul with default value=1 traces without extra parameter."""
+    for value_kwargs in ({}, {"value": 1}, {"value": 1.0}):
+      with self.subTest(value_kwargs=value_kwargs):
+        s = torch.ones(2, 2, device="tpu")
+        t1 = torch.ones(2, 2, device="tpu")
+        t2 = torch.ones(2, 2, device="tpu")
+        torch.accelerator.synchronize()
+        with execution_mode.set_eager_mode(
+            execution_mode.EagerMode.DEFER_AND_FUSE
+        ):
+          z = torch.addcmul(s, t1, t2, **value_kwargs)
+        mlir_text = tpu_torch_compile.serialize_mlir_text(
+            tpu_torch_compile.build_mlir([z], [s, t1, t2])
+        )
+        self.assertEqual(mlir_text.count("stablehlo.multiply"), 1)
+        self.assertEqual(mlir_text.count("stablehlo.add"), 1)
+        self.assertNotIn("%arg3", mlir_text)
+        utils.assert_close(
+            z.cpu(), torch.full((2, 2), 2.0, dtype=torch.float32)
+        )
+    s = torch.ones(2, 2, device="tpu")
+    t1 = torch.ones(2, 2, device="tpu")
+    t2 = torch.ones(2, 2, device="tpu")
+    z_val2 = torch.addcmul(s, t1, t2, value=2)
+    utils.assert_close(
+        z_val2.cpu(), torch.full((2, 2), 3.0, dtype=torch.float32)
     )
 
   def test_binary_arithmetic_out_upcast(self):
@@ -12858,6 +12964,61 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
 
     self.assert_close_tpu_vs_cpu(compute)
 
+  def test_elu_small_negative_input_precision_float32(self):
+    """Tests elu, selu and celu in float32 for negative inputs close to 0.
+
+    exp(x) - 1 loses precision when x is close to 0, so the kernel uses
+    expm1(x), as PyTorch does on CPU and CUDA.
+    """
+    x = -torch.logspace(-8.0, 0.0, 801, dtype=torch.float64)
+    selu_alpha = 1.6732632423543772848170429916717
+    selu_scale = 1.0507009873554804934193349852946
+    cases = [
+        (torch.nn.functional.elu, torch.expm1(x)),
+        (torch.nn.functional.selu, selu_scale * selu_alpha * torch.expm1(x)),
+        (
+            functools.partial(torch.nn.functional.celu, alpha=2.0),
+            2.0 * torch.expm1(x / 2.0),
+        ),
+    ]
+    x_tpu = x.to(torch.float32).to("tpu")
+    for op, want in cases:
+      got = op(x_tpu)
+      # TPU's float32 expm1 is within about 1.2e-4 of the reference here; the
+      # cancellation in exp(x) - 1 gives errors of 100% and more.
+      utils.assert_close(got.cpu().double(), want, rtol=1e-3, atol=0.0)
+
+  def test_elu_input_scale_only_scales_negative_inputs(self):
+    """Tests that elu applies input_scale to negative inputs only.
+
+    celu(x, alpha) calls elu(x, alpha, scale=1, input_scale=1 / alpha), so
+    celu(x) must equal x for positive x.
+    """
+    x = torch.tensor([-3.0, -0.5, -1e-3, 0.0, 1e-3, 0.5, 3.0])
+    for alpha, scale, input_scale in [
+        (1.0, 1.0, 0.5),
+        (2.0, 1.5, 0.5),
+        (1.0, 1.0, -2.0),
+    ]:
+
+      def compute(device, alpha=alpha, scale=scale, input_scale=input_scale):
+        return torch.ops.aten.elu(
+            to(x, device), alpha, scale=scale, input_scale=input_scale
+        )
+
+      # rtol covers TPU's float32 expm1 error (e.g. expm1(6) with
+      # input_scale=-2); a wrongly scaled branch is off by 50% or more.
+      self.assert_close_tpu_vs_cpu(compute, rtol=1e-3, atol=1e-6)
+
+    for alpha in [2.0, 0.5, -1.0]:
+      self.assert_close_tpu_vs_cpu(
+          lambda device, alpha=alpha: torch.nn.functional.celu(
+              to(x, device), alpha=alpha
+          ),
+          rtol=1e-3,
+          atol=1e-6,
+      )
+
   def test_ceil_integral(self):
     for dtype in [torch.int32, torch.uint8]:
       x = torch.tensor([-2, -1, 0, 1, 2], dtype=dtype)
@@ -17043,6 +17204,89 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
     self.assert_close_tpu_vs_cpu(fn_1d_keepdim)
     self.assert_close_tpu_vs_cpu(fn_3d)
     self.assert_close_tpu_vs_cpu(fn_3d_keepdim)
+
+  def test_linalg_vector_norm_single_element_reduction(self):
+    # Tests single element reduction fast path for ord != 0 (b/568044911).
+    def fn_1d_large_pos(device):
+      x = torch.tensor([5.0], device=device)
+      return torch.linalg.vector_norm(x, ord=100.0)
+
+    def fn_1d_large_neg(device):
+      x = torch.tensor([5.0], device=device)
+      return torch.linalg.vector_norm(x, ord=-100.0)
+
+    def fn_1d_neg_large_pos(device):
+      x = torch.tensor([-5.0], device=device)
+      return torch.linalg.vector_norm(x, ord=100.0)
+
+    def fn_1d_neg_large_neg(device):
+      x = torch.tensor([-5.0], device=device)
+      return torch.linalg.vector_norm(x, ord=-100.0)
+
+    def fn_0d_large_ord(device):
+      x = torch.tensor(5.0, device=device)
+      return torch.linalg.vector_norm(x, ord=100.0)
+
+    def fn_0d_neg_large_ord(device):
+      x = torch.tensor(-5.0, device=device)
+      return torch.linalg.vector_norm(x, ord=100.0)
+
+    def fn_2d_dim1(device):
+      x = torch.tensor([[5.0], [3.0]], device=device)
+      return torch.linalg.vector_norm(x, ord=100.0, dim=1)
+
+    def fn_2d_dim1_keepdim(device):
+      x = torch.tensor([[5.0], [3.0]], device=device)
+      return torch.linalg.vector_norm(x, ord=100.0, dim=1, keepdim=True)
+
+    def fn_2d_neg_dim1(device):
+      x = torch.tensor([[-5.0], [3.0]], device=device)
+      return torch.linalg.vector_norm(x, ord=100.0, dim=1)
+
+    def fn_2d_neg_dim_neg1(device):
+      x = torch.tensor([[-5.0], [3.0]], device=device)
+      return torch.linalg.vector_norm(x, ord=100.0, dim=-1)
+
+    def fn_2d_neg_dim1_keepdim(device):
+      x = torch.tensor([[-5.0], [3.0]], device=device)
+      return torch.linalg.vector_norm(x, ord=100.0, dim=1, keepdim=True)
+
+    def fn_2d_multidim(device):
+      x = torch.tensor([[-5.0]], device=device)
+      return torch.linalg.vector_norm(x, ord=100.0, dim=(0, 1))
+
+    def fn_2d_multidim_keepdim(device):
+      x = torch.tensor([[-5.0]], device=device)
+      return torch.linalg.vector_norm(x, ord=100.0, dim=(-2, -1), keepdim=True)
+
+    def fn_complex64_large_components(device):
+      x = torch.tensor([3e20 + 4e20j], dtype=torch.complex64, device=device)
+      return torch.linalg.vector_norm(x, ord=2.0)
+
+    def fn_1d_nan_ord(device):
+      x = torch.tensor([5.0], device=device)
+      return torch.linalg.vector_norm(x, ord=float("nan"))
+
+    def fn_0d_nan_ord(device):
+      x = torch.tensor(5.0, device=device)
+      return torch.linalg.vector_norm(x, ord=float("nan"))
+
+    self.assert_close_tpu_vs_cpu(fn_1d_large_pos)
+    self.assert_close_tpu_vs_cpu(fn_1d_large_neg)
+    self.assert_close_tpu_vs_cpu(fn_1d_neg_large_pos)
+    self.assert_close_tpu_vs_cpu(fn_1d_neg_large_neg)
+    self.assert_close_tpu_vs_cpu(fn_0d_large_ord)
+    self.assert_close_tpu_vs_cpu(fn_0d_neg_large_ord)
+    self.assert_close_tpu_vs_cpu(fn_2d_dim1)
+    self.assert_close_tpu_vs_cpu(fn_2d_dim1_keepdim)
+    self.assert_close_tpu_vs_cpu(fn_2d_neg_dim1)
+    self.assert_close_tpu_vs_cpu(fn_2d_neg_dim_neg1)
+    self.assert_close_tpu_vs_cpu(fn_2d_neg_dim1_keepdim)
+    self.assert_close_tpu_vs_cpu(fn_2d_multidim)
+    self.assert_close_tpu_vs_cpu(fn_2d_multidim_keepdim)
+    self.assert_close_tpu_vs_cpu(fn_complex64_large_components)
+    self.assert_close_tpu_vs_cpu(fn_1d_nan_ord)
+    self.assert_close_tpu_vs_cpu(fn_0d_nan_ord)
 
   def test_norm_out(self):
     def test_fn(
@@ -22236,6 +22480,40 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
                   ),
               )
           )
+
+  def test_polygamma_integral_default_dtype(self):
+    # Test integral inputs under default_dtype=float64 compute in float64
+    # matching CPU (b/568040996).
+    prev_default = torch.get_default_dtype()
+    try:
+      torch.set_default_dtype(torch.float64)
+      for n in (0, 1):
+        for dtype in (torch.int64, torch.int32):
+          with self.subTest(n=n, dtype=dtype):
+            self.assert_close_tpu_vs_cpu(
+                lambda device, n=n, dtype=dtype: torch.polygamma(
+                    n, to(torch.tensor([1, 2, 3], dtype=dtype), device=device)
+                )
+            )
+    finally:
+      torch.set_default_dtype(prev_default)
+
+  def test_polygamma_out_dtype_rounding(self):
+    # Test polygamma with out= preserves intermediate rounding matching CPU
+    # (b/568040996).
+    for in_dtype, out_dtype in (
+        (torch.bfloat16, torch.float32),
+        (torch.float64, torch.float32),
+    ):
+      with self.subTest(in_dtype=in_dtype, out_dtype=out_dtype):
+
+        def test_fn(device, in_dtype=in_dtype, out_dtype=out_dtype):
+          x = to(torch.tensor([1.5, 2.5], dtype=in_dtype), device=device)
+          out = to(torch.zeros(2, dtype=out_dtype), device=device)
+          torch.polygamma(1, x, out=out)
+          return out
+
+        self.assert_close_tpu_vs_cpu(test_fn)
 
   def test_masked_softmax(self):
     def test_fn(device):

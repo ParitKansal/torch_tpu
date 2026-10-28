@@ -35,7 +35,6 @@ from tests import goldens_pin
 from tests import op_testing
 from tests import test_utils as tests_test_utils
 
-
 op_db = common_methods_invocations.op_db
 
 # Capture Dynamo's default recompile_limit at import time before SeededTest.setUp
@@ -645,6 +644,53 @@ class OpTestingTest(op_testing.OpInfoTestBase):
           " hold",
       ):
         self._load_goldens_from(directory)
+
+  def test_monolithic_fallback_when_per_test_case_dir_absent(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      directory = pathlib.Path(tmp)
+      self._write_golden_file(directory, "ops_test_gpu_golden0.gz", [42.0])
+
+      self.assertEqual(self._load_goldens_from(directory), [42.0])
+      self.assertEmpty(
+          self._load_goldens_from(directory, test_case_name="test_nonexistent")
+      )
+
+  def test_lazy_load_from_per_test_case_dir(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      directory = pathlib.Path(tmp)
+      per_test_case_dir = directory / "ops_test_gpu_golden_per_test_case"
+      per_test_case_dir.mkdir()
+
+      golden_writer = op_testing.GoldenGpuData()
+      tensor = torch.full((1,), 84.0)
+      golden_writer.add(
+          "test_fake_lazy_op",
+          op_testing.OpVariant.BASE,
+          torch.float32,
+          op_testing.OpInput(FakeSample("s84", tensor, (), {})),
+          op_testing.OpOutput(tensor),
+      )
+      all_trees = golden_writer.to_plistlib_pytree()
+      op_tree = all_trees["test_fake_lazy_op"]
+
+      with open(per_test_case_dir / "test_fake_lazy_op.plist", "wb") as f:
+        plistlib.dump(op_tree, f, fmt=plistlib.FMT_BINARY)
+
+      golden_data = op_testing.GoldenGpuData()
+      with (
+          flagsaver.flagsaver(golden_data_base_dir=str(directory)),
+          mock.patch.object(op_testing, "_GOLDEN_GPU_DATA", golden_data),
+      ):
+        samples = golden_data.get_samples(
+            "test_fake_lazy_op", op_testing.OpVariant.BASE, torch.float32
+        )
+        self.assertLen(samples, 1)
+        self.assertEqual(samples[0][1].output_value.item(), 84.0)
+
+        empty_samples = golden_data.get_samples(
+            "test_nonexistent_op", op_testing.OpVariant.BASE, torch.float32
+        )
+        self.assertEmpty(empty_samples)
 
   @torch._dynamo.config.patch(fail_on_recompile_limit_hit=True)  # pylint: disable=protected-access
   def test_dynamo_cache_limit_disabled_across_subtests(self):

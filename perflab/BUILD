@@ -329,17 +329,11 @@ torch_tpu_py_test(
         "requires-net:external",
         "requires-tpu-v5lite",
     ],
-    # The torchtitan dep (via models:qwen3_8) exceeds the Forge input file limit
-    # with precompiled .pyc inputs.
-    use_precompile = False,
     use_tcmalloc = True,
-    deps = if_oss(
-        [],
-        [
-            "//perflab/models:muse_glimmer",
-            "//perflab/models:qwen3_8",
-        ],
-    ) + [
+    # Do not depend on perflab/models:muse_glimmer or :qwen3_8 here: torchtitan
+    # calls torch.cuda.is_available() at import time, which poisons every
+    # forked benchmark child on GPU (b200) runs of this target.
+    deps = [
         ":base_test",
         ":cases",
         ":common",

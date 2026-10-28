@@ -27,6 +27,7 @@ import torch
 import torch.distributed as dist
 from torch.fx.experimental.proxy_tensor import make_fx
 import torch.multiprocessing as mp
+from torch.nn.attention import flex_attention
 from torch.testing._internal.distributed import fake_pg
 from torch.tpu import distributed  # pyrefly: ignore[missing-import]
 from torch.utils import _pytree as pytree
@@ -36,6 +37,7 @@ from torch_tpu._internal import env_utils
 from torch_tpu._internal import execution_mode
 from torch_tpu._internal import pallas
 from torch_tpu._internal import testing as tt_testing
+from torch_tpu._internal.compile import flex_attention as tpu_flex_attention
 from torch_tpu._internal.compile import tpu_torch_compile
 from torch_tpu._internal.compile.compiler import StaticCompiler
 from torch_tpu._internal.distributed import distributed as internal_distributed
@@ -5934,6 +5936,147 @@ class ForkErrorsTest(et.TpuOnlyErrorTestBase):
         torch.tpu._init_runtime_options()
       torch.tpu._shutdown_runtime()
     self.assertFalse(torch.tpu._is_in_bad_fork())
+
+
+class FlexAttentionErrorsTest(et.TpuOnlyErrorTestBase):
+  """Tests the input checks of the flex_attention kernel wrapper."""
+
+  def _inputs(self, seq):
+    return (torch.randn(1, 1, seq, 128, device=et.device()) for _ in range(3))
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_non_tile_aligned_sequence(self):
+    q, k, v = self._inputs(1024)
+    block_mask = flex_attention.create_block_mask(
+        flex_attention.noop_mask, 1, 1, 1024, 1024, device="cpu"
+    )
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""flex_attention_fwd(): sequence lengths must be multiples of the block sizes (got q_len=1000, kv_len=1024, q_block=128, kv_block=128)""",
+    ):
+      tpu_flex_attention.flex_attention_fwd(q[:, :, :1000], k, v, block_mask)
+
+  def _fwd(self, q_shape=(1, 1, 256, 128), k_shape=None, **overrides):
+    """Calls the op directly with valid arguments, except for `overrides`."""
+    q = torch.randn(q_shape, device=et.device())
+    k = torch.randn(k_shape or q_shape, device=et.device())
+    args = dict(
+        q=q,
+        k=k,
+        v=torch.randn(k_shape or q_shape, device=et.device()),
+        kv_num_blocks=torch.ones(2, dtype=torch.int32, device=et.device()),
+        kv_indices=torch.zeros(4, dtype=torch.int32, device=et.device()),
+        mask_batch=1,
+        mask_heads=1,
+        q_block=128,
+        kv_block=128,
+        scale=1.0,
+    )
+    args.update(overrides)
+    return torch.ops.tpu._flex_attention_fwd(*args.values())
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_inputs_must_be_4d(self):
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""flex_attention_fwd(): expected 4-D q, k and v, got 3-D, 3-D and 3-D""",
+    ):
+      self._fwd(q_shape=(1, 256, 128))
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_inputs_must_share_a_dtype(self):
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""flex_attention_fwd(): expected q, k and v to share a dtype, got Float, Float and BFloat16""",
+    ):
+      self._fwd(
+          v=torch.randn(
+              1, 1, 256, 128, dtype=torch.bfloat16, device=et.device()
+          )
+      )
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_inconsistent_shapes(self):
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""flex_attention_fwd(): expected consistent q, k and v shapes, got [1, 1, 256, 128], [1, 1, 256, 64] and [1, 1, 256, 64]""",
+    ):
+      self._fwd(k_shape=(1, 1, 256, 64))
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_q_heads_must_be_a_multiple_of_kv_heads(self):
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""flex_attention_fwd(): q_heads must be a multiple of kv_heads""",
+    ):
+      self._fwd(q_shape=(1, 3, 256, 128), k_shape=(1, 2, 256, 128))
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_block_mask_dims_must_match_q(self):
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""flex_attention_fwd(): block mask batch/head dims must be 1 or match q""",
+    ):
+      self._fwd(mask_batch=2)
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_unsupported_dtype(self):
+    with et.assert_raises_message(
+        NotImplementedError,
+        tpu="""flex_attention_fwd(): expected bfloat16 or float32 inputs, got Half""",
+    ):
+      self._fwd(**{
+          name: torch.randn(1, 1, 256, 128, device=et.device()).half()
+          for name in ("q", "k", "v")
+      })
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_block_tables_must_be_int32(self):
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""flex_attention_fwd(): block mask tables must be int32""",
+    ):
+      self._fwd(
+          kv_num_blocks=torch.ones(2, dtype=torch.int64, device=et.device())
+      )
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_kv_num_blocks_size(self):
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""flex_attention_fwd(): expected kv_num_blocks to be 1-D with 2 entries, got [3]""",
+    ):
+      self._fwd(
+          kv_num_blocks=torch.ones(3, dtype=torch.int32, device=et.device())
+      )
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_kv_indices_size(self):
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""flex_attention_fwd(): expected kv_indices to be 1-D with 4 entries, got [3]""",
+    ):
+      self._fwd(
+          kv_indices=torch.zeros(3, dtype=torch.int32, device=et.device())
+      )
+
+  # Only until the kernel gets a per-element mask.
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_partial_blocks(self):
+    q, k, v = self._inputs(1024)
+    causal = flex_attention.create_block_mask(
+        lambda b, h, q_idx, kv_idx: q_idx >= kv_idx,
+        1,
+        1,
+        1024,
+        1024,
+        device="cpu",
+    )
+    with et.assert_raises_message(
+        NotImplementedError,
+        tpu="""flex_attention on TPU does not support partially masked blocks yet""",
+    ):
+      tpu_flex_attention.flex_attention_fwd(q, k, v, causal)
 
 
 if __name__ == "__main__":

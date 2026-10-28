@@ -424,12 +424,17 @@ absl::Status ApplyPivotsInPlace(at::Tensor& tensor, const at::Tensor& pivots,
       << "expected pivots and tensor to have the same batch dimensions, got "
       << ToString(tensor_batch_dims) << " and " << ToString(pivots_batch_dims);
 
+  if (tensor.numel() == 0 || pivots.numel() == 0) {
+    return absl::OkStatus();
+  }
+
   // Flatten batch dimensions.
   auto pivots_flat = at::reshape(pivots, {-1, pivots.size(-1)});
   int64_t n_batch = pivots_flat.size(0);
   int64_t n_pivots = pivots_flat.size(1);
   auto tensor_view =
       tensor.reshape({n_batch, tensor.size(-2), tensor.size(-1)});
+  int64_t swap_dim = to_rows ? 0 : 1;
   for (int i = 0; i < n_pivots; ++i) {
     // Forward swaps apply P^T, reverse swaps apply P.
     int k = inverse ? i : n_pivots - 1 - i;
@@ -437,19 +442,11 @@ absl::Status ApplyPivotsInPlace(at::Tensor& tensor, const at::Tensor& pivots,
     for (int batch = 0; batch < n_batch; ++batch) {
       int p = pivot_indices[batch].item<int>();
       if (p != k) {
-        if (to_rows) {
-          auto r1 = tensor_view[batch].select(0, k);
-          auto r2 = tensor_view[batch].select(0, p);
-          auto tmp = r1.clone();
-          r1.copy_(r2);
-          r2.copy_(tmp);
-        } else {
-          auto c1 = tensor_view[batch].select(1, k);
-          auto c2 = tensor_view[batch].select(1, p);
-          auto tmp = c1.clone();
-          c1.copy_(c2);
-          c2.copy_(tmp);
-        }
+        auto s1 = tensor_view[batch].select(swap_dim, k);
+        auto s2 = tensor_view[batch].select(swap_dim, p);
+        auto tmp = s1.clone();
+        s1.copy_(s2);
+        s2.copy_(tmp);
       }
     }
   }
@@ -567,12 +564,14 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> AtenLuUnpackOut(
           TT_THROW_IF_ERROR(ResizeTensorIfShapeDiffers(u, u_dims));
 
           l.zero_();
-          l.add_(at::tril(lu_data.narrow(-1, 0, k), /*diagonal=*/-1));
-          // at::eye is not implemented yet.
-          l.add_(
-              at::diagflat(at::ones({m}, lu_data.options())).narrow(-1, 0, k));
           u.zero_();
-          u.add_(at::triu(lu_data.narrow(-2, 0, k), /*diagonal=*/0));
+          if (k > 0) {
+            l.add_(at::tril(lu_data.narrow(-1, 0, k), /*diagonal=*/-1));
+            // at::eye is not implemented yet.
+            l.add_(at::diagflat(at::ones({m}, lu_data.options()))
+                       .narrow(-1, 0, k));
+            u.add_(at::triu(lu_data.narrow(-2, 0, k), /*diagonal=*/0));
+          }
         }
 
         if (unpack_pivots) {
@@ -591,7 +590,9 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> AtenLuUnpackOut(
           // algorithm, the i-th row was swapped with the j-th row. (So j
           // >= i).
           p.zero_();
-          p.add_(at::diagflat(at::ones({p.size(-1)}, p.options())));
+          if (p.numel() > 0) {
+            p.add_(at::diagflat(at::ones({p.size(-1)}, p.options())));
+          }
           TT_THROW_IF_ERROR(ApplyPivotsInPlace(p, lu_pivots, /*to_rows=*/true,
                                                /*inverse=*/false));
         }

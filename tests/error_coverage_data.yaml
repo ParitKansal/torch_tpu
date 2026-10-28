@@ -24,7 +24,7 @@ csrc/common/discovery.cc: {infeasible: 0, remaining: 1, total: 1}
 csrc/common/dtype.cc: {infeasible: 0, remaining: 4, total: 6}
 csrc/common/dynamism_utils.cc: {infeasible: 0, remaining: 1, total: 1}
 csrc/common/environment.cc: {infeasible: 0, remaining: 2, total: 2}
-csrc/common/error_utils.cc: {infeasible: 11, remaining: 5, total: 19}
+csrc/common/error_utils.cc: {infeasible: 1, remaining: 5, total: 9}
 csrc/common/error_utils.h: {infeasible: 0, remaining: 3, total: 3}
 csrc/common/excess_precision.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/common/layout_utils.cc: {infeasible: 1, remaining: 1, total: 2}
@@ -42,14 +42,15 @@ csrc/eager/device_buffer_utils.cc: {infeasible: 0, remaining: 10, total: 12}
 csrc/eager/device_gen_impl.cc: {infeasible: 5, remaining: 9, total: 18}
 csrc/eager/events_queue.cc: {infeasible: 1, remaining: 1, total: 3}
 csrc/eager/execution_task.cc: {infeasible: 1, remaining: 11, total: 12}
+csrc/eager/host_allocator.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/eager/materialize.cc: {infeasible: 2, remaining: 2, total: 6}
 csrc/eager/op_dispatcher.cc: {infeasible: 1, remaining: 0, total: 1}
 csrc/eager/op_dispatcher.h: {infeasible: 0, remaining: 0, total: 1}
-csrc/eager/tensor_to_buffer.cc: {infeasible: 2, remaining: 7, total: 12}
+csrc/eager/tensor_to_buffer.cc: {infeasible: 2, remaining: 6, total: 11}
 csrc/eager/tpu_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 3}
 csrc/eager/tpu_hooks.cc: {infeasible: 0, remaining: 3, total: 4}
 csrc/eager/traversal.cc: {infeasible: 1, remaining: 10, total: 13}
-csrc/experimental/batch_transfer/batch_transfer.cc: {infeasible: 0, remaining: 28, total: 28}
+csrc/experimental/batch_transfer/batch_transfer.cc: {infeasible: 0, remaining: 21, total: 21}
 csrc/internal/compile/compiled_mode.cc: {infeasible: 1, remaining: 8, total: 13}
 csrc/internal/compile/dispatch_scan.cc: {infeasible: 19, remaining: 0, total: 19}
 csrc/internal/compile/tpu_torch_compile.cc: {infeasible: 0, remaining: 4, total: 20}
@@ -62,12 +63,12 @@ csrc/internal/profiler/profiler_api.cc: {infeasible: 0, remaining: 5, total: 5}
 csrc/internal/profiler/tpu_profiler_plugin.cc: {infeasible: 0, remaining: 6, total: 6}
 csrc/internal/sync/sync.cc: {infeasible: 0, remaining: 2, total: 2}
 csrc/internal/sync/sync_py.cc: {infeasible: 0, remaining: 0, total: 2}
-csrc/internal/testing.cc: {infeasible: 3, remaining: 0, total: 3}
+csrc/internal/testing.cc: {infeasible: 0, remaining: 0, total: 3}
 csrc/mlir/pipeline.cc: {infeasible: 1, remaining: 0, total: 1}
 csrc/ops/a_min_max/a_min_max_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 3}
 csrc/ops/addcdiv/addcdiv_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 4}
 csrc/ops/addcmul/addcmul_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 4}
-csrc/ops/addmm/addmm_aten_kernels.cc: {infeasible: 3, remaining: 0, total: 11}
+csrc/ops/addmm/addmm_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 11}
 csrc/ops/addmv/addmv_aten_kernels.cc: {infeasible: 2, remaining: 0, total: 9}
 csrc/ops/all_any/all_any_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/ops/angle/angle_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
@@ -79,7 +80,7 @@ csrc/ops/assertion_aten_kernels.cc: {infeasible: 0, remaining: 1, total: 4}
 csrc/ops/baddbmm/baddbmm_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 8}
 csrc/ops/bernoulli/bernoulli_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 4}
 csrc/ops/binary.cc: {infeasible: 5, remaining: 0, total: 5}
-csrc/ops/binary_aten_kernels.cc: {infeasible: 0, remaining: 3, total: 35}
+csrc/ops/binary_aten_kernels.cc: {infeasible: 0, remaining: 3, total: 39}
 csrc/ops/binary_cross_entropy/binary_cross_entropy_aten_kernels.cc: {infeasible: 0, remaining: 1, total: 6}
 csrc/ops/bincount/bincount_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/ops/bmm/bmm_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 7}
@@ -140,7 +141,7 @@ csrc/ops/fused_adagrad/fused_adagrad_aten_kernels.cc: {infeasible: 0, remaining:
 csrc/ops/fused_adam/fused_adam_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 7}
 csrc/ops/fused_adamw/fused_adamw_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 7}
 csrc/ops/fused_sgd/fused_sgd_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 4}
-csrc/ops/gather/gather.cc: {infeasible: 2, remaining: 0, total: 6}
+csrc/ops/gather/gather.cc: {infeasible: 1, remaining: 0, total: 6}
 csrc/ops/gelu/gelu_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 9}
 csrc/ops/glu/glu_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 8}
 csrc/ops/grid_sampler/grid_sampler_aten_kernels.cc: {infeasible: 0, remaining: 4, total: 8}
@@ -238,6 +239,7 @@ csrc/ops/softplus/softplus_aten_kernels.cc: {infeasible: 0, remaining: 0, total:
 csrc/ops/sparse_coo/sparse_coo_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 18}
 csrc/ops/stride/stride_helper.cc: {infeasible: 0, remaining: 0, total: 3}
 csrc/ops/take/take_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 4}
+csrc/ops/tanh/tanh_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/ops/tensor_factories/tensor_factories_aten_kernels.cc: {infeasible: 2, remaining: 0, total: 7}
 csrc/ops/thnn_fused_gru_cell/thnn_fused_gru_cell_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 4}
 csrc/ops/thnn_fused_lstm_cell/thnn_fused_lstm_cell_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 5}
@@ -251,7 +253,7 @@ csrc/ops/unary_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 9}
 csrc/ops/unfold/unfold_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 3}
 csrc/ops/uniform/uniform.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/ops/uniform/uniform_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
-csrc/ops/unique/unique_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
+csrc/ops/unique/unique_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 5}
 csrc/ops/unique_consecutive/unique_consecutive_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 2}
 csrc/ops/upsample/upsample_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 3}
 csrc/ops/upsample/upsample_bicubic2d_aa_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 6}
@@ -265,7 +267,7 @@ csrc/ops/view_decomposition/slice_primitive.cc: {infeasible: 0, remaining: 0, to
 csrc/ops/view_decomposition/view_sequence.cc: {infeasible: 0, remaining: 1, total: 1}
 csrc/ops/weight_norm/weight_norm_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 7}
 csrc/ops/where/where_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
-csrc/ops/xlogy/xlogy_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
+csrc/ops/xlogy/xlogy_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 3}
 csrc/pjrt/pjrt_client.cc: {infeasible: 0, remaining: 1, total: 1}
 csrc/pjrt/pjrt_execute.cc: {infeasible: 4, remaining: 1, total: 6}
 csrc/pjrt/pjrt_state.cc: {infeasible: 4, remaining: 5, total: 9}

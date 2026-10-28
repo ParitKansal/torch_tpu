@@ -628,6 +628,7 @@ torch_tpu_cc_test(
         "@stablehlo//stablehlo/integrations/cpp/builder:attr_type_builder_util",
         "@stablehlo//stablehlo/integrations/cpp/builder:func_builder",
         "@stablehlo//stablehlo/integrations/cpp/builder:mlir_builder",
+        "@xla//xla/pjrt:mlir_to_hlo",
     ],
 )
 

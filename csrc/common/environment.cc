@@ -57,6 +57,17 @@ void AssignMegascalePorts(const int local_rank) {
   SetEnv<kMegascaleDebugPortEnvVar>(absl::StrCat(megascale_debug_port));
 }
 
+// Keeps libtpu from wrapping the TPU PJRT client in a MegaScale client, which a
+// single-slice world has no use for. libtpu creates one whenever
+// MEGASCALE_COORDINATOR_ADDRESS, MEGASCALE_SLICE_ID and MEGASCALE_NUM_SLICES
+// are set, including when each slice of a multi-slice JobSet runs as its own
+// world, and its slice discovery can then wait forever on the coordinator.
+void SkipMegascaleClient() {
+  ABSL_LOG(INFO) << "Single-slice job detected, setting "
+                 << kSkipMegascalePjrtClientEnvVar << "=true";
+  SetEnv<kSkipMegascalePjrtClientEnvVar>("true");
+}
+
 // Returns true if `flags` sets the boolean libtpu flag `flag_name` in any
 // spelling the flag parser accepts: `--<name>`, `--<name>=<value>` or the
 // negated `--no<name>`, each with one or two leading dashes.
@@ -222,6 +233,8 @@ absl::Status InitializeDistributedEnvironment(
   // several slices, which libtpu connects over MegaScale (DCN).
   if (config.world_size > static_cast<int>(addresses.size())) {
     AssignMegascalePorts(config.local_rank);
+  } else {
+    SkipMegascaleClient();
   }
 
   // The addresses of all other workers in the slice.

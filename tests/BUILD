@@ -33,9 +33,15 @@ load(
     "torch_tpu_py_test",
     "tpu_gen",
 )
+load("//shims/build_defs_testing:bzl_library.bzl", "bzl_library")
 load(
     "//shims/py_rules:pytype.bzl",
+    "pytype_strict_binary",
     "pytype_strict_library",
+)
+load(
+    ":split_goldens.bzl",
+    "split_gpu_goldens",
 )
 
 package(
@@ -85,44 +91,106 @@ _OSS_GOLDEN_TAGS = if_oss(
 )
 
 # The ops_test GPU goldens, grouped by the test configuration that recorded
-# them. Internally they are read from this directory. In OSS, Bazel fetches
-# them from GCS into @torch_tpu_goldens (see oss/bazel/goldens.bzl), which
-# exports each file individually so that a test only pulls in the goldens it
-# actually needs, exactly as it does internally.
-_GPU_GOLDENS = [
+# them and by the GPU architecture they were recorded on. Internally they are
+# read from this directory. In OSS, Bazel fetches them from GCS into
+# @torch_tpu_goldens (see oss/bazel/goldens.bzl), which exports each file
+# individually so that a test only pulls in the goldens it actually needs,
+# exactly as it does internally.
+_GPU_GOLDENS_BASE = [
     "ops_test_gpu_golden0.gz",
     "ops_test_gpu_golden1.gz",
     "ops_test_gpu_golden2.gz",
+]
+
+_GPU_GOLDENS_HOPPER = [
     "ops_test_gpu_golden_hopper0.gz",
 ]
 
-_GPU_GOLDENS_GRAD = [
+_GPU_GOLDENS_GRAD_BASE = [
     "ops_test_gpu_golden_grad0.gz",
     "ops_test_gpu_golden_grad1.gz",
     "ops_test_gpu_golden_grad2.gz",
+]
+
+_GPU_GOLDENS_GRAD_HOPPER = [
     "ops_test_gpu_golden_grad_hopper0.gz",
 ]
 
-_GPU_GOLDENS_COMPILED = [
+_GPU_GOLDENS_COMPILED_BASE = [
     "ops_test_gpu_golden_compiled0.gz",
     "ops_test_gpu_golden_compiled1.gz",
     "ops_test_gpu_golden_compiled2.gz",
+]
+
+_GPU_GOLDENS_COMPILED_HOPPER = [
     "ops_test_gpu_golden_compiled_hopper0.gz",
 ]
 
+pytype_strict_binary(
+    name = "split_gpu_goldens_bin",
+    srcs = ["split_gpu_goldens.py"],
+    main = "split_gpu_goldens.py",
+)
+
+torch_tpu_py_library(
+    name = "split_gpu_goldens_lib",
+    srcs = ["split_gpu_goldens.py"],
+)
+
+torch_tpu_py_test(
+    name = "split_gpu_goldens_test",
+    srcs = ["split_gpu_goldens_test.py"],
+    deps = [
+        ":split_gpu_goldens_lib",
+        "//shims/absl_py/testing:absltest",
+        "//src/torch_tpu",
+    ],
+)
+
+# The target name must be `<golden file prefix>_per_test_case`, matching
+# op_testing._golden_file_prefix() and _GPU_GOLDEN_PER_TEST_CASE_SUFFIX.
+split_gpu_goldens(
+    name = "ops_test_gpu_golden_per_test_case",
+    base_srcs = _GPU_GOLDENS_BASE,
+    hopper_srcs = _GPU_GOLDENS_HOPPER,
+)
+
+split_gpu_goldens(
+    name = "ops_test_gpu_golden_grad_per_test_case",
+    base_srcs = _GPU_GOLDENS_GRAD_BASE,
+    hopper_srcs = _GPU_GOLDENS_GRAD_HOPPER,
+)
+
+split_gpu_goldens(
+    name = "ops_test_gpu_golden_compiled_per_test_case",
+    base_srcs = _GPU_GOLDENS_COMPILED_BASE,
+    hopper_srcs = _GPU_GOLDENS_COMPILED_HOPPER,
+)
+
+# TODO(b/576014545): Add per-test-case loading in OSS so OSS tests can also use
+# per-test-case directory artifacts and drop monolithic .gz loading.
 _GPU_GOLDENS_DATA = if_oss(
-    ["@torch_tpu_goldens//:" + f for f in _GPU_GOLDENS],
-    _GPU_GOLDENS,
+    [
+        "@torch_tpu_goldens//:" + f
+        for f in _GPU_GOLDENS_BASE + _GPU_GOLDENS_HOPPER
+    ],
+    [":ops_test_gpu_golden_per_test_case"],
 )
 
 _GPU_GOLDENS_GRAD_DATA = if_oss(
-    ["@torch_tpu_goldens//:" + f for f in _GPU_GOLDENS_GRAD],
-    _GPU_GOLDENS_GRAD,
+    [
+        "@torch_tpu_goldens//:" + f
+        for f in _GPU_GOLDENS_GRAD_BASE + _GPU_GOLDENS_GRAD_HOPPER
+    ],
+    [":ops_test_gpu_golden_grad_per_test_case"],
 )
 
 _GPU_GOLDENS_COMPILED_DATA = if_oss(
-    ["@torch_tpu_goldens//:" + f for f in _GPU_GOLDENS_COMPILED],
-    _GPU_GOLDENS_COMPILED,
+    [
+        "@torch_tpu_goldens//:" + f
+        for f in _GPU_GOLDENS_COMPILED_BASE + _GPU_GOLDENS_COMPILED_HOPPER
+    ],
+    [":ops_test_gpu_golden_compiled_per_test_case"],
 )
 
 torch_tpu_py_library(
@@ -367,6 +435,7 @@ torch_tpu_py_test(
         "@pypi//google_api_core",
         "@pypi//google_cloud_storage",
         "@pypi//pillow",
+        "@pypi//transformers",
     ],
 )
 
@@ -1745,6 +1814,7 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal:env_utils",
         "//src/torch_tpu/_internal:testing",
         "//src/torch_tpu/_internal/compile:compiler",
+        "//src/torch_tpu/_internal/compile:flex_attention",
         "//src/torch_tpu/_internal/compile:tpu_torch_compile",
         "//src/torch_tpu/_internal/distributed",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
@@ -1816,6 +1886,7 @@ torch_tpu_py_test(
         "//src/torch_tpu/_internal:env_utils",
         "//src/torch_tpu/_internal:testing",
         "//src/torch_tpu/_internal/compile:compiler",
+        "//src/torch_tpu/_internal/compile:flex_attention",
         "//src/torch_tpu/_internal/compile:tpu_torch_compile",
         "//src/torch_tpu/_internal/distributed",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
@@ -2440,6 +2511,11 @@ torch_tpu_py_test(
 torch_tpu_py_test(
     name = "tracebacks_precedence_test",
     srcs = ["tracebacks_precedence_test.py"],
+    # The flag is memoized on first use, so it's set on the command line rather
+    # than at runtime.
+    args = ["--torch_tpu_internal_mlir_tracebacks=true"],
+    # In OSS, C++ flags can't be passed to Python tests on the command line.
+    notest_oss = True,  # NOTEST_OSS_OK=The tested flag is only meant for Google internal use, and thus doesn't need to work in OSS.
     tags = [
         "requires-tpu-v5lite",
     ],
@@ -2448,7 +2524,6 @@ torch_tpu_py_test(
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
-        "//src/torch_tpu/_internal:testing",
         "//src/torch_tpu/_internal/export",
     ],
 )
@@ -2903,8 +2978,8 @@ torch_tpu_py_test(
 )
 
 # Fails if a change adds error macros that errors_test.py, tpu_errors_test.py or
-# distributed/collective_errors_test.py don't cover. It needs 8 chips because
-# collective_errors_test_cov runs in it.
+# distributed/collective_errors_test.py don't cover.
+# In OSS, only the presubmit job with the newest dependencies runs it.
 torch_tpu_py_test(
     name = "error_coverage_test",
     timeout = "long",
@@ -2916,8 +2991,20 @@ torch_tpu_py_test(
         "//csrc:all_cpp_files_recursive",
         "//tests/distributed:collective_errors_test_cov",
     ],
-    notest_oss = True,  # NOTEST_OSS_OK=Enabled in OSS in a follow-up change.
-    tags = [
+    tags = if_oss(
+        [
+            # collective_errors_test_cov needs all 8 chips.
+            "exclusive",
+            # Some error tests need PyTorch features (e.g. activation offloading)
+            # that only the newest supported PyTorch has. The OSS presubmit job
+            # with the newest dependencies runs this test on every PR.
+            "requires-newest-deps",
+            # The baseline is for TPU v5e, and collective_errors_test_cov needs
+            # 8 chips.
+            "fails-on-tpu-v7",
+        ],
+        [],
+    ) + [
         "nofastbuild",
         "nosan",  # *san builds are low-value for error tests.
         "requires-tpu-v5lite:8",
@@ -2963,6 +3050,13 @@ torch_tpu_py_test(
         "//shims/torch:pytorch",
         "//src/torch_tpu",
     ],
+)
+
+bzl_library(
+    name = "split_goldens_bzl",
+    srcs = ["split_goldens.bzl"],
+    parse_tests = False,
+    visibility = ["//visibility:private"],
 )
 
 torch_tpu_package_end()

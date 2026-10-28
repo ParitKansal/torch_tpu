@@ -126,8 +126,13 @@ inline Scalar Extract(Tile t, llvm::ArrayRef<int64_t> indices) {
   return t.Extract(indices);
 }
 
-// Approximate or exact reciprocal (`tpu.reciprocal`).
-Tile Reciprocal(Tile t, bool approx = false);
+enum class ReciprocalMode {
+  kExact,
+  kApprox,
+};
+
+// Exact or approximate reciprocal (`tpu.reciprocal`).
+Tile Reciprocal(Tile t, ReciprocalMode mode = ReciprocalMode::kExact);
 
 // Reductions along `axis`, keeping the reduced dimension as size 1.
 Tile MaxReduce(Tile t, int axis);

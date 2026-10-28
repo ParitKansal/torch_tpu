@@ -909,6 +909,29 @@ presubmit {
     check_delta_only: true  # Only check new/changed lines.
   }
 
+  # Prevent using absl::SetFlag.
+  check_contents {
+    base {
+      id: "CheckSetFlag"
+      disable_tags: "ROLLBACK_OF"  # Don't require for rollback CLs.
+    }
+    prohibited_regexp: "\\babsl::SetFlag\\("
+    suppression_regexp:
+      # Allow suppression with this marker.
+      "\\bSET_FLAG_OK=.+|"
+      # Ignore occurrences in comments.
+      "//.*\\babsl::SetFlag\\("
+    failure_message:
+      "Please use SafeSetFlag() instead of absl::SetFlag. "
+      "SafeSetFlag() crashes if the flag's value has already been memoized by "
+      "GetFlagOnce<>(), which would otherwise silently ignore the new value. "
+      "If a flag needs to be changed at runtime, read it with absl::GetFlag() "
+      "instead of GetFlagOnce<>(). "
+      "If you have a legitimate reason to use absl::SetFlag, add a "
+      "`// SET_FLAG_OK=<reason>` comment on the same line as absl::SetFlag()."
+    check_delta_only: true  # Only check new/changed lines.
+  }
+
   # Check for crashing macros in non-test C++ files.
   check_contents {
     base {

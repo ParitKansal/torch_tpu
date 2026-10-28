@@ -27,6 +27,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "absl/status/status.h"
 #include "absl/status/status_matchers.h"
@@ -862,6 +863,31 @@ TEST(KilnTest, TileCompoundAssignmentBitwise) {
   )"));
 }
 
+TEST(KilnTest, TileReciprocal) {
+  EXPECT_THAT(CreateKernel(GridSpec{.name = "tile_reciprocal", .grid = {1}},
+                           InSpec{f32(32, 128)}, OutSpec{f32(32, 128)},
+                           [&](Ref in, Ref out) {
+                             Tile t(in);
+                             Tile exact_default = Reciprocal(t);
+                             Tile exact_explicit =
+                                 Reciprocal(t, ReciprocalMode::kExact);
+                             Tile approx =
+                                 Reciprocal(t, ReciprocalMode::kApprox);
+                             out = exact_default + exact_explicit + approx;
+                           }),
+              IsOkAndMatchesIr(R"(
+    CHECK-LABEL: func.func @tile_reciprocal(
+    CHECK-SAME:    %{{.*}}: i32, %[[IN:arg[0-9]+]]: memref<32x128xf32, #tpu.memory_space<vmem>>, %[[OUT:arg[0-9]+]]: memref<32x128xf32, #tpu.memory_space<vmem>>)
+    CHECK:         %[[V:.*]] = vector.load %[[IN]]
+    CHECK:         %[[EXACT0:.*]] = tpu.reciprocal %[[V]] {full_range = false} : vector<32x128xf32> -> vector<32x128xf32>
+    CHECK:         %[[EXACT1:.*]] = tpu.reciprocal %[[V]] {full_range = false} : vector<32x128xf32> -> vector<32x128xf32>
+    CHECK:         %[[APPROX:.*]] = tpu.reciprocal %[[V]] {approx = true, full_range = false} : vector<32x128xf32> -> vector<32x128xf32>
+    CHECK:         %[[SUM0:.*]] = arith.addf %[[EXACT0]], %[[EXACT1]] : vector<32x128xf32>
+    CHECK:         %[[SUM1:.*]] = arith.addf %[[SUM0]], %[[APPROX]] : vector<32x128xf32>
+    CHECK:         tpu.vector_store %[[OUT]][%{{.*}}, %{{.*}}], %[[SUM1]]
+  )"));
+}
+
 TEST(KilnTest, RotateGatherExtractBitcastAndMaskedStore) {
   absl::StatusOr<Kernel> kernel = CreateKernel(
       GridSpec{.name = "rotate_gather_extract_bitcast_store", .grid = {1}},
@@ -983,6 +1009,8 @@ TEST(KilnTest, ScalarMismatchedTypesFail) {
                      "Min\\(\\) requires operands of the same dtype");
         EXPECT_DEATH(t_f & t_f, "& requires integer or bool operands");
         EXPECT_DEATH(!t_i, "! requires a bool operand");
+        EXPECT_DEATH(Reciprocal(t_i),
+                     "Reciprocal\\(\\) requires a floating-point tile");
 
         EXPECT_DEATH(f_in(0, 0, 0), "Too many slice indices");
         EXPECT_DEATH(f_in(0, Slice(0, 0)), "Slice size must be positive");
@@ -1820,6 +1848,19 @@ TEST(KilnTest, DmaOperations) {
   )"));
 }
 
+TEST(KilnTest, SyncCopyScopesItsSemaphore) {
+  absl::StatusOr<Kernel> kernel = CreateKernel(
+      GridSpec{.name = "sync_copy"}, InSpec::Hbm(f32(8, 128)),
+      OutSpec::Vmem(f32(8, 128)),
+      [](Ref hbm_in, Ref vmem_out) { SyncCopy(hbm_in, vmem_out); });
+  EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
+    CHECK:      "tpu.region"() ({
+    CHECK-NEXT:   %[[SEM:.*]] = tpu.sem_alloc : memref<!tpu.dma_semaphore
+    CHECK-NEXT:   tpu.enqueue_dma {{.*}} target_semaphore(%[[SEM]]
+    CHECK-NEXT:   tpu.wait_dma {{.*}} target_semaphore(%[[SEM]]
+  )"));
+}
+
 TEST(KilnTest, UnboundedDynamicDma) {
   // Unbounded-dynamic HBM <-> VMEM tiled copy loop.
   absl::StatusOr<Kernel> dyn_kernel = CreateKernel(
@@ -2029,6 +2070,162 @@ TEST(KilnTest, GridFreeKernelOmitsGridAttributes) {
     CHECK-NOT:     dimension_semantics
     CHECK-NOT:     window_params
     CHECK:         tpu.enqueue_dma
+  )"));
+}
+
+TEST(KilnTest, EmitPipeline) {
+  constexpr int64_t kBlock = 128;
+  absl::StatusOr<Kernel> kernel = CreateKernel(
+      GridSpec{.name = "emit_pipeline_inputs"}, InSpec::Hbm(f32(kDynamic)),
+      OutSpec::Hbm(f32(kBlock)), ScratchSpec::Vmem(f32(kBlock)),
+      [&](Ref in, Ref out, Ref acc) {
+        PipelineOperand input{
+            .hbm = in, .block_shape = {kBlock}, .region = [](Scalar step) {
+              return BlockRegion{.offsets = {step * kBlock}, .sizes = {kBlock}};
+            }};
+        acc = Zeros(acc.shape());
+        EmitPipeline(0, in.Dim(0) / kBlock, {std::move(input)},
+                     /*outputs=*/{}, [&](const PipelineStep& s) {
+                       acc = Tile(acc) + Tile(s.inputs[0]);
+                     });
+        AsyncCopy(acc, out, AllocaDmaSemaphore()).Wait();
+      });
+
+  // Each copy goes from a chunk of `in` into a slot of the two-slot buffer, and
+  // the copy of step s + 1 starts before the wait for step s.
+  EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
+    CHECK-LABEL: func.func @emit_pipeline_inputs(
+    CHECK-SAME:    %[[IN:arg[0-9]+]]: memref<?xf32, #tpu.memory_space<hbm>>, %[[OUT:arg[0-9]+]]: memref<128xf32, #tpu.memory_space<hbm>>, %[[ACC:arg[0-9]+]]: memref<128xf32, #tpu.memory_space<vmem>>
+    CHECK:         "tpu.region"() ({
+    CHECK:           %[[SLOTS:.*]] = memref.alloca() : memref<256xf32, #tpu.memory_space<vmem>>
+    CHECK:           %[[SEMS:.*]] = tpu.sem_alloc : memref<2x!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>
+    CHECK:           scf.if
+    CHECK-DAG:         %[[FIRST_SRC:.*]] = tpu.memref_slice %[[IN]]
+    CHECK-DAG:         %[[FIRST_DST:.*]] = tpu.memref_slice %[[SLOTS]]
+    CHECK-DAG:         tpu.memref_slice %[[SEMS]]
+    CHECK:             tpu.enqueue_dma source(%[[FIRST_SRC]] : {{.*}}) target(%[[FIRST_DST]] : {{.*}})
+    CHECK:             scf.for
+    CHECK:               scf.if
+    CHECK-DAG:             %[[NEXT_SRC:.*]] = tpu.memref_slice %[[IN]]
+    CHECK-DAG:             %[[NEXT_DST:.*]] = tpu.memref_slice %[[SLOTS]]
+    CHECK:                 tpu.enqueue_dma source(%[[NEXT_SRC]] : {{.*}}) target(%[[NEXT_DST]] : {{.*}})
+    CHECK:               tpu.wait_dma
+    CHECK:               %[[SLOT:.*]] = tpu.memref_slice %[[SLOTS]]
+    CHECK:               vector.load %[[SLOT]]
+    CHECK:               arith.addf
+    CHECK:               tpu.vector_store %[[ACC]]
+    CHECK:           tpu.yield
+    CHECK:         tpu.enqueue_dma source(%[[ACC]] : {{.*}}) target(%[[OUT]] : {{.*}})
+  )"));
+}
+
+TEST(KilnTest, EmitPipelineWithTwo2dInputs) {
+  auto rows = [](Scalar step) {
+    return BlockRegion{.offsets = {step * 8, 0}, .sizes = {8, 128}};
+  };
+  absl::StatusOr<Kernel> kernel = CreateKernel(
+      GridSpec{.name = "emit_pipeline_2d"}, InSpec::Hbm(f32(kDynamic, 128)),
+      InSpec::Hbm(f32(kDynamic, 128)), OutSpec::Hbm(f32(8, 128)),
+      ScratchSpec::Vmem(f32(8, 128)), [&](Ref a, Ref b, Ref out, Ref acc) {
+        acc = Zeros(acc.shape());
+        EmitPipeline(0, a.Dim(0) / 8,
+                     {{.hbm = a, .block_shape = {8, 128}, .region = rows},
+                      {.hbm = b, .block_shape = {8, 128}, .region = rows}},
+                     /*outputs=*/{}, [&](const PipelineStep& s) {
+                       acc = Tile(acc) + Tile(s.inputs[0]) * Tile(s.inputs[1]);
+                     });
+        AsyncCopy(acc, out, AllocaDmaSemaphore()).Wait();
+      });
+
+  // Each input has its own `{2, 8, 128}` buffer and semaphores. The copies of
+  // both inputs are started together, and both are waited for before the body.
+  EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
+    CHECK-LABEL: func.func @emit_pipeline_2d(
+    CHECK-SAME:    %[[A:arg[0-9]+]]: memref<?x128xf32, #tpu.memory_space<hbm>>, %[[B:arg[0-9]+]]: memref<?x128xf32, #tpu.memory_space<hbm>>
+    CHECK:         "tpu.region"() ({
+    CHECK:           %[[A_SLOTS:.*]] = memref.alloca() : memref<2x8x128xf32, #tpu.memory_space<vmem>>
+    CHECK:           %[[A_SEMS:.*]] = tpu.sem_alloc : memref<2x!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>
+    CHECK:           %[[B_SLOTS:.*]] = memref.alloca() : memref<2x8x128xf32, #tpu.memory_space<vmem>>
+    CHECK:           %[[B_SEMS:.*]] = tpu.sem_alloc : memref<2x!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>
+    CHECK:           scf.if
+    CHECK-DAG:         %[[A_SRC:.*]] = tpu.memref_slice %[[A]]
+    CHECK-DAG:         tpu.memref_slice %[[A_SLOTS]]
+    CHECK-DAG:         tpu.memref_slice %[[A_SEMS]]
+    CHECK:             tpu.enqueue_dma source(%[[A_SRC]] : {{.*}})
+    CHECK-DAG:         %[[B_SRC:.*]] = tpu.memref_slice %[[B]]
+    CHECK-DAG:         tpu.memref_slice %[[B_SLOTS]]
+    CHECK-DAG:         tpu.memref_slice %[[B_SEMS]]
+    CHECK:             tpu.enqueue_dma source(%[[B_SRC]] : {{.*}})
+    CHECK:             scf.for
+    CHECK:               scf.if
+    CHECK:                 tpu.enqueue_dma
+    CHECK:                 tpu.enqueue_dma
+    CHECK:               tpu.wait_dma
+    CHECK:               tpu.wait_dma
+    CHECK:               arith.mulf
+    CHECK:               arith.addf
+    CHECK:           tpu.yield
+  )"));
+}
+
+TEST(KilnTest, EmitPipelineWithOutputs) {
+  constexpr int64_t kBlock = 128;
+  auto block = [](Scalar step) {
+    return BlockRegion{.offsets = {step * kBlock}, .sizes = {kBlock}};
+  };
+  // Each output copy goes from an output slot to a chunk of `out`. Step s
+  // starts the input copy of step s + 1 before waiting for the output copy of
+  // step s - 2, whose slot it reuses; the last two are waited for after the
+  // loop.
+  EXPECT_THAT(
+      CreateKernel(
+          GridSpec{.name = "emit_pipeline_io"}, InSpec::Hbm(f32(kDynamic)),
+          OutSpec::Hbm(f32(kDynamic)),
+          [&](Ref in, Ref out) {
+            EmitPipeline(
+                0, in.Dim(0) / kBlock,
+                {{.hbm = in, .block_shape = {kBlock}, .region = block}},
+                {{.hbm = out, .block_shape = {kBlock}, .region = block}},
+                [&](const PipelineStep& s) {
+                  Store(s.outputs[0], Tile(s.inputs[0]) * 2.0);
+                });
+          }),
+      IsOkAndMatchesIr(R"(
+    CHECK-LABEL: func.func @emit_pipeline_io(
+    CHECK-SAME:    %{{.*}}: memref<?xf32, #tpu.memory_space<hbm>>, %[[OUT:arg[0-9]+]]: memref<?xf32, #tpu.memory_space<hbm>>
+    CHECK:         "tpu.region"() ({
+    CHECK:           %[[IN_SLOTS:.*]] = memref.alloca() : memref<256xf32, #tpu.memory_space<vmem>>
+    CHECK:           tpu.sem_alloc
+    CHECK:           %[[OUT_SLOTS:.*]] = memref.alloca() : memref<256xf32, #tpu.memory_space<vmem>>
+    CHECK:           %[[OUT_SEMS:.*]] = tpu.sem_alloc
+    CHECK:           scf.if
+    CHECK:             tpu.enqueue_dma source(%{{.*}} : memref<128xf32, #tpu.memory_space<hbm>>)
+    CHECK:             scf.for
+    CHECK:               scf.if
+    CHECK:                 tpu.enqueue_dma source(%{{.*}} : memref<128xf32, #tpu.memory_space<hbm>>)
+    CHECK:               tpu.wait_dma source(%{{.*}} : memref<128xf32, #tpu.memory_space<hbm>>)
+    CHECK:               scf.if
+    CHECK-DAG:             %[[REUSE_SRC:.*]] = tpu.memref_slice %[[OUT_SLOTS]]
+    CHECK-DAG:             %[[REUSE_DST:.*]] = tpu.memref_slice %[[OUT]]
+    CHECK-DAG:             tpu.memref_slice %[[OUT_SEMS]]
+    CHECK:                 tpu.wait_dma source(%[[REUSE_SRC]] : {{.*}}) target(%[[REUSE_DST]] : {{.*}})
+    CHECK:               %[[IN_SLOT:.*]] = tpu.memref_slice %[[IN_SLOTS]]
+    CHECK:               %[[OUT_SLOT:.*]] = tpu.memref_slice %[[OUT_SLOTS]]
+    CHECK:               vector.load %[[IN_SLOT]]
+    CHECK:               arith.mulf
+    CHECK:               tpu.vector_store %[[OUT_SLOT]]
+    CHECK-DAG:           %[[COPY_SRC:.*]] = tpu.memref_slice %[[OUT_SLOTS]]
+    CHECK-DAG:           %[[COPY_DST:.*]] = tpu.memref_slice %[[OUT]]
+    CHECK-DAG:           tpu.memref_slice %[[OUT_SEMS]]
+    CHECK:               tpu.enqueue_dma source(%[[COPY_SRC]] : {{.*}}) target(%[[COPY_DST]] : {{.*}})
+    CHECK:             }
+    CHECK:             scf.if
+    CHECK:               tpu.memref_slice %[[OUT_SEMS]]
+    CHECK:               tpu.wait_dma source({{.*}}vmem>>) target({{.*}}hbm>>)
+    CHECK:             }
+    CHECK:             tpu.memref_slice %[[OUT_SEMS]]
+    CHECK:             tpu.wait_dma source({{.*}}vmem>>) target({{.*}}hbm>>)
+    CHECK:           tpu.yield
   )"));
 }
 

@@ -6463,6 +6463,51 @@ Supported combinations for non-constant padding:
     ):
       torch.bmm(a, b, out=out)
 
+  def test_bmm_invalid_out_dtype(self):
+    for in_dtype, bad_dtypes in (
+        (
+            torch.float32,
+            (
+                (torch.int32, "int32"),
+                (torch.bool, "bool"),
+                (torch.float64, "float64"),
+                (torch.bfloat16, "bfloat16"),
+            ),
+        ),
+        (torch.float16, ((torch.bfloat16, "bfloat16"),)),
+        (torch.bfloat16, ((torch.float16, "float16"),)),
+    ):
+      a = torch.ones(1, 2, 3, dtype=in_dtype, device=et.device())
+      b = torch.ones(1, 3, 2, dtype=in_dtype, device=et.device())
+
+      for bad_dtype, tpu_dtype in bad_dtypes:
+        with et.assert_raises_message(
+            RuntimeError,
+            tpu=f"""bmm(): expected out_dtype to be the same as input dtype or float32 for float16/bfloat16 inputs, got {tpu_dtype}""",
+            gpu="""out_dtype must be the same as input dtype or fp32 for fp16/bf16 inputs""",
+            message_reviewed_by="gunhyun",
+        ):
+          torch.bmm(a, b, out_dtype=bad_dtype)
+
+        out = torch.empty(1, 2, 2, dtype=bad_dtype, device=et.device())
+        with et.assert_raises_message(
+            RuntimeError,
+            tpu=f"""bmm(): expected out_dtype to be the same as input dtype or float32 for float16/bfloat16 inputs, got {tpu_dtype}""",
+            gpu="""out_dtype must be the same as input dtype or fp32 for fp16/bf16 inputs""",
+            message_reviewed_by="gunhyun",
+        ):
+          torch.bmm(a, b, out_dtype=bad_dtype, out=out)
+
+    empty_a = torch.empty(1, 2, 0, dtype=torch.float32, device=et.device())
+    empty_b = torch.empty(1, 0, 2, dtype=torch.float32, device=et.device())
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""bmm(): expected out_dtype to be the same as input dtype or float32 for float16/bfloat16 inputs, got int32""",
+        gpu="""out_dtype must be the same as input dtype or fp32 for fp16/bf16 inputs""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.bmm(empty_a, empty_b, out_dtype=torch.int32)
+
   def test_grouped_mm_unsupported_bias(self):
     a = torch.randn(3, 4, device=et.device())
     b = torch.randn(3, 4, 8, device=et.device())
@@ -10771,6 +10816,41 @@ Device-side assertion tracking was not enabled by user.""",
         tpu="""xlogy(): expected non-complex dtypes, got x dtype complex64 and y dtype complex64""",
     ):
       torch.ops.aten.xlogy.OutTensor(x, y, out=out)
+
+  def test_xlogy_out_dtype_mismatch(self):
+    x = torch.tensor([1.0, 2.0], device=et.device(), dtype=torch.float32)
+    y = torch.tensor([2.0, 3.0], device=et.device(), dtype=torch.float32)
+    out = torch.empty(2, device=et.device(), dtype=torch.int32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""xlogy(): result type float32 can't be cast to the desired output type int32""",
+        gpu="""result type Float can't be cast to the desired output type Int""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.xlogy(x, y, out=out)
+
+  def test_xlogy_out_device_mismatch(self):
+    x = torch.tensor([1.0, 2.0], device=et.device(), dtype=torch.float32)
+    y = torch.tensor([2.0, 3.0], device=et.device(), dtype=torch.float32)
+    out = torch.empty(2, device="cpu", dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""xlogy(): expected out tensor to be on tpu, got cpu""",
+        gpu="""Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.xlogy(x, y, out=out)
+
+  def test_xlogy_smaller_out_alias(self):
+    x = torch.ones((2, 1), device=et.device(), dtype=torch.float32)
+    y = torch.ones((2, 3), device=et.device(), dtype=torch.float32)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""xlogy(): output with shape [2, 1] doesn't match the broadcast shape of the tensor being operated on in-place, which has shape [2, 3]""",
+        gpu="""output with shape [2, 1] doesn't match the broadcast shape [2, 3]""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.xlogy(x, y, out=x)
 
   def test_linalg_qr_insufficient_dims(self):
     input_tensor = torch.ones(1, device=et.device(), dtype=torch.float32)
@@ -15857,13 +15937,19 @@ Device-side assertion tracking was not enabled by user.""",
       # RuntimeError: pin_memory=True requires a CUDA or other accelerator
       # backend; no pinned memory allocator is available on this system.
       self.skipTest("GPU allocation can't find host allocator")
-    ONE_HUNDRED_TB = 100 * 1024 * 1024 * 1024 * 1024
+    # Request more bytes than the user virtual address space can map (at most
+    # 2^57 bytes on x86-64), so that the allocation fails up front without
+    # touching physical memory. A smaller size (e.g. 100 TB) can fit
+    # in the address space, and then pinning it consumes physical memory until
+    # the OOM killer stops the test, or the whole machine on hosts without a
+    # memory limit.
+    too_many_bytes = 1 << 62
     with et.assert_raises_message(
         RuntimeError,
-        tpu="""failed to allocate 109951162777600 bytes of pinned host memory""",
+        tpu="""failed to allocate 4611686018427387904 bytes of pinned host memory""",
     ):
       torch.zeros(
-          ONE_HUNDRED_TB, dtype=torch.uint8, device="cpu", pin_memory=True
+          too_many_bytes, dtype=torch.uint8, device="cpu", pin_memory=True
       )
 
 

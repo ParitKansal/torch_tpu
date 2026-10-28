@@ -143,14 +143,11 @@ absl::StatusOr<mlir::ElementType> ValidateAddmmInputsAndGetOutputDtype(
                    alpha.scalar().type() != at::kComplexDouble,
                error::kPythonNotImplementedError)
       << "complex dtypes are not yet supported";
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=PyTorch prevents non-matrix mat1.
-      mat1.dim() == 2, error::kInvalidArgument)
+  TT_RET_CHECK(mat1.dim() == 2, error::kInvalidArgument)
       << "expected mat1 to be a matrix, got " << mat1.dim() << "-D tensor";
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=PyTorch prevents non-matrix mat2.
-      mat2.dim() == 2, error::kInvalidArgument)
+  TT_RET_CHECK(mat2.dim() == 2, error::kInvalidArgument)
       << "expected mat2 to be a matrix, got " << mat2.dim() << "-D tensor";
-  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=PyTorch prevents mismatch.
-      mat1.size(1) == mat2.size(0), error::kInvalidArgument)
+  TT_RET_CHECK(mat1.size(1) == mat2.size(0), error::kInvalidArgument)
       << "expected size 1 of mat1 to be same as size 0 of mat2, got "
       << mat1.size(1) << " and " << mat2.size(0) << " respectively";
 

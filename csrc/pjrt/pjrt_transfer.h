@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -41,33 +42,57 @@ namespace torch_tpu {
 absl::StatusOr<DeviceBufferRef> TpuMallocAndMemcpyHtoD(
     const void* host_data, mlir::ElementType element_type,
     absl::Span<const int64_t> dimensions,
-    std::vector<uint8_t> backing_data = {});
+    std::vector<uint8_t> backing_data = {}, const void* pinned_ptr = nullptr);
 
 // Copies the data from the device directly into the provided host buffer.
 // This is always non-blocking; the future may be awaited to make this blocking.
 xla::Future<void> TpuMemcpyDtoHDirect(const DeviceBufferRef& buffer_ref,
-                                      void* dst_ptr);
+                                      void* dst_ptr,
+                                      const void* dst_pinned_ptr = nullptr);
 
-// Holds the completion future and RAII buffer hold for an asynchronous DMA
-// copy.
-struct AsyncDmaResult {
-  xla::Future<> future;
-  std::shared_ptr<void> buffer_hold;
+// Owns a prepared PJRT raw buffer alias and its underlying DeviceBufferRef for
+// zero-copy asynchronous DMA transfers.
+//
+// Each CopyDtoH / CopyHtoD call returns a self-retaining xla::Future<> whose
+// completion callback keeps the underlying PJRT_RawBuffer* and DeviceBufferRef
+// alive until the hardware DMA transfer finishes.
+class PreparedRawDmaBuffer {
+ public:
+  // Awaits computation readiness on buffer_ref and creates a PJRT_RawBuffer
+  // alias for direct DMA transfers.
+  static absl::StatusOr<PreparedRawDmaBuffer> Prepare(
+      DeviceBufferRef buffer_ref);
+
+  // Initiates an asynchronous Device-to-Host raw DMA copy of transfer_size
+  // bytes starting at offset in the device buffer into dst.
+  absl::StatusOr<xla::Future<>> CopyDtoH(void* dst, int64_t offset,
+                                         int64_t transfer_size) const;
+
+  // Initiates an asynchronous Host-to-Device raw DMA copy of transfer_size
+  // bytes from src into the device buffer starting at offset.
+  absl::StatusOr<xla::Future<>> CopyHtoD(const void* src, int64_t offset,
+                                         int64_t transfer_size) const;
+
+ private:
+  struct Holder;
+  explicit PreparedRawDmaBuffer(std::shared_ptr<Holder> holder)
+      : holder_(std::move(holder)) {}
+
+  std::shared_ptr<Holder> holder_;
 };
 
 // Performs asynchronous non-blocking Device-to-Host (D2H) DMA transfer
 // from a TPU device buffer to a host memory pointer using the PjRt RawBuffer C
-// API. Returns an AsyncDmaResult indicating copy completion along with an
-// opaque hold object preserving device buffer lifetime until completion.
-absl::StatusOr<AsyncDmaResult> TpuAsyncDmaCopyDtoH(
+// API. Returns a self-retaining xla::Future<> that preserves device buffer
+// lifetime until the DMA transfer completes.
+absl::StatusOr<xla::Future<>> TpuAsyncDmaCopyDtoH(
     const DeviceBufferRef& src_buffer, void* dst_host_ptr, int64_t copy_bytes);
 
 // Performs asynchronous non-blocking Host-to-Device (H2D) DMA transfer
 // from a host memory pointer into a TPU device buffer at a byte offset using
-// the PjRt RawBuffer C API. Returns an AsyncDmaResult indicating copy
-// completion along with an opaque hold object preserving device buffer lifetime
-// until completion.
-absl::StatusOr<AsyncDmaResult> TpuAsyncDmaCopyHtoD(
+// the PjRt RawBuffer C API. Returns a self-retaining xla::Future<> that
+// preserves device buffer lifetime until the DMA transfer completes.
+absl::StatusOr<xla::Future<>> TpuAsyncDmaCopyHtoD(
     const void* src_host_ptr, const DeviceBufferRef& dst_buffer,
     int64_t dst_byte_offset, int64_t copy_bytes);
 

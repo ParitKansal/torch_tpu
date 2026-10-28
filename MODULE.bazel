@@ -48,6 +48,11 @@ bazel_dep(name = "highway", version = "1.3.0")
 bazel_dep(name = "re2", version = "2025-11-05.bcr.1", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "tcmalloc", version = "0.0.0-20250927-12f2552", repo_name = "com_google_tcmalloc")
 
+# 1.34.6.bcr.1 was yanked (CVE-2025-62408) in
+# https://github.com/bazelbuild/bazel-central-registry/commit/7ad3b207da8ead122a676e1597e1fc85a6fbee79
+# TODO: Remove once the pinned XLA depends on c-ares >= 1.34.6.bcr.3.
+bazel_dep(name = "c-ares", version = "1.34.6.bcr.3", repo_name = None)
+
 # BCR overrides
 
 single_version_override(
@@ -88,11 +93,11 @@ bazel_dep(name = "rules_ml_toolchain")
 
 archive_override(
     module_name = "xla",
-    integrity = "sha256-gtqnu0vl3wLxlMzz47xOfBAEkg7F/8lb5VmkcCQasSY=",
+    integrity = "sha256-WPQm/g/B85zwHWOjEBumT6Z9AXRUHrkFgM2p+IKaJtI=",
     patch_strip = 1,
     patches = ["//bazel/patches/xla:remove_stablehlo_source_location.patch"],
-    strip_prefix = "xla-4dc8a901243757f98e5e0384816953ef9bd43840",
-    urls = ["https://github.com/openxla/xla/archive/4dc8a901243757f98e5e0384816953ef9bd43840.tar.gz"],
+    strip_prefix = "xla-d5229a92b1d15d30ba87f68c42e44cae0e77f54c",
+    urls = ["https://github.com/openxla/xla/archive/d5229a92b1d15d30ba87f68c42e44cae0e77f54c.tar.gz"],
 )
 
 archive_override(

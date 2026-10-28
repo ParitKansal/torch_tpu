@@ -350,7 +350,9 @@ torch_tpu_cc_library(
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/synchronization",
+        "@xla//xla:future",
         "@xla//xla/pjrt:host_memory_allocator",
     ],
 )
@@ -799,6 +801,7 @@ torch_tpu_cc_library(
         "//csrc/ops/fake_quantize:fused_moving_avg_obs_fq_helper_aten_kernels",
         "//csrc/ops/fft:fft_aten_kernels",
         "//csrc/ops/fill:fill_aten_kernels",
+        "//csrc/ops/flex_attention:flex_attention_aten_kernels",
         "//csrc/ops/flip:flip_aten_kernels",
         "//csrc/ops/fmax:fmax_aten_kernels",
         "//csrc/ops/fmin:fmin_aten_kernels",

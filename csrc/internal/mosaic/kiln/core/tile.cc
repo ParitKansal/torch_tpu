@@ -281,11 +281,12 @@ Tile Splat(Scalar scalar, llvm::ArrayRef<int64_t> shape) {
       internal::EmitBroadcast(internal::unwrap(scalar), shape), scalar.dtype());
 }
 
-Tile Reciprocal(Tile t, bool approx) {
-  ABSL_CHECK(t.dtype().IsFloat());  // CRASH_OK
+Tile Reciprocal(Tile t, ReciprocalMode mode) {
+  ABSL_CHECK(t.dtype().IsFloat())  // CRASH_OK
+      << "Reciprocal() requires a floating-point tile";
   return internal::wrap<Tile>(
       tpu::ReciprocalOp::create(internal::CurrentBuilder(), internal::unwrap(t),
-                                approx,
+                                /*approx=*/mode == ReciprocalMode::kApprox,
                                 /*full_range=*/false),
       t.dtype());
 }

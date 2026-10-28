@@ -1031,11 +1031,17 @@ torch_tpu_cc_test(
 
 torch_tpu_cc_library(
     name = "flags",
+    srcs = ["flags.cc"],
     hdrs = ["flags.h"],
     deps = [
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/base:nullability",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/flags:commandlineflag",
         "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/log:absl_check",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 

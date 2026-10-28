@@ -95,6 +95,10 @@ _GPU_GOLDEN_ARCH_ATTR: Final[str] = "gpu_golden_arch"
 
 _GPU_GOLDEN_HOPPER_SUFFIX: Final[str] = "_hopper"
 
+# Suffix of the directory artifact holding per-test-case golden files, see
+# split_gpu_goldens() in BUILD.
+_GPU_GOLDEN_PER_TEST_CASE_SUFFIX: Final[str] = "_per_test_case"
+
 # Identifies a list of golden samples: (test case name, op variant, dtype key).
 _GoldenKey = tuple[str, str, str]
 
@@ -3156,6 +3160,28 @@ class GoldenGpuData:
         (op_input, op_output)
     )
 
+  def _ensure_test_case_loaded(self, test_case_name: str) -> None:
+    """Lazily loads the golden samples for `test_case_name`, if present."""
+    if test_case_name in self._data:
+      return
+    candidate_dirs = tests_test_utils.goldens_candidate_local_dirs(
+        base_dir=_GOLDEN_DATA_BASE_DIR.value
+    )
+    per_test_case_dir = tests_test_utils.find_per_test_case_goldens_dir(
+        _golden_file_prefix() + _GPU_GOLDEN_PER_TEST_CASE_SUFFIX, candidate_dirs
+    )
+    if per_test_case_dir is None:
+      # TODO(b/576014545): Remove fallback once we add per-test-case loading
+      # in OSS. If `per_test_case_dir` is `None`, goldens were already all
+      # loaded by _load_golden_files().
+      return
+    op_tree = tests_test_utils.load_single_test_case_golden(
+        test_case_name,
+        per_test_case_dir,
+    )
+    if op_tree is not None:
+      self.merge_plistlib_pytree({test_case_name: op_tree})
+
   def get_samples(
       self,
       test_case_name: str,
@@ -3164,6 +3190,7 @@ class GoldenGpuData:
       out_dtype_override: torch.dtype | None = None,
   ) -> Sequence[tuple["OpInput", "OpOutput"]]:
     """Returns the recorded samples for the key, or an empty list if absent."""
+    self._ensure_test_case_loaded(test_case_name)
     key = _golden_dtype_key(dtype, out_dtype_override)
     samples = (
         self._data.get(test_case_name, {}).get(variant.value, {}).get(key, [])
@@ -6253,6 +6280,15 @@ def _load_golden_files() -> None:
   candidate_dirs = tests_test_utils.goldens_candidate_local_dirs(
       base_dir=_GOLDEN_DATA_BASE_DIR.value
   )
+  if tests_test_utils.find_per_test_case_goldens_dir(
+      prefix + _GPU_GOLDEN_PER_TEST_CASE_SUFFIX, candidate_dirs
+  ):
+    # Per-test-case golden artifacts are present, so skip eager monolithic
+    # loading; GoldenGpuData.get_samples() lazily loads each test case's
+    # goldens on demand.
+    return
+  # TODO(b/576014545): Remove monolithic fallback once we add per-test-case
+  # loading in OSS.
   goldens = tests_test_utils.load_golden_files(
       prefix=prefix, candidate_dirs=candidate_dirs
   )

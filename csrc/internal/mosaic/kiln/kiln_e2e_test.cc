@@ -133,6 +133,21 @@ class KilnE2eTest : public testing::Test {
     return lit;
   }
 
+  template <typename Fn>
+  static xla::Literal Make1dF32(int64_t n, Fn&& fn) {
+    xla::Literal lit(xla::ShapeUtil::MakeShape(xla::F32, {n}));
+    for (int64_t i = 0; i < n; ++i) {
+      lit.Set<float>({i}, fn(i));
+    }
+    return lit;
+  }
+
+  // Verifies and serializes `kernel`, to run it on several inputs.
+  static absl::StatusOr<std::string> VerifyAndSerialize(Kernel&& kernel) {
+    TT_RETURN_IF_ERROR(kernel.Verify());
+    return std::move(kernel).Serialize();
+  }
+
   static inline xla::HloRunner* runner_ = nullptr;
 };
 
@@ -356,6 +371,182 @@ TEST_F(KilnE2eTest, DynamicHbmTiledLoopWithDma) {
     xla::Literal expected = Make2dF32(
         num_rows, kCols,
         [&](int64_t r, int64_t c) { return input.Get<float>({r, c}) * 2.0f; });
+    RunAndCompare(serialized, {&input}, expected);
+  }
+}
+
+// One compiled kernel sums the 128-element chunks of an HBM vector: the chunks
+// are streamed with EmitPipeline into a VMEM accumulator, which is copied to
+// the HBM output at the end.
+TEST_F(KilnE2eTest, PipelinedSum) {
+  constexpr int64_t kChunk = 128;
+
+  TT_ASSERT_OK_AND_ASSIGN(
+      Kernel kernel,
+      CreateKernel(
+          GridSpec{.name = "pipelined_sum_e2e"}, InSpec::Hbm(f32(kDynamic)),
+          OutSpec::Hbm(f32(kChunk)), ScratchSpec::Vmem(f32(kChunk)),
+          [&](Ref in, Ref out, Ref acc) {
+            PipelineOperand input{
+                .hbm = in, .block_shape = {kChunk}, .region = [](Scalar step) {
+                  return BlockRegion{.offsets = {step * kChunk},
+                                     .sizes = {kChunk}};
+                }};
+            acc = Zeros(acc.shape());
+            EmitPipeline(0, in.Dim(0) / kChunk, {std::move(input)},
+                         /*outputs=*/{}, [&](const PipelineStep& s) {
+                           acc = Tile(acc) + Tile(s.inputs[0]);
+                         });
+            AsyncCopy(acc, out, AllocaDmaSemaphore()).Wait();
+          }));
+
+  TT_ASSERT_OK_AND_ASSIGN(std::string serialized,
+                          VerifyAndSerialize(std::move(kernel)));
+
+  // A single chunk never prefetches.
+  for (int64_t num_chunks : {1, 5}) {
+    const int64_t n = num_chunks * kChunk;
+    SCOPED_TRACE(absl::StrCat("n=", n));
+    xla::Literal input =
+        Make1dF32(n, [](int64_t i) { return static_cast<float>(i % 17 - 8); });
+    xla::Literal expected = Make1dF32(kChunk, [&](int64_t i) {
+      float sum = 0.0f;
+      for (int64_t chunk = 0; chunk < num_chunks; ++chunk) {
+        sum += input.Get<float>({chunk * kChunk + i});
+      }
+      return sum;
+    });
+    RunAndCompare(serialized, {&input}, expected);
+  }
+}
+
+// One compiled kernel sums the elementwise products of the 8-row bands of two
+// HBM matrices, streaming both inputs with one EmitPipeline.
+TEST_F(KilnE2eTest, PipelinedSumOfProducts) {
+  constexpr int64_t kRows = 8, kCols = 128;
+  auto band = [](Scalar step) {
+    return BlockRegion{.offsets = {step * kRows, 0}, .sizes = {kRows, kCols}};
+  };
+
+  TT_ASSERT_OK_AND_ASSIGN(
+      Kernel kernel,
+      CreateKernel(
+          GridSpec{.name = "pipelined_sum_of_products_e2e"},
+          InSpec::Hbm(f32(kDynamic, kCols)), InSpec::Hbm(f32(kDynamic, kCols)),
+          OutSpec::Hbm(f32(kRows, kCols)), ScratchSpec::Vmem(f32(kRows, kCols)),
+          [&](Ref a, Ref b, Ref out, Ref acc) {
+            acc = Zeros(acc.shape());
+            EmitPipeline(
+                0, a.Dim(0) / kRows,
+                {{.hbm = a, .block_shape = {kRows, kCols}, .region = band},
+                 {.hbm = b, .block_shape = {kRows, kCols}, .region = band}},
+                /*outputs=*/{}, [&](const PipelineStep& s) {
+                  acc = Tile(acc) + Tile(s.inputs[0]) * Tile(s.inputs[1]);
+                });
+            AsyncCopy(acc, out, AllocaDmaSemaphore()).Wait();
+          }));
+
+  TT_ASSERT_OK_AND_ASSIGN(std::string serialized,
+                          VerifyAndSerialize(std::move(kernel)));
+
+  for (int64_t num_bands : {1, 5}) {
+    SCOPED_TRACE(absl::StrCat("num_bands=", num_bands));
+    const int64_t rows = num_bands * kRows;
+    xla::Literal a = Make2dF32(rows, kCols, [](int64_t r, int64_t c) {
+      return static_cast<float>((r + c) % 7 - 3);
+    });
+    xla::Literal b = Make2dF32(rows, kCols, [](int64_t r, int64_t c) {
+      return static_cast<float>((3 * r + c) % 5 - 2);
+    });
+    xla::Literal expected = Make2dF32(kRows, kCols, [&](int64_t r, int64_t c) {
+      float sum = 0.0f;
+      for (int64_t band = 0; band < num_bands; ++band) {
+        sum += a.Get<float>({band * kRows + r, c}) *
+               b.Get<float>({band * kRows + r, c});
+      }
+      return sum;
+    });
+    RunAndCompare(serialized, {&a, &b}, expected);
+  }
+}
+
+// One compiled kernel doubles an HBM vector chunk by chunk, streaming both the
+// input and the output chunks.
+TEST_F(KilnE2eTest, PipelinedInputOutputStreaming) {
+  constexpr int64_t kChunk = 128;
+  auto chunk = [](Scalar step) {
+    return BlockRegion{.offsets = {step * kChunk}, .sizes = {kChunk}};
+  };
+
+  TT_ASSERT_OK_AND_ASSIGN(
+      Kernel kernel,
+      CreateKernel(
+          GridSpec{.name = "pipelined_io_streaming_e2e"},
+          InSpec::Hbm(f32(kDynamic)), OutSpec::Hbm(f32(kDynamic)),
+          [&](Ref in, Ref out) {
+            EmitPipeline(
+                0, in.Dim(0) / kChunk,
+                {{.hbm = in, .block_shape = {kChunk}, .region = chunk}},
+                {{.hbm = out, .block_shape = {kChunk}, .region = chunk}},
+                [&](const PipelineStep& s) {
+                  Store(s.outputs[0], Tile(s.inputs[0]) * 2.0);
+                });
+          }));
+
+  TT_ASSERT_OK_AND_ASSIGN(std::string serialized,
+                          VerifyAndSerialize(std::move(kernel)));
+
+  // A single chunk never waits for a slot to be copied out before reusing it.
+  for (int64_t num_chunks : {1, 5}) {
+    const int64_t n = num_chunks * kChunk;
+    SCOPED_TRACE(absl::StrCat("n=", n));
+    xla::Literal input =
+        Make1dF32(n, [](int64_t i) { return static_cast<float>(i % 17 - 8); });
+    xla::Literal expected =
+        Make1dF32(n, [&](int64_t i) { return input.Get<float>({i}) * 2.0f; });
+    RunAndCompare(serialized, {&input}, expected);
+  }
+}
+
+// Streams two 2D outputs computed from one input, band by band.
+TEST_F(KilnE2eTest, PipelinedTwo2dOutputs) {
+  constexpr int64_t kRows = 8, kCols = 128;
+  auto band = [](Scalar step) {
+    return BlockRegion{.offsets = {step * kRows, 0}, .sizes = {kRows, kCols}};
+  };
+
+  TT_ASSERT_OK_AND_ASSIGN(
+      Kernel kernel,
+      CreateKernel(
+          GridSpec{.name = "pipelined_two_2d_outputs_e2e"},
+          InSpec::Hbm(f32(kDynamic, kCols)), OutSpec::Hbm(f32(kDynamic, kCols)),
+          OutSpec::Hbm(f32(kDynamic, kCols)), [&](Ref in, Ref out0, Ref out1) {
+            EmitPipeline(
+                0, in.Dim(0) / kRows,
+                {{.hbm = in, .block_shape = {kRows, kCols}, .region = band}},
+                {{.hbm = out0, .block_shape = {kRows, kCols}, .region = band},
+                 {.hbm = out1, .block_shape = {kRows, kCols}, .region = band}},
+                [&](const PipelineStep& s) {
+                  Store(s.outputs[0], Tile(s.inputs[0]) * 2.0);
+                  Store(s.outputs[1], Tile(s.inputs[0]) + 1.0);
+                });
+          }));
+
+  TT_ASSERT_OK_AND_ASSIGN(std::string serialized,
+                          VerifyAndSerialize(std::move(kernel)));
+
+  for (int64_t num_bands : {1, 5}) {
+    SCOPED_TRACE(absl::StrCat("num_bands=", num_bands));
+    const int64_t rows = num_bands * kRows;
+    auto x = [](int64_t r, int64_t c) {
+      return static_cast<float>((r + c) % 7 - 3);
+    };
+    xla::Literal input = Make2dF32(rows, kCols, x);
+    xla::Literal expected = xla::LiteralUtil::MakeTupleOwned(
+        Make2dF32(rows, kCols,
+                  [&](int64_t r, int64_t c) { return x(r, c) * 2.0f; }),
+        Make2dF32(rows, kCols,
+                  [&](int64_t r, int64_t c) { return x(r, c) + 1.0f; }));
     RunAndCompare(serialized, {&input}, expected);
   }
 }

@@ -299,8 +299,10 @@ torch_tpu_cc_library(
     hdrs = ["dma.h"],
     deps = [
         ":context",
+        ":control_flow",
         ":dtype",
         ":index_arg",
+        ":memory",
         ":mlir_utils",
         ":ref",
         ":scalar",

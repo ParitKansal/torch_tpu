@@ -135,9 +135,11 @@ bool CanCopyStorageDirect(const at::Tensor& src, const at::Tensor& dest,
 }
 
 // Materializes src_buffer_ref and copies it directly into dest_ptr.
+// If non-blocking, also tries to hold the pinned pointer until the copy
+// completes.
 absl::Status CopyDeviceBufferRefToCpuPtrImpl(
     const DeviceBufferRef& src_buffer_ref, void* dest_ptr,
-    TransferSyncMode transfer_sync_mode) {
+    const void* dst_pinned_ptr, TransferSyncMode transfer_sync_mode) {
   if (src_buffer_ref.size_bytes() == 0) {
     // Copying nothing is a no-op.
     return absl::OkStatus();
@@ -169,19 +171,39 @@ absl::Status CopyDeviceBufferRefToCpuPtrImpl(
                     MaterializationBlockMode::kNonBlocking),
         ConvertTo<at::ScalarType>(src_buffer_ref.element_type()),
         src_buffer_ref.dimensions()));
-    xla::Future<> future = TpuMemcpyDtoHDirect(src_buffer_ref, dest_ptr);
+    xla::Future<> future =
+        TpuMemcpyDtoHDirect(src_buffer_ref, dest_ptr, dst_pinned_ptr);
     RecordAsyncDeviceToHost(std::move(future));
     return absl::OkStatus();
   }
 
-  // In eager blocking mode, start a full stream materialization (ensuring that
-  // the copied buffer will be materialized), and then block until the event
-  // snapshot is complete. This will await both the materialization and the
-  // copy.
+  // Ensure that src_buffer_ref is materialized.
+  std::vector<SharedDeviceBufferList> must_materialize;
+  const auto [device_index, stream_id] = GetCurrentDeviceStreamId();
+  if (src_buffer_ref.device_index() == device_index &&
+      src_buffer_ref.stream_id() == stream_id) {
+    // The source buffer is on the same stream as the transfer. We can start the
+    // materialization in the background and sync on the materialization and
+    // transfer simultaneously.
+    must_materialize.push_back(src_buffer_ref.device_buffer_list());
+  } else {
+    // The source buffer is on a different stream. Materialize that stream and
+    // block until it completes, then block on the transfer afterward.
+    TT_RETURN_IF_ERROR(TranslateXlaTensorOomError(
+        Materialize(src_buffer_ref, MaterializationReason::kCpuTransfer,
+                    GraphSplitMode::kSplitGraph,
+                    MaterializationBlockMode::kNonBlocking),
+        ConvertTo<at::ScalarType>(src_buffer_ref.element_type()),
+        src_buffer_ref.dimensions()));
+    TT_RETURN_IF_ERROR(src_buffer_ref.Synchronize());
+  }
+
+  // Start the copy from TPU to CPU.
   xla::Future<> future = TpuMemcpyDtoHDirect(src_buffer_ref, dest_ptr);
   RecordAsyncDeviceToHost(std::move(future));
-  std::vector<SharedDeviceBufferList> must_materialize = {
-      src_buffer_ref.device_buffer_list()};
+
+  // Then wait for the copy (and materialization, if on the same stream) to
+  // complete, returning any errors.
   xla::Future<std::shared_ptr<EventSnapshot>> snapshot_future =
       MaterializeCurrentStream(MaterializationReason::kCpuTransfer,
                                GraphSplitMode::kSplitGraph, must_materialize);
@@ -199,8 +221,12 @@ absl::Status CopyTpuToCpuStorageDirect(const at::Tensor& src,
                                        TransferSyncMode transfer_sync_mode) {
   TT_ASSIGN_OR_RETURN(DeviceBufferRef base_buf, GetBaseBuffer(src));
   ABSL_DCHECK(CanCopyStorageDirect(src, dest, base_buf.element_type()));
+  const void* dst_pinned_ptr =
+      (transfer_sync_mode == TransferSyncMode::kEagerNonBlocking
+           ? dest.storage().data_ptr().get()
+           : nullptr);
   return CopyDeviceBufferRefToCpuPtrImpl(base_buf, dest.data_ptr(),
-                                         transfer_sync_mode);
+                                         dst_pinned_ptr, transfer_sync_mode);
 }
 
 // Converts a TPU source tensor into a contiguous DeviceBufferRef with the same
@@ -280,8 +306,12 @@ absl::Status CopyTpuToCpuWithTpuConversion(
   // is unchanged.
   TT_ASSIGN_OR_RETURN(DeviceBufferRef converted_src_buf,
                       GetBuffer(converted_src));
+  const void* dst_pinned_ptr =
+      (transfer_sync_mode == TransferSyncMode::kEagerNonBlocking
+           ? dest.storage().data_ptr().get()
+           : nullptr);
   return CopyDeviceBufferRefToCpuPtrImpl(converted_src_buf, dest.data_ptr(),
-                                         transfer_sync_mode);
+                                         dst_pinned_ptr, transfer_sync_mode);
 }
 
 // PJRT can only asynchronously copy from a TPU tensor into contiguous CPU
@@ -413,8 +443,8 @@ absl::Status CopyTpuToCpu(const at::Tensor& src, const at::Tensor& dest,
 absl::Status CopyDeviceBufferRefToCpuPtr(const DeviceBufferRef& src_buffer_ref,
                                          void* dest_ptr,
                                          TransferSyncMode transfer_sync_mode) {
-  return CopyDeviceBufferRefToCpuPtrImpl(src_buffer_ref, dest_ptr,
-                                         transfer_sync_mode);
+  return CopyDeviceBufferRefToCpuPtrImpl(
+      src_buffer_ref, dest_ptr, /*dst_pinned_ptr=*/nullptr, transfer_sync_mode);
 }
 
 absl::StatusOr<at::Tensor> CopyDeviceBufferRefToCpuTensor(
@@ -439,14 +469,18 @@ absl::StatusOr<at::Tensor> CopyDeviceBufferRefToCpuTensor(
     fp4_adjusted_dims.back() /= 2;
     contiguous_dims = fp4_adjusted_dims;
   }
+  auto options = at::TensorOptions()
+                     .dtype(src_scalar_type)
+                     .device(at::DeviceType::CPU)
+                     .memory_format(at::MemoryFormat::Contiguous);
+  if (transfer_sync_mode == TransferSyncMode::kEagerNonBlocking) {
+    options = options.pinned_memory(true);
+  }
 
-  at::Tensor dest = at::empty(contiguous_dims,
-                              at::TensorOptions()
-                                  .dtype(src_scalar_type)
-                                  .device(at::DeviceType::CPU)
-                                  .memory_format(at::MemoryFormat::Contiguous));
+  at::Tensor dest = at::empty(contiguous_dims, options);
   TT_RETURN_IF_ERROR(CopyDeviceBufferRefToCpuPtrImpl(
-      src_buffer_ref, dest.data_ptr(), transfer_sync_mode));
+      src_buffer_ref, dest.data_ptr(), dest.storage().data_ptr().get(),
+      transfer_sync_mode));
   return dest;
 }
 

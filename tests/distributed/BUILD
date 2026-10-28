@@ -316,7 +316,7 @@ torch_tpu_py_test(
     env = {
         "TORCH_TPU_TIER3_COMPILATION_CACHE_ROOT": "/tmp/collective_ops_test",
     },
-    shard_count = 12,
+    shard_count = if_oss(16, 4),
     tags = if_oss(
         ["exclusive"],
         [],
@@ -327,6 +327,7 @@ torch_tpu_py_test(
         "notsan",  # TODO(b/497035517): fix the timeout in test_broadcast_objects.
     ],
     deps = [
+        ":continuous_test_utils",
         ":distributed_utils",
         "//shims/absl_py/logging",
         "//shims/absl_py/testing:absltest",
@@ -348,7 +349,7 @@ torch_tpu_py_test(
         "TORCH_TPU_TIER3_COMPILATION_CACHE_ROOT": "gs://torchtpu-shared/collective_ops_remote_cache_test",
     },
     main = "collective_ops_test.py",
-    shard_count = 12,
+    shard_count = 6,
     tags = if_oss(
         [
             "exclusive",
@@ -365,6 +366,7 @@ torch_tpu_py_test(
         "requires-net:external",  # Needs remote file access.
     ],
     deps = [
+        ":continuous_test_utils",
         ":distributed_utils",
         "//shims/absl_py/logging",
         "//shims/absl_py/testing:absltest",
@@ -1097,7 +1099,6 @@ torch_tpu_py_test(
     srcs = ["window_tpu_test.py"],
     autoload = True,
     notest_oss = True,  # NOTEST_OSS_OK=Requires PJRT RawBuffer extension not yet exported in OSS libtpu.
-    shard_count = 2,
     tags = if_oss(
         ["exclusive"],
         [],

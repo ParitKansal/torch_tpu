@@ -17,25 +17,24 @@
 #include "csrc/ops/copy_from/cpu_to_tpu.h"
 
 #include <memory>
-#include <optional>
 #include <utility>
 
 #include "ATen/core/ATen_fwd.h"
 #include "ATen/core/TensorBody.h"
 #include "absl/log/absl_log.h"
 #include "absl/status/status.h"
-#include "c10/core/TensorOptions.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/layout_utils.h"
 #include "csrc/common/to_string.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/events_queue.h"
+#include "csrc/eager/host_allocator.h"
 #include "csrc/eager/materialize.h"
 #include "csrc/eager/structured_log_buffer.h"
 #include "csrc/eager/tensor_to_buffer.h"
 #include "csrc/ops/copy_from/copy_common.h"
+#include "csrc/ops/copy_from/tpu_to_tpu.h"
 #include "csrc/pjrt/pjrt_transfer.h"
-#include "torch/headeronly/core/MemoryFormat.h"
 #include "xla/xla_data.pb.h"
 
 namespace torch_tpu {
@@ -49,33 +48,46 @@ absl::Status CopyCpuToTpu(const at::Tensor& src, const at::Tensor& dest,
     return absl::OkStatus();
   }
 
-  // Ensure the source tensor has the correct dtype and is contiguous.
-  at::Tensor effective_src = src;
-  if (src.scalar_type() != dest.scalar_type() || !src.is_contiguous()) {
-    effective_src = src.to(at::TensorOptions()
-                               .dtype(dest.scalar_type())
-                               .memory_format(at::MemoryFormat::Contiguous),
-                           /*non_blocking=*/false, /*copy=*/true);
+  // In the most common case of `.to("tpu")`, src and dest will be the same size
+  // and dtype. However, `copy_()` allows broadcasting and dtype conversion.
+  // In these cases, we do a CPU->TPU copy with no broadcasting or dtype
+  // conversion, and then do a TPU->TPU copy to the target shape and dtype.
+  // The TPU->TPU copy will handle broadcasting and dtype conversion in a
+  // non-blocking fashion.
+  if (src.sizes() != dest.sizes() || src.scalar_type() != dest.scalar_type()) {
+    TT_ASSIGN_OR_RETURN(
+        at::Tensor src_tpu,
+        MakeEmptyTensor(src.sizes(), src.scalar_type(), dest.device()));
+    TT_RETURN_IF_ERROR(CopyCpuToTpu(src, src_tpu, transfer_sync_mode));
+    return CopyTpuToTpu(src_tpu, dest);
   }
+
+  // Ensure the source tensor is contiguous.
+  at::Tensor effective_src = src.contiguous();
+
+  // Ensure that we're copying from pinned memory if the copy is non-blocking.
+  // This is reference-counted to prevent use-after-free if the user drops the
+  // source tensor before the copy completes.
+  // If the copy is blocking, then the copy will complete before we drop
+  // effective_src, so we don't need to pin.
   if (transfer_sync_mode == TransferSyncMode::kEagerNonBlocking &&
-      effective_src.data_ptr() != src.data_ptr()) {
-    // If to() created a copy, then effective_src will be
-    // dropped at the end of this function, invalidating the non-blocking
-    // copy. We must do a blocking copy to avoid this.
-    // TODO(bawilson): implement a non-blocking copy using a CPU->TPU->TPU path
-    transfer_sync_mode = TransferSyncMode::kEagerBlocking;
+      !IsTpuPinnedPtr(effective_src.storage().data_ptr().get())) {
+    effective_src = effective_src.pin_memory(dest.device());
   }
 
   TT_ASSIGN_OR_RETURN(TpuLayout tpu_layout, ResolveTpuLayout(effective_src));
 
-  // NOTE: we are intentionally using Tensor::data_ptr() here,
+  // NOTE: we are intentionally copying from Tensor::data_ptr() here,
   // and **not** Tensor::storage().data_ptr().get().
   // On CPU, Tensor::data_ptr() will account for the storage offset, while
   // Tensor::storage().data_ptr().get() will not.
+  // However, we also need to pass in the storage pointer to indicate that the
+  // host buffer should be kept alive during the transfer if it's pinned.
   TT_ASSIGN_OR_RETURN(
       DeviceBufferRef tpu_buf,
       TpuMallocAndMemcpyHtoD(effective_src.data_ptr(), tpu_layout.element_type,
-                             tpu_layout.sizes));
+                             tpu_layout.sizes, /*backing_data=*/{},
+                             effective_src.storage().data_ptr().get()));
   if (transfer_sync_mode == TransferSyncMode::kIsolated) {
     // Block until the transfer completes, assign the buffer, and return without
     // touching any streams.

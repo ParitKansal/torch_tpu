@@ -36,9 +36,15 @@
 namespace torch_tpu::kiln::internal {
 namespace {
 
-void ValidateConstantBound(const llvm::APInt& val, bool is_unsigned,
-                           bool require_positive, std::string_view name) {
-  if (require_positive) {
+enum class Signedness {
+  kSigned,
+  kUnsigned,
+};
+
+void ValidateConstantBound(const llvm::APInt& val, Signedness signedness,
+                           IndexBounds bounds, std::string_view name) {
+  const bool is_unsigned = signedness == Signedness::kUnsigned;
+  if (bounds == IndexBounds::kPositive) {
     const bool is_positive =
         is_unsigned ? !val.isZero() : val.isStrictlyPositive();
     ABSL_CHECK(is_positive) << name << " must be positive";  // CRASH_OK
@@ -58,27 +64,29 @@ mlir::VectorType ToMlirVectorType(const Shape& shape) {
   return mlir::VectorType::get(shape.dims(), ToMlirType(shape.dtype()));
 }
 
-void ValidateI32IndexArg(const IndexArg& arg, bool require_positive,
+void ValidateI32IndexArg(const IndexArg& arg, IndexBounds bounds,
                          std::string_view name) {
   if (arg.IsInt()) {
     ValidateConstantBound(llvm::APInt(64, arg.AsInt(), /*isSigned=*/true),
-                          /*is_unsigned=*/false, require_positive, name);
+                          Signedness::kSigned, bounds, name);
   } else {
     Scalar s = arg.ToScalar();
     ABSL_CHECK_LE(s.dtype().GetIntOrFloatBitWidth(), 32u)  // CRASH_OK
         << name << " scalar bitwidth must be <= 32";
     if (auto const_op = unwrap(s).getDefiningOp<mlir::arith::ConstantOp>()) {
       if (auto attr = llvm::dyn_cast<mlir::IntegerAttr>(const_op.getValue())) {
-        ValidateConstantBound(attr.getValue(), s.dtype().IsUnsigned(),
-                              require_positive, name);
+        const Signedness signedness = s.dtype().IsUnsigned()
+                                          ? Signedness::kUnsigned
+                                          : Signedness::kSigned;
+        ValidateConstantBound(attr.getValue(), signedness, bounds, name);
       }
     }
   }
 }
 
-mlir::Value ToValidatedI32Value(const IndexArg& arg, bool require_positive,
+mlir::Value ToValidatedI32Value(const IndexArg& arg, IndexBounds bounds,
                                 std::string_view name) {
-  ValidateI32IndexArg(arg, require_positive, name);
+  ValidateI32IndexArg(arg, bounds, name);
   return unwrap(arg.ToScalar().ToI32());
 }
 
@@ -87,7 +95,7 @@ std::optional<Scalar> OptionalI32Scalar(const std::optional<IndexArg>& arg,
   if (!arg.has_value()) {
     return std::nullopt;
   }
-  ValidateI32IndexArg(*arg, /*require_positive=*/false, name);
+  ValidateI32IndexArg(*arg, IndexBounds::kNonNegative, name);
   return arg->ToScalar().ToI32();
 }
 

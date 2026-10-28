@@ -66,22 +66,24 @@ class Ref;
 namespace internal {
 
 struct DimDesc {
+  enum class Kind {
+    kAll,        // Full dimension (All)
+    kSlice,      // Range slice (dimension is kept even if the size is 1)
+    kCollapsed,  // Dimension is squeezed
+  };
+
   IndexArg offset = 0;
   IndexArg size = 0;
-  bool is_all = false;     // true for full dimension (All)
-  bool collapsed = false;  // true for scalar index (collapses dimension)
+  Kind kind = Kind::kAll;
 
   static DimDesc From(All) {
-    return DimDesc{.offset = 0, .size = 0, .is_all = true, .collapsed = false};
+    return DimDesc{.offset = 0, .size = 0, .kind = Kind::kAll};
   }
   static DimDesc From(const SliceDim& s) {
-    return DimDesc{.offset = s.offset,
-                   .size = s.size,
-                   .is_all = false,
-                   .collapsed = false};
+    return DimDesc{.offset = s.offset, .size = s.size, .kind = Kind::kSlice};
   }
   static DimDesc From(IndexArg s) {
-    return DimDesc{.offset = s, .size = 1, .is_all = false, .collapsed = true};
+    return DimDesc{.offset = s, .size = 1, .kind = Kind::kCollapsed};
   }
 };
 

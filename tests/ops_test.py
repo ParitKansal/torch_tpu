@@ -2639,6 +2639,7 @@ class TestOps(op_testing.OpInfoTestBase):
     )
 
   def test_linalg_vector_norm_other_dtypes(self):
+    # b/568044911: covers all dtypes, grad, and dynamism for vector norm.
     self.do_test_op(
         "linalg.vector_norm",
         exclude_dtypes=(torch.int4,),
@@ -3172,8 +3173,8 @@ class TestOps(op_testing.OpInfoTestBase):
   def test_polygamma(self):
     self.do_test_op(
         "polygamma",
-        # TODO(b/568080282): Fix aten::polygamma_ alias annotation error in
-        # torch.compile functionalization.
+        # Inplace polygamma_ has alias annotation issues in torch.compile
+        # (b/568080282).
         skip_if=lambda variant, _: (
             op_testing.is_compiled_mode()
             and variant == op_testing.OpVariant.INPLACE

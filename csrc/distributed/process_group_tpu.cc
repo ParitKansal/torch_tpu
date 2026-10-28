@@ -62,6 +62,7 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "c10/core/ScalarType.h"
 #include "c10/core/TensorOptions.h"
@@ -1958,8 +1959,7 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::experimental_send(
 
   int64_t src_device_id = addressable_device_id_;
   int64_t dst_device_id = member_device_ids_[dst_rank];
-  for (size_t i = 0; i < tensors.size(); ++i) {
-    const auto& tensor = tensors[i];
+  for (const auto& tensor : tensors) {
     // Extract the underlying hardware buffer from the tensor.
     TT_ASSIGN_OR_THROW(
         const DeviceBufferRef device_buffer,
@@ -1968,8 +1968,13 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::experimental_send(
                        device_buffer.AwaitBuffer());
 
     pjrt_buffers.push_back(pjrt_buffer);
+    int64_t seq;
+    {
+      absl::MutexLock lock(p2p_seq_mu_);
+      seq = send_seq_[{dst_rank, tag}]++;
+    }
     transfer_keys.push_back(
-        GetCrossHostTransferKey(src_device_id, dst_device_id, tag, i));
+        GetCrossHostTransferKey(src_device_id, dst_device_id, tag, seq));
   }
 
   // Initiate the cross-host send logic, which will block until
@@ -1991,14 +1996,18 @@ c10::intrusive_ptr<c10d::Work> ProcessGroupTpu::experimental_recv(
 
   int64_t src_device_id = member_device_ids_[src_rank];
   int64_t dst_device_id = addressable_device_id_;
-  for (size_t i = 0; i < tensors.size(); ++i) {
-    const auto& tensor = tensors[i];
+  for (const auto& tensor : tensors) {
     TT_ASSIGN_OR_THROW(auto xla_dtype,
                        ConvertTo<xla::PrimitiveType>(tensor.scalar_type()));
     xla::Shape xla_shape = xla::ShapeUtil::MakeShape(xla_dtype, tensor.sizes());
     recv_shapes.push_back(std::move(xla_shape));
+    int64_t seq;
+    {
+      absl::MutexLock lock(p2p_seq_mu_);
+      seq = recv_seq_[{src_rank, tag}]++;
+    }
     transfer_keys.push_back(
-        GetCrossHostTransferKey(src_device_id, dst_device_id, tag, i));
+        GetCrossHostTransferKey(src_device_id, dst_device_id, tag, seq));
   }
 
   // Initiate the receive process. This creates placeholder buffers and

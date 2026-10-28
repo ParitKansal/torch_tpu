@@ -85,6 +85,30 @@
 
 namespace torch_tpu {
 
+namespace internal {
+
+void RemoveShardingAnnotations(mlir::ModuleOp module) {
+  module->removeAttr("mhlo.spmd_parameters_shardings");
+  module->removeAttr("mhlo.spmd_output_sharding");
+  module.walk([](mlir::Operation* op) {
+    op->removeAttr("mhlo.sharding");
+    op->removeAttr("sdy.sharding");
+    op->removeAttr("sdy.sharding_rule");
+    if (auto func_op = mlir::dyn_cast<mlir::func::FuncOp>(op)) {
+      for (int i = 0; i < func_op.getNumArguments(); ++i) {
+        func_op.removeArgAttr(i, "mhlo.sharding");
+        func_op.removeArgAttr(i, "sdy.sharding");
+      }
+      for (int i = 0; i < func_op.getNumResults(); ++i) {
+        func_op.removeResultAttr(i, "mhlo.sharding");
+        func_op.removeResultAttr(i, "sdy.sharding");
+      }
+    }
+  });
+}
+
+}  // namespace internal
+
 namespace {
 
 // Returns a unique name for a custom kernel, based on the name, kwargs,
@@ -221,11 +245,6 @@ absl::Status SpecializeCustomMlirKernel(
       << diag_handler.ConsumeStatus().message();
 
   return absl::OkStatus();
-}
-
-void RemoveSpmdModuleShardings(mlir::ModuleOp module) {
-  module->removeAttr("mhlo.spmd_parameters_shardings");
-  module->removeAttr("mhlo.spmd_output_sharding");
 }
 
 absl::Status AddTpuPartitioningPasses(xla::HloModule* module,
@@ -392,7 +411,7 @@ absl::Status PartitionGlobalToLocal(
 
   new_module.erase();
 
-  RemoveSpmdModuleShardings(module);
+  internal::RemoveShardingAnnotations(module);
 
   return absl::OkStatus();
 }

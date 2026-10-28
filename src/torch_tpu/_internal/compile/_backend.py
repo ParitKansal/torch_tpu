@@ -40,6 +40,7 @@ import operator
 import pathlib
 import re
 import threading
+import time
 from typing import Any, TypeAlias, cast
 
 from absl import logging
@@ -339,13 +340,17 @@ def _serialization_context(
     })
   and remove the _cache_inference_info and generate_guards_expression
   patches. The bypass_autograd_cache_key flag makes try_load generate a
-  nonce cache_key on failure, so cache_info is set naturally.
+  nonce cache_key on failure, so cache_info is set naturally. With nonce keys
+  torch's save would again write one unread entry per compile per start, so
+  the switch must keep the local write suppressed (or wait for an upstream
+  fix).
   """
   if not enable:
     yield None
     return
 
   captured_entry: list[Any] = [None]
+  compile_start_ns = time.time_ns()
 
   with contextlib.ExitStack() as stack:
     stack.enter_context(
@@ -435,7 +440,9 @@ def _serialization_context(
             "cache_info",
             AOTAutogradCacheInfo(
                 cache_key=f"torchtpu_{graph_hash}",
-                start_time_ns=0,
+                # Makes forward_time_taken_ns of the in-memory entry the real
+                # compile time.
+                start_time_ns=compile_start_ns,
                 forward_symints=[],
             ),
         )
@@ -447,6 +454,20 @@ def _serialization_context(
       _autograd_cache.AOTAutogradCache.generate_guards_expression = (
           staticmethod(lambda *a, **kw: None)
       )
+      orig_save = _autograd_cache.AOTAutogradCache.save
+      if not has_cache_info:
+        # torch never computes a `torchtpu_` key, so nothing could read the
+        # entry back: keep it in memory for `.serialize()` instead of writing
+        # an unread file on every start (google-pytorch/torch_tpu#4892). The
+        # whole save is skipped: `entry.pre_save()` would copy the compiled
+        # artifact, which resolves an async compile on the compiling thread,
+        # and TorchTPU artifacts need no preparation before pickling. Caching
+        # precompile with no torch key is not supported (the save being skipped
+        # is what records its artifact).
+        def skip_save(key, entry, remote):  # pylint: disable=unused-argument
+          return None
+
+        _autograd_cache.AOTAutogradCache.save = staticmethod(skip_save)
       try:
         entry = orig_cache_inference_info(
             aot_config,
@@ -460,6 +481,7 @@ def _serialization_context(
         _autograd_cache.AOTAutogradCache.generate_guards_expression = (
             orig_guards
         )
+        _autograd_cache.AOTAutogradCache.save = staticmethod(orig_save)
 
       if not has_cache_info:
         object.__setattr__(aot_config, "cache_info", None)

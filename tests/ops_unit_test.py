@@ -2942,7 +2942,9 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
   ):
     """Tests that nn.BatchNorm2d running stats match the CPU after training.
 
-    Also tests that later steps do not compile again, although
+    Each step runs the backward too: autograd saves the running stats, so
+    updating them must not bump their version counters. Also tests that later
+    steps do not compile again, although
     `momentum=None` passes a new momentum (1 / num_batches_tracked) each step.
     The first two steps are warm-up: the first TPU step in a process can
     compile a one-off program.
@@ -2958,6 +2960,7 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
         step = torch.compile(bn, backend="tpu")
       for i, x in enumerate(inputs):
         output = step(x.to(device))
+        output.sum().backward()
         if on_tpu and i == 1:
           start_misses = torch.tpu._get_cache_misses()
       if on_tpu:
@@ -2966,12 +2969,16 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
         )
       # Inference uses the running stats.
       bn.eval()
+      with torch.no_grad():
+        eval_output = bn(inputs[0].to(device))
       return (
-          output,
+          output.detach(),
           bn.running_mean,
           bn.running_var,
           bn.num_batches_tracked,
-          bn(inputs[0].to(device)),
+          bn.weight.grad,
+          bn.bias.grad,
+          eval_output,
       )
 
     self.assert_close_tpu_vs_cpu(run_training)

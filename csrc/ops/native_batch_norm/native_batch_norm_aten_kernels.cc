@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
+#include "ATen/native/Resize.h"
 #include "absl/log/absl_log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -242,14 +243,34 @@ absl::Status TpuBatchNormTrainingUpdateStatsOut(
         /*momentum=*/mlir_inputs[3], eps, acc_dtype);
   };
 
-  return DispatchOpOut<kDynamicSize, 5>(
-      std::move(op_builder), inputs,
-      {out, save_mean, save_invstd, running_mean, running_variance},
-      {.out_dtypes = {input_dtype, acc_dtype, acc_dtype, running_mean_dtype,
-                      running_var_dtype},
-       .out_dims_list = {input.sizes(), features_dims, features_dims,
-                         features_dims, features_dims},
-       .op_param_cache_keys = std::move(param_keys)});
+  std::optional<DeviceBufferRefArray<5>> results;
+  TT_ASSIGN_OR_RETURN(
+      results,
+      (DispatchOp<kDynamicSize, 5>(
+          std::move(op_builder), inputs,
+          {.out_dtypes = {input_dtype, acc_dtype, acc_dtype, running_mean_dtype,
+                          running_var_dtype},
+           .out_dims_list = {input.sizes(), features_dims, features_dims,
+                             features_dims, features_dims},
+           .op_param_cache_keys = std::move(param_keys)})));
+  auto& [out_buf, save_mean_buf, save_invstd_buf, running_mean_buf,
+         running_var_buf] = *results;
+  auto assign_output = [](DeviceBufferRef buf, at::Tensor& tensor) {
+    at::native::resize_output(tensor, buf.dimensions());
+    return AssignBufferToAtTensor(std::move(buf), tensor);
+  };
+  TT_RETURN_IF_ERROR(assign_output(std::move(out_buf), out));
+  TT_RETURN_IF_ERROR(assign_output(std::move(save_mean_buf), save_mean));
+  TT_RETURN_IF_ERROR(assign_output(std::move(save_invstd_buf), save_invstd));
+  // Like PyTorch's CPU and CUDA kernels, update the running stats without
+  // bumping their version counters: autograd saves them for the backward.
+  TT_RETURN_IF_ERROR(AssignBufferToAtTensor(std::move(running_mean_buf),
+                                            running_mean,
+                                            /*enable_autodonation=*/false,
+                                            /*bump_version=*/false));
+  return AssignBufferToAtTensor(std::move(running_var_buf), running_variance,
+                                /*enable_autodonation=*/false,
+                                /*bump_version=*/false);
 }
 
 absl::StatusOr<DeviceBufferRefArray<3>> TpuBatchNorm(

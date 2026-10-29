@@ -468,7 +468,8 @@ absl::StatusOr<MlirOpResults<5>> BuildBatchNormTrainingAndUpdateStats(
 
   const mlir::RankedTensorType input_type = GetTensorTypeOrDie(input);
   const mlir::ElementType input_dtype = GetElementTypeOrDie(input);
-  int64_t num_features = input_type.getDimSize(kTorchFeaturesDimensionIndex);
+  const int64_t num_features =
+      input_type.getDimSize(kTorchFeaturesDimensionIndex);
   mlir::MlirOp weight =
       weight_opt ? *weight_opt
                  : MakeConstant(builder, 1.0, input_dtype, {num_features});

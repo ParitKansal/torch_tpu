@@ -2936,6 +2936,39 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
         pick(1, 2, to_float=True), rtol=1e-2, atol=1e-2
     )
 
+  @parameterized.parameters("native_batch_norm", "_native_batch_norm_legit")
+  def test_batch_norm_training_out_resizes_empty_outputs(self, op_name):
+    """Tests training-mode batch norm with empty out tensors to resize."""
+    c = 3
+    input_val = torch.randn(4, c, 5, 6)
+    weight = torch.randn(c)
+    bias = torch.randn(c)
+    running_mean = torch.randn(c)
+    running_var = torch.rand(c) + 0.5
+
+    def run_op(device):
+      mean = running_mean.clone().to(device)
+      var = running_var.clone().to(device)
+      out = torch.empty(0, device=device)
+      save_mean = torch.empty(0, device=device)
+      save_invstd = torch.empty(0, device=device)
+      getattr(torch.ops.aten, op_name).out(
+          input_val.to(device),
+          weight.to(device),
+          bias.to(device),
+          mean,
+          var,
+          True,  # training
+          0.3,  # momentum
+          1e-5,  # eps
+          out=out,
+          save_mean=save_mean,
+          save_invstd=save_invstd,
+      )
+      return out, save_mean, save_invstd, mean, var
+
+    self.assert_close_tpu_vs_cpu(run_op)
+
   @parameterized.product(momentum=[0.1, None], compiled=[False, True])
   def test_batch_norm_module_training_updates_running_stats(
       self, momentum, compiled

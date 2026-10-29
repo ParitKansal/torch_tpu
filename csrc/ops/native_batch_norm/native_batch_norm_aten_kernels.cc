@@ -25,7 +25,6 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
-#include "ATen/native/Resize.h"
 #include "absl/log/absl_log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -169,34 +168,18 @@ bool ShouldUpdateRunningStats(const at::Tensor& input,
   return training && running_mean && running_variance && input.numel() > 0;
 }
 
-// Allocates (out, save_mean, save_invstd) for the batch norm of `input`.
-// Validates `input` first, so no device buffers are allocated for it when it
-// is invalid.
-absl::StatusOr<std::tuple<at::Tensor, at::Tensor, at::Tensor>>
-MakeBatchNormOutputs(const at::Tensor& input) {
-  TT_RETURN_IF_ERROR(ValidateIsFloating(input, /*arg_name=*/"input"));
-  const auto acc_type = ToAccumulateType(input.scalar_type());
-  const Dimensions features_dims = {input.size(kTorchFeaturesDimensionIndex)};
-  TT_ASSIGN_OR_RETURN(
-      at::Tensor out,
-      MakeEmptyTensor(input.sizes(), input.scalar_type(), input.device()));
-  TT_ASSIGN_OR_RETURN(at::Tensor save_mean,
-                      MakeEmptyTensor(features_dims, acc_type, input.device()));
-  TT_ASSIGN_OR_RETURN(at::Tensor save_invstd,
-                      MakeEmptyTensor(features_dims, acc_type, input.device()));
-  return std::make_tuple(std::move(out), std::move(save_mean),
-                         std::move(save_invstd));
-}
-
 // Runs training-mode batch norm, and writes the updated running stats into
 // `running_mean` and `running_variance` in place, as PyTorch's CPU and CUDA
 // kernels do.
-absl::Status TpuBatchNormTrainingUpdateStatsOut(
+//
+// `outputs` holds (out, save_mean, save_invstd). A defined tensor is an out
+// tensor: it gets the result, resized if needed. An undefined one is set to a
+// new tensor holding the result.
+absl::Status TpuBatchNormTrainingUpdateStats(
     const at::Tensor& input, std::optional<at::Tensor> weight,
     std::optional<at::Tensor> bias, const at::Tensor& running_mean,
     const at::Tensor& running_variance, double momentum, double eps,
-    OpParamCacheKeys param_keys, at::Tensor& out, at::Tensor& save_mean,
-    at::Tensor& save_invstd) {
+    OpParamCacheKeys param_keys, std::array<at::Tensor, 3>& outputs) {
   TT_RETURN_IF_ERROR(ValidateIsFloating(input, /*arg_name=*/"input"));
   TT_ASSIGN_OR_RETURN(const auto input_dtype,
                       ConvertTo<mlir::ElementType>(input.scalar_type()));
@@ -243,34 +226,52 @@ absl::Status TpuBatchNormTrainingUpdateStatsOut(
         /*momentum=*/mlir_inputs[3], eps, acc_dtype);
   };
 
+  const std::array<mlir::ElementType, 5> out_dtypes = {
+      input_dtype, acc_dtype, acc_dtype, running_mean_dtype, running_var_dtype};
+  const std::array<absl::Span<const int64_t>, 5> out_dims_list = {
+      input.sizes(), features_dims, features_dims, features_dims,
+      features_dims};
+
+  // Like DispatchOpOut, donate the buffers of the tensors written in place
+  // (the running stats, and out tensors that alias an input) in eager mode.
+  // DispatchOpOut itself is not used, as it bumps the version counters.
+  const std::array<at::Tensor, 5> destinations = {
+      outputs[0], outputs[1], outputs[2], running_mean, running_variance};
+  std::vector<uint8_t> output_donated(destinations.size(), 0);
+  Indices donated_indices;
+  internal::AutoDonateInPlaceBuffers(destinations, out_dtypes, out_dims_list,
+                                     inputs, donated_indices, output_donated);
+  const bool autodonated = !donated_indices.empty();
+
   std::optional<DeviceBufferRefArray<5>> results;
-  TT_ASSIGN_OR_RETURN(
-      results,
-      (DispatchOp<kDynamicSize, 5>(
-          std::move(op_builder), inputs,
-          {.out_dtypes = {input_dtype, acc_dtype, acc_dtype, running_mean_dtype,
-                          running_var_dtype},
-           .out_dims_list = {input.sizes(), features_dims, features_dims,
-                             features_dims, features_dims},
-           .op_param_cache_keys = std::move(param_keys)})));
-  auto& [out_buf, save_mean_buf, save_invstd_buf, running_mean_buf,
-         running_var_buf] = *results;
-  auto assign_output = [](DeviceBufferRef buf, at::Tensor& tensor) {
-    at::native::resize_output(tensor, buf.dimensions());
-    return AssignBufferToAtTensor(std::move(buf), tensor);
-  };
-  TT_RETURN_IF_ERROR(assign_output(std::move(out_buf), out));
-  TT_RETURN_IF_ERROR(assign_output(std::move(save_mean_buf), save_mean));
-  TT_RETURN_IF_ERROR(assign_output(std::move(save_invstd_buf), save_invstd));
+  TT_ASSIGN_OR_RETURN(results,
+                      (DispatchOp<kDynamicSize, 5>(
+                          std::move(op_builder), inputs,
+                          {.out_dtypes = out_dtypes,
+                           .out_dims_list = out_dims_list,
+                           .op_param_cache_keys = std::move(param_keys),
+                           .donated_indices = std::move(donated_indices),
+                           .autodonated = autodonated})));
+  for (int i = 0; i < 3; ++i) {
+    if (outputs[i].defined()) {
+      TT_RETURN_IF_ERROR(internal::AssignBufferToOutput(
+          outputs[i], std::move((*results)[i]), output_donated[i]));
+    } else {
+      outputs[i] = MakeTensor(std::move((*results)[i]));
+    }
+  }
   // Like PyTorch's CPU and CUDA kernels, update the running stats without
   // bumping their version counters: autograd saves them for the backward.
-  TT_RETURN_IF_ERROR(AssignBufferToAtTensor(std::move(running_mean_buf),
-                                            running_mean,
-                                            /*enable_autodonation=*/false,
+  TT_RETURN_IF_ERROR(AssignBufferToAtTensor(std::move((*results)[3]),
+                                            running_mean, output_donated[3],
                                             /*bump_version=*/false));
-  return AssignBufferToAtTensor(std::move(running_var_buf), running_variance,
-                                /*enable_autodonation=*/false,
-                                /*bump_version=*/false);
+  TT_RETURN_IF_ERROR(AssignBufferToAtTensor(std::move((*results)[4]),
+                                            running_variance, output_donated[4],
+                                            /*bump_version=*/false));
+  if (autodonated) {
+    TT_RETURN_IF_ERROR(internal::RunPostponedMaterialization());
+  }
+  return absl::OkStatus();
 }
 
 absl::StatusOr<DeviceBufferRefArray<3>> TpuBatchNorm(
@@ -303,10 +304,10 @@ absl::Status TpuBatchNormOut(const at::Tensor& input,
                              at::Tensor& save_mean, at::Tensor& save_invstd) {
   if (ShouldUpdateRunningStats(input, running_mean, running_variance,
                                training)) {
-    return TpuBatchNormTrainingUpdateStatsOut(
+    std::array<at::Tensor, 3> outputs = {out, save_mean, save_invstd};
+    return TpuBatchNormTrainingUpdateStats(
         input, std::move(weight), std::move(bias), *running_mean,
-        *running_variance, momentum, eps, std::move(param_keys), out, save_mean,
-        save_invstd);
+        *running_variance, momentum, eps, std::move(param_keys), outputs);
   }
   TT_ASSIGN_OR_RETURN(auto p, PrepareBatchNormDispatch(
                                   input, weight, bias, running_mean,
@@ -442,14 +443,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> AtenNativeBatchNorm(
               if (ShouldUpdateRunningStats(
                       input, SanitizeOptionalTensor(running_mean),
                       SanitizeOptionalTensor(running_variance), training)) {
-                TT_ASSIGN_OR_THROW((auto [out, save_mean, save_invstd]),
-                                   MakeBatchNormOutputs(input));
-                TT_THROW_IF_ERROR(TpuBatchNormTrainingUpdateStatsOut(
+                std::array<at::Tensor, 3> outputs;
+                TT_THROW_IF_ERROR(TpuBatchNormTrainingUpdateStats(
                     input, SanitizeOptionalTensor(weight),
                     SanitizeOptionalTensor(bias), *running_mean,
                     *running_variance, momentum, eps, std::move(param_keys),
-                    out, save_mean, save_invstd));
-                return {out, save_mean, save_invstd};
+                    outputs));
+                return {outputs[0], outputs[1], outputs[2]};
               }
               TT_ASSIGN_OR_THROW(
                   (auto [output, mean, variance_inverse]),

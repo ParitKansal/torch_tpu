@@ -31,8 +31,10 @@ import torch
 from torch.testing._internal import common_methods_invocations
 from torch.utils import _pytree
 from torch_tpu._internal.utils import test_utils
+from tests import dynamism_test_utils
 from tests import goldens_pin
 from tests import op_testing
+from tests import seed_test_utils
 from tests import test_utils as tests_test_utils
 
 op_db = common_methods_invocations.op_db
@@ -706,6 +708,49 @@ class OpTestingTest(op_testing.OpInfoTestBase):
         compiled_fn(torch.ones(i))
 
     self.assertEqual(cnt.frame_count, num_subtests)
+
+
+class DynamismDenyListsTest(seed_test_utils.RepeatableTest):
+  """Tests for the dynamism op deny lists in dynamism_test_utils."""
+
+  _DENY_LISTS = {
+      "DYNAMISM_DENY_LISTS": dynamism_test_utils.DYNAMISM_DENY_LISTS,
+      "DYNAMISM_NOT_APPLICABLE_OPS": (
+          dynamism_test_utils.DYNAMISM_NOT_APPLICABLE_OPS
+      ),
+  }
+
+  def test_entries_are_known_ops(self):
+    # verify_op_supports_dynamism() matches OpInfo.name, so a misspelled or
+    # stale entry would silently stop skipping its op.
+    known_op_names = {op.name for op in op_testing._KNOWN_OPS}
+    for list_name, deny_lists in self._DENY_LISTS.items():
+      for reason, ops in deny_lists.items():
+        with self.subTest(deny_list=list_name, reason=reason):
+          self.assertEmpty(sorted(set(ops) - known_op_names))
+
+  def test_entries_have_valid_modes(self):
+    for list_name, deny_lists in self._DENY_LISTS.items():
+      for reason, ops in deny_lists.items():
+        for op_name, modes in ops.items():
+          with self.subTest(deny_list=list_name, reason=reason, op=op_name):
+            self.assertNotEmpty(modes)
+            self.assertContainsSubset(modes, dynamism_test_utils.ALL_MODES)
+
+  def test_deny_lists_are_disjoint(self):
+    not_applicable = {
+        (op_name, mode)
+        for ops in dynamism_test_utils.DYNAMISM_NOT_APPLICABLE_OPS.values()
+        for op_name, modes in ops.items()
+        for mode in modes
+    }
+    denied = {
+        (op_name, mode)
+        for ops in dynamism_test_utils.DYNAMISM_DENY_LISTS.values()
+        for op_name, modes in ops.items()
+        for mode in modes
+    }
+    self.assertEmpty(sorted(not_applicable & denied, key=str))
 
 
 if __name__ == "__main__":

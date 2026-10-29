@@ -16,12 +16,28 @@
 
 #include "csrc/common/aten_utils.h"
 
+#include "c10/core/SymInt.h"
+#include "c10/core/SymIntArrayRef.h"
+#include "c10/util/DimVector.h"
+#include "csrc/common/dimension_types.h"
 #include "csrc/common/status_test_utils.h"
 #include "gtest/gtest.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
 
 namespace torch_tpu {
 namespace {
+
+TEST(AtenUtilsTest, ConcreteSizeToDimensionsConvertsConcreteSizes) {
+  const c10::SymDimVector sizes = {c10::SymInt(2), c10::SymInt(0),
+                                   c10::SymInt(5)};
+  TT_ASSERT_OK_AND_ASSIGN(const Dimensions dims,
+                          ConcreteSizeToDimensions(sizes));
+  EXPECT_EQ(dims, (Dimensions{2, 0, 5}));
+
+  TT_ASSERT_OK_AND_ASSIGN(const Dimensions empty_dims,
+                          ConcreteSizeToDimensions(c10::SymIntArrayRef()));
+  EXPECT_EQ(empty_dims, Dimensions());
+}
 
 TEST(AtenUtilsTest, InferComputationDtypeFloatingPointAndComplex) {
   TT_ASSERT_OK_AND_ASSIGN(const mlir::ElementType bf16_comp,

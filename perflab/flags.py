@@ -74,6 +74,17 @@ FAKE_TENSOR_MODE = flags.DEFINE_bool(  # PYTHON_FLAG_OK=benchmark
     " fit in the HBM of a v7 TensorCore; see perflab/fake_memory.py.",
 )
 
+COUNT_FLOPS = flags.DEFINE_bool(  # PYTHON_FLAG_OK=benchmark
+    "count_flops",
+    False,
+    "Whether to count the model FLOPs of one step of each benchmark after it is"
+    " measured, and export them with the achieved TFLOP/s and model FLOPs"
+    " utilization (MFU). The FLOPs are counted on a second copy of the"
+    " benchmark built for CPU under FakeTensorMode, so counting neither touches"
+    " the measured device nor changes the measured times; see"
+    " perflab/flops.py.",
+)
+
 
 def _check_fake_tensor_mode(fake_tensor_mode: bool) -> bool:
   """Checks that `--fake_tensor_mode` is only set in CPU runs."""

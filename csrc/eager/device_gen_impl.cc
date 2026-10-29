@@ -146,11 +146,11 @@ absl::StatusOr<at::Tensor> CreateDeviceRngStateTensor(c10::Device device,
   std::vector<uint8_t> host_data_bytes(
       reinterpret_cast<const uint8_t*>(host_data),
       reinterpret_cast<const uint8_t*>(host_data) + sizeof(host_data));
-  const void* host_data_ptr = host_data_bytes.data();
   TT_ASSIGN_OR_RETURN(
       auto rng_state_buffer,
-      TpuMallocAndMemcpyHtoD(host_data_ptr, mlir::ElementType::UI64, {2},
-                             /*backing_data=*/std::move(host_data_bytes)));
+      HostToDeviceTransfer::FromBytesVector(std::move(host_data_bytes),
+                                            mlir::ElementType::UI64, {2})
+          .Run());
   RecordAsyncHostToDevice(rng_state_buffer);
   return MakeTensor(std::move(rng_state_buffer), device.index());
 }

@@ -25,7 +25,10 @@ torch_tpu_cc_library(
     name = "context",
     srcs = ["context.cc"],
     hdrs = ["context.h"],
-    visibility = ["//visibility:private"],
+    visibility = [
+        ":__pkg__",
+        "//csrc/internal/mosaic/kiln/mlir:__pkg__",
+    ],
     deps = [
         ":dtype",
         ":literal",

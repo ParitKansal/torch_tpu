@@ -29,7 +29,9 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "c10/core/ScalarType.h"
+#include "c10/core/SymIntArrayRef.h"
 #include "csrc/common/device_type.h"
+#include "csrc/common/dimension_types.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/to_string.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
@@ -67,6 +69,19 @@ inline absl::Status ValidateIsMatrix(const at::Tensor& tensor,
       << " argument to be a 2D tensor (matrix), got " << tensor.dim()
       << "D of shape " << ToString(tensor.sizes());
   return absl::OkStatus();
+}
+
+// Converts sizes that are expected to be concrete, such as the sizes of a real
+// (non-fake) tensor, to `Dimensions`. Returns an error if any size is symbolic,
+// as in the FakeTensors that torch.compile traces with.
+inline absl::StatusOr<Dimensions> ConcreteSizeToDimensions(
+    c10::SymIntArrayRef sym_dims) {
+  const std::optional<at::IntArrayRef> dims =
+      c10::asIntArrayRefSlowOpt(sym_dims);
+  TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=callers only pass real tensors' sizes
+      dims.has_value(), error::kInternal)
+      << "expected concrete sizes, got symbolic sizes " << ToString(sym_dims);
+  return Dimensions(dims->begin(), dims->end());
 }
 
 // Verifies that result_dtype matches or can be safely cast to the out tensor's

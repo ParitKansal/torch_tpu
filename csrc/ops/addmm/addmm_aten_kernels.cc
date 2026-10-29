@@ -74,7 +74,9 @@ absl::StatusOr<mlir::MlirOp> BuildAddmmShlo(
   const auto precision_config = mlir::stablehlo::PrecisionConfigAttr::get(
       &self_op.getContext(), {precision, precision});
 
-  mlir::MlirOp dot_result = stablehlo::Dot(mat1_op, mat2_op, precision_config);
+  mlir::MlirOp dot_result = stablehlo::Dot(
+      mat1_op, mat2_op, precision_config,
+      is_any_i64 ? std::nullopt : std::optional<mlir::ElementType>(out_dtype));
   if (is_any_i64) {
     dot_result = stablehlo::ConvertElementType(dot_result, out_dtype);
   }
@@ -87,6 +89,7 @@ absl::StatusOr<mlir::MlirOp> BuildAddmmShlo(
     return scaled_dot_result;
   }
 
+  self_op = stablehlo::ConvertElementType(self_op, out_dtype);
   TT_ASSIGN_OR_RETURN(mlir::MlirOp beta_tensor,
                       BroadcastIfNeeded(*beta_op, self_op));
   mlir::MlirOp scaled_input_result = stablehlo::Mul(self_op, beta_tensor);
@@ -122,17 +125,28 @@ absl::Status ValidateInputBroadcast(const at::Tensor& self,
 absl::StatusOr<mlir::ElementType> ValidateAddmmInputsAndGetOutputDtype(
     const at::Tensor& self, const at::Tensor& mat1, const at::Tensor& mat2,
     const MaybePromotedScalar& beta, const PromotedScalar& alpha,
-    at::ScalarType out_scalar_type) {
+    std::optional<at::ScalarType> out_dtype) {
+  const at::ScalarType out_scalar_type = out_dtype.value_or(self.scalar_type());
   TT_RET_CHECK(self.scalar_type() != at::kBool &&
                    mat1.scalar_type() != at::kBool &&
-                   mat2.scalar_type() != at::kBool &&
-                   beta.scalar().type() != at::kBool &&
-                   alpha.scalar().type() != at::kBool,
+                   mat2.scalar_type() != at::kBool,
                error::kInvalidArgument)
       << "boolean dtypes are not supported";
+  TT_RET_CHECK(mat1.scalar_type() == mat2.scalar_type(),
+               error::kInvalidArgument)
+      << "expected mat1 and mat2 to have the same dtype, got "
+      << ToString(mat1.scalar_type()) << " and "
+      << ToString(mat2.scalar_type());
+  if (!out_dtype.has_value()) {
+    TT_RET_CHECK(self.scalar_type() == mat1.scalar_type(),
+                 error::kInvalidArgument)
+        << "expected self and mat1 to have the same dtype, got "
+        << ToString(self.scalar_type()) << " and "
+        << ToString(mat1.scalar_type());
+  }
   TT_RET_CHECK(
       mat1.numel() == 0 || mat2.numel() == 0 ||
-          (mat1.scalar_type() != at::kInt && mat1.scalar_type() != at::kLong),
+          !c10::isIntegralType(mat1.scalar_type(), /*includeBool=*/false),
       error::kPythonNotImplementedError)
       << "not implemented for " << ToString(mat1.scalar_type());
   TT_RETURN_IF_ERROR(ValidateNotLowPrecisionFloat(out_scalar_type));
@@ -158,19 +172,38 @@ absl::StatusOr<mlir::ElementType> ValidateAddmmInputsAndGetOutputDtype(
                       _.SetOverride()
                           << "TorchTPU does not yet support the output dtype "
                           << ToString(out_scalar_type));
+  if (out_dtype.has_value()) {
+    TT_RET_CHECK(out_scalar_type == mat1.scalar_type() ||
+                     (out_scalar_type == at::kFloat &&
+                      (mat1.scalar_type() == at::kHalf ||
+                       mat1.scalar_type() == at::kBFloat16)),
+                 error::kInvalidArgument)
+        << "expected out_dtype to be the same as input dtype or float32 for "
+           "float16/bfloat16 inputs, got "
+        << ToString(out_scalar_type);
+    TT_RET_CHECK(self.scalar_type() == out_scalar_type ||
+                     self.scalar_type() == mat1.scalar_type(),
+                 error::kInvalidArgument)
+        << "expected self dtype to match either out_dtype ("
+        << ToString(out_scalar_type) << ") or mat1 dtype ("
+        << ToString(mat1.scalar_type()) << "), got "
+        << ToString(self.scalar_type());
+  }
   return output_dtype_mlir;
 }
 
 template <typename ReturnType, typename Dispatch4, typename Dispatch5>
 ReturnType DispatchAddmm(const at::Tensor& self, const at::Tensor& mat1,
                          const at::Tensor& mat2, MaybePromotedScalar beta,
-                         PromotedScalar alpha, at::ScalarType out_scalar_type,
+                         PromotedScalar alpha,
+                         std::optional<at::ScalarType> out_dtype,
                          OpParamCacheKeys& param_keys,
                          std::optional<bool> use_gelu, Dispatch4&& dispatch4,
                          Dispatch5&& dispatch5) {
   TT_ASSIGN_OR_RETURN(mlir::ElementType output_dtype_mlir,
                       ValidateAddmmInputsAndGetOutputDtype(
-                          self, mat1, mat2, beta, alpha, out_scalar_type));
+                          self, mat1, mat2, beta, alpha, out_dtype));
+  const at::ScalarType out_scalar_type = out_dtype.value_or(self.scalar_type());
   Dimensions output_dims_vec = {mat1.size(0), mat2.size(1)};
   const auto current_precision = GetAndAddPrecisionTo(param_keys);
 
@@ -251,10 +284,11 @@ absl::StatusOr<DeviceBufferRef> AddMm(
 
 absl::Status AddMmOut(const at::Tensor& self, const at::Tensor& mat1,
                       const at::Tensor& mat2, MaybePromotedScalar beta,
-                      PromotedScalar alpha, at::ScalarType out_scalar_type,
+                      PromotedScalar alpha,
+                      std::optional<at::ScalarType> out_dtype,
                       OpParamCacheKeys& param_keys, at::Tensor& out) {
   return DispatchAddmm<absl::Status>(
-      self, mat1, mat2, std::move(beta), std::move(alpha), out_scalar_type,
+      self, mat1, mat2, std::move(beta), std::move(alpha), out_dtype,
       param_keys, /*use_gelu=*/std::nullopt,
       [&]  // REF_CAPTURE_OK=called synchronously
       (auto op_builder, const at::Tensor& alpha_tensor, auto options) {
@@ -274,11 +308,11 @@ absl::Status AddMmOut(const at::Tensor& self, const at::Tensor& mat1,
 absl::Status AddMmActivationOut(const at::Tensor& self, const at::Tensor& mat1,
                                 const at::Tensor& mat2,
                                 MaybePromotedScalar beta, PromotedScalar alpha,
-                                bool use_gelu, at::ScalarType out_scalar_type,
-                                OpParamCacheKeys& param_keys, at::Tensor& out) {
+                                bool use_gelu, OpParamCacheKeys& param_keys,
+                                at::Tensor& out) {
   return DispatchAddmm<absl::Status>(
-      self, mat1, mat2, std::move(beta), std::move(alpha), out_scalar_type,
-      param_keys, use_gelu,
+      self, mat1, mat2, std::move(beta), std::move(alpha),
+      /*out_dtype=*/std::nullopt, param_keys, use_gelu,
       [&]  // REF_CAPTURE_OK=called synchronously
       (auto op_builder, const at::Tensor& alpha_tensor, auto options) {
         return DispatchOpOut<4>(std::move(op_builder),
@@ -311,8 +345,9 @@ at::Tensor& AtenAddmmOut(const at::Tensor& self, const at::Tensor& mat1,
             << torch_tpu::ToString(self.scalar_type()) << " vs "
             << torch_tpu::ToString(out.scalar_type());
         TT_THROW_IF_ERROR(AddMmOut(self, mat1, mat2, std::move(promoted_beta),
-                                   std::move(promoted_alpha), out.scalar_type(),
-                                   param_keys, out));
+                                   std::move(promoted_alpha),
+                                   /*out_dtype=*/std::nullopt, param_keys,
+                                   out));
         return out;
       });
 }
@@ -334,10 +369,9 @@ at::Tensor& AtenAddmmActivationOut(const at::Tensor& self,
             << "expected input and out tensors to have the same dtype, got "
             << torch_tpu::ToString(self.scalar_type()) << " vs "
             << torch_tpu::ToString(out.scalar_type());
-        TT_THROW_IF_ERROR(
-            AddMmActivationOut(self, mat1, mat2, std::move(promoted_beta),
-                               std::move(promoted_alpha), use_gelu,
-                               out.scalar_type(), param_keys, out));
+        TT_THROW_IF_ERROR(AddMmActivationOut(
+            self, mat1, mat2, std::move(promoted_beta),
+            std::move(promoted_alpha), use_gelu, param_keys, out));
         return out;
       });
 }

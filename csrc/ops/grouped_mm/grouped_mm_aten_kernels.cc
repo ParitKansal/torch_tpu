@@ -46,7 +46,6 @@
 #include "csrc/ops/op_builder_utils.h"
 #include "csrc/ops/op_names.h"
 #include "csrc/ops/precision_context.h"
-#include "csrc/ops/resize/resize_aten_kernels.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Types.h"
@@ -1086,10 +1085,8 @@ at::Tensor& AtenScaledGroupedMmV2Out(
         TT_THROW_IF_ERROR(
             ValidateOutDtype(out, out_dtype.value_or(self.scalar_type()),
                              /*allow_out_dtype_cast=*/false));
-        TT_THROW_IF_ERROR(
-            ResizeTensorIfShapeDiffers(out, result_buffer.dimensions()));
-        TT_THROW_IF_ERROR(
-            AssignBufferToAtTensor(std::move(result_buffer), out));
+        TT_THROW_IF_ERROR(internal::AssignBufferToOutput(
+            out, std::move(result_buffer), /*enable_autodonation=*/false));
         return out;
       });
 }

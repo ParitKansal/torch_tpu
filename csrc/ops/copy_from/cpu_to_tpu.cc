@@ -85,9 +85,10 @@ absl::Status CopyCpuToTpu(const at::Tensor& src, const at::Tensor& dest,
   // host buffer should be kept alive during the transfer if it's pinned.
   TT_ASSIGN_OR_RETURN(
       DeviceBufferRef tpu_buf,
-      TpuMallocAndMemcpyHtoD(effective_src.data_ptr(), tpu_layout.element_type,
-                             tpu_layout.sizes, /*backing_data=*/{},
-                             effective_src.storage().data_ptr().get()));
+      HostToDeviceTransfer::FromTensor(
+          effective_src.data_ptr(), effective_src.storage().data_ptr().get(),
+          tpu_layout.element_type, tpu_layout.sizes)
+          .Run());
   if (transfer_sync_mode == TransferSyncMode::kIsolated) {
     // Block until the transfer completes, assign the buffer, and return without
     // touching any streams.

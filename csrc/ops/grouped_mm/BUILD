@@ -43,7 +43,6 @@ torch_tpu_cc_library(
         "//csrc/ops:precision_context",
         "//csrc/ops/index_select",
         "//csrc/ops/macros:kernel",
-        "//csrc/ops/resize:resize_aten_kernels",
         "//shims/torch:aten_headers",
         "//shims/torch:torch_headers",
         "//shims/torch/c10/util:base_headers",

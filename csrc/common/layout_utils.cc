@@ -26,9 +26,37 @@
 #include "csrc/common/dimension_types.h"
 #include "csrc/common/dtype.h"
 #include "csrc/common/error_utils.h"
+#include "csrc/common/to_string.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
 
 namespace torch_tpu {
+namespace {
+
+int64_t FindFp4PackedDim(const at::Tensor& tensor) {
+  const int64_t rank = tensor.dim();
+  if (rank == 0) {
+    return -1;
+  }
+  if (tensor.stride(rank - 1) != 1) {
+    for (int64_t d = 0; d < rank - 1; ++d) {
+      if (tensor.stride(d) == 1 && tensor.size(d) > 1) {
+        return d;
+      }
+    }
+    return -1;
+  }
+  if (tensor.size(rank - 1) == 1) {
+    return rank - 1;
+  }
+  for (int64_t d = 0; d < rank - 1; ++d) {
+    if (tensor.size(d) == 1 && tensor.stride(d) == 1) {
+      return d;
+    }
+  }
+  return rank - 1;
+}
+
+}  // namespace
 
 absl::StatusOr<TpuLayout> ResolveTpuLayout(const at::Tensor& tensor) {
   const auto scalar_type = tensor.scalar_type();
@@ -44,10 +72,10 @@ absl::StatusOr<TpuLayout> ResolveTpuLayout(const at::Tensor& tensor) {
     // float4_e2m1fn_x2 dtype). For StableHLO, we need to expose the layout
     // in terms of individual unpacked FP4 elements.
     //
-    // 1. Double the size of the last (packed) dimension because each packed
-    //    element contains 2 FP4 values.
-    // 2. Double the strides of all outer dimensions to maintain correct
-    //    byte offsets now that the inner dimension size has doubled.
+    // 1. Double the size of the packed (stride-1) dimension because each
+    //    packed element contains 2 FP4 values.
+    // 2. Double the strides of all other dimensions to maintain correct
+    //    element offsets now that the packed dimension size has doubled.
     // 3. Double the storage offset to convert it from packed element offset
     //    to unpacked element offset.
     TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=PyTorch core rejects 0D FP4 tensors
@@ -55,18 +83,17 @@ absl::StatusOr<TpuLayout> ResolveTpuLayout(const at::Tensor& tensor) {
         !sizes.empty(), error::kInvalidArgument)
         << "expected float4_e2m1fn_x2 tensors to be at least 1-dimensional, "
            "got 0-dimensional";
-    sizes.back() *= 2;
-    for (size_t i = 0; i + 1 < strides.size(); ++i) {
-      strides[i] *= 2;
+    const int64_t packed_dim = FindFp4PackedDim(tensor);
+    TT_RET_CHECK(packed_dim >= 0, error::kInvalidArgument)
+        << "expected packed dimension to be contiguous (stride 1) for "
+           "float4_e2m1fn_x2 view, got strides "
+        << ToString(strides);
+    sizes[packed_dim] *= 2;
+    for (size_t i = 0; i < strides.size(); ++i) {
+      if (static_cast<int64_t>(i) != packed_dim) {
+        strides[i] *= 2;
+      }
     }
-    TT_RET_CHECK(
-        strides.back() == 1,
-        error::kInvalidArgument)  // ERROR_COV_INFEASIBLE=Utility not yet
-                                  // reachable from Python.
-        << "expected packed dimension to be "
-           "contiguous (stride 1) for "
-           "float4_e2m1fn_x2 view, got stride "
-        << strides.back();
     offset *= 2;
   }
   return TpuLayout{std::move(sizes), std::move(strides), offset, dtype};

@@ -566,6 +566,8 @@ presubmit {
     suppression_regexp:
       # Allow suppression with this marker.
       "\\bLEADING_COLONS_OK\\b|"
+      # Allow leading colons on using declarations at namespace scope.
+      "^using\\b|"
       # Ignore occurrences in comments.
       "//.*::(absl|absl_testing|std|proto2|testing|llvm|mlir|pjrt|xla)::"
     failure_message:

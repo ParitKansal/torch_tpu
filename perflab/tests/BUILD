@@ -170,6 +170,29 @@ torch_tpu_py_test(
 )
 
 torch_tpu_py_test(
+    name = "flops_test",
+    srcs = ["flops_test.py"],
+    tags = [
+        "nomsan",  # 3p 'py/torch' error: use-of-uninitialized-value in reduced_float_type_copy
+    ],
+    deps = [
+        "//perflab:context",
+        "//perflab:discovery",
+        "//perflab:flops",
+        "//perflab:metrics",
+        "//perflab:registry",
+        "//perflab:step_lib",
+        "//perflab:target",
+        "//perflab:torch_device_ops",
+        "//perflab/steps",
+        "//shims/absl_py/testing:absltest",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+        "//tests:seed_test_utils",
+    ],
+)
+
+torch_tpu_py_test(
     name = "measure_test",
     srcs = ["measure_test.py"],
     deps = [
@@ -191,6 +214,7 @@ torch_tpu_py_test(
         "//perflab:target",
         "//shims/absl_py/testing:absltest",
         "//shims/absl_py/testing:flagsaver",
+        "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//tests:seed_test_utils",
     ],

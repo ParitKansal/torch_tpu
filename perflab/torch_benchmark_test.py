@@ -27,6 +27,9 @@ Environment & Flags:
                        that building it fits in the HBM of a v7 TensorCore;
                        only valid with BENCHMARK_PLATFORM=cpu; also skips the
                        weights cache dir                       (default: false)
+  --count_flops        after measuring each case, count the model FLOPs of a
+                       step on a fake CPU copy and export TFLOP/s and MFU
+                                                               (default: false)
 """
 
 import contextlib
@@ -45,6 +48,7 @@ from perflab import context as context_lib
 from perflab import discovery as discovery_lib
 from perflab import fake_memory
 from perflab import flags as flags_lib
+from perflab import flops as flops_lib
 from perflab import measure as measure_lib
 from perflab import metrics as metrics_lib
 from perflab import mode as mode_lib
@@ -203,6 +207,17 @@ class BenchmarkTest(
         )
     except target_lib.UnsupportedBenchmark as e:
       self.skipTest(f"{spec.name}: {e}")
+
+    if flags_lib.COUNT_FLOPS.value:
+      # After measuring and outside the run mode, so that counting changes
+      # neither the measured times nor the state of the measured device.
+      flop_count = flops_lib.count_step_flops(spec, ctx.run_scope)
+      if flop_count is not None:
+        metrics.model_flops_per_step = float(flop_count.total)
+        metrics.peak_flops_per_second = target_lib.peak_flops_per_device(target)
+        flops_lib.check_utilization(
+            f"{spec.name}_{mode.value}", metrics.metric_map()
+        )
 
     logging.info("Metrics for %s_%s:\n%s", spec.name, mode.value, metrics)
     self._assert_measured(metrics)

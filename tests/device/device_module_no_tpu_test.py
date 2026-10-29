@@ -50,7 +50,7 @@ class NoTpuDeviceModuleTest(
   def test_get_device_name_returns_none_when_tpu_unrecognized(self):
     self.assertIsNone(torch.tpu.get_device_name())
 
-  @parameterized.parameters(*hardware._TPU_SPEC_BY_PCI_DEVICE_ID.values())
+  @parameterized.parameters(*hardware.TpuSpec.specs_by_pci_device_id().values())
   def test_get_device_name_uses_tpu_spec(self, tpu_spec):
     with mock.patch.object(hardware, "get_tpu_spec", return_value=tpu_spec):
       self.assertEqual(torch.tpu.get_device_name(), tpu_spec.name)

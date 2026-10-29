@@ -19,36 +19,175 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
+#include "absl/base/nullability.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "csrc/common/context_manager.h"
+#include "csrc/common/context_states.h"
+#include "csrc/common/dimension_types.h"
+#include "csrc/common/utils.h"
 #include "csrc/eager/device_buffer.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
 #include "xla/future.h"
+#include "xla/layout.h"
+#include "xla/pjrt/pjrt_client.h"
 #include "xla/xla_data.pb.h"
 
 namespace torch_tpu {
 
-// Allocates a TPU buffer of the given dimensions and element type, and copies
-// the data from the host buffer into it.
-// This is always non-blocking; the returned DeviceBufferRef can be used to
-// track the transfer's completion.
-// If backing_data is provided, it is used to keep the host data alive until the
-// transfer completes. If backing_data is not provided, the host data must
-// remain valid and unchanged until the transfer completes.
-absl::StatusOr<DeviceBufferRef> TpuMallocAndMemcpyHtoD(
-    const void* host_data, mlir::ElementType element_type,
-    absl::Span<const int64_t> dimensions,
-    std::vector<uint8_t> backing_data = {}, const void* pinned_ptr = nullptr);
+// A host-to-device transfer.
+class HostToDeviceTransfer {
+ public:
+  // Defines a host-to-device transfer from a zero-filled buffer.
+  // Constructs a bytes vector of the required size and calls FromBytesVector.
+  static HostToDeviceTransfer FromZeroes(mlir::ElementType element_type,
+                                         absl::Span<const int64_t> dimensions);
 
-// Copies the data from the device directly into the provided host buffer.
-// This is always non-blocking; the future may be awaited to make this blocking.
-xla::Future<void> TpuMemcpyDtoHDirect(const DeviceBufferRef& buffer_ref,
-                                      void* dst_ptr,
-                                      const void* dst_pinned_ptr = nullptr);
+  // Defines a host-to-device transfer from a tensor's data pointer and storage
+  // pointer.
+  // If the element type is FP4E2M1FN, the tensor data will be unpacked and will
+  // delegate to FromBytesVector.
+  // If tensor_storage_ptr is a pinned pointer, it will be used to keep the
+  // host data alive until the transfer completes.
+  static HostToDeviceTransfer FromTensor(
+      const void* absl_nonnull tensor_data_ptr,
+      const void* absl_nonnull tensor_storage_ptr,
+      mlir::ElementType element_type, absl::Span<const int64_t> dimensions);
+
+  // Defines a host-to-device transfer from a bytes vector. The backing bytes
+  // are kept alive until the transfer completes.
+  static HostToDeviceTransfer FromBytesVector(
+      std::vector<uint8_t> backing_data, mlir::ElementType element_type,
+      absl::Span<const int64_t> dimensions);
+
+  // Starts the transfer, and returns the DeviceBufferRef that will hold the
+  // transferred data.
+  // Idempotent; repeated calls will return the same DeviceBufferRef.
+  absl::StatusOr<DeviceBufferRef> Run();
+
+ private:
+  // Private constructor. Use static methods to create HostToDevice objects.
+  explicit HostToDeviceTransfer(const void* host_data,
+                                const void* host_pinned_ptr,
+                                mlir::ElementType element_type,
+                                absl::Span<const int64_t> dimensions,
+                                std::vector<uint8_t> backing_data)
+      : host_data_(host_data),
+        host_pinned_ptr_(host_pinned_ptr),
+        element_type_(element_type),
+        dimensions_(CopyIntVector(dimensions)),
+        backing_data_(std::move(backing_data)),
+        layout_(GetContextState<LayoutContextState>()) {}
+
+  // Helper function, common across multiple factories; unpacks FP4E2M1FN data
+  // before construction.
+  static std::vector<uint8_t> MakeUnpackedFp4(
+      const void* host_data, absl::Span<const int64_t> dimensions);
+
+  // The host data to be transferred. This will be nullptr if and only if
+  // backing_data_ is non-empty.
+  const void* host_data_;
+  // The pinned memory pointer, if one is provided. This is used to keep the
+  // host data alive until the transfer completes.
+  const void* absl_nullable host_pinned_ptr_ = nullptr;
+  // The element type of the data to be transferred.
+  mlir::ElementType element_type_;
+  // The dimensions of the data to be transferred.
+  Dimensions dimensions_;
+  // The backing data for the host data, if one is provided.
+  std::vector<uint8_t> backing_data_;
+  // The DeviceBufferRef that holds the transferred data.
+  std::optional<DeviceBufferRef> device_buffer_ref_ = std::nullopt;
+  // The layout pulled from the context state. This is determined when the
+  // transfer is defined, **not** when it is run.
+  std::optional<std::shared_ptr<const xla::Layout>> layout_ = std::nullopt;
+};
+
+// A device-to-host transfer.
+class DeviceToHostTransfer {
+ public:
+  // Defines a device-to-host transfer into a tensor. The bytes will be written
+  // into tensor_data_ptr (which may include an offset); storage_data_ptr is
+  // used to identify pinned memory and keep it alive until the transfer
+  // completes. If the tensor is not in pinned memory, the caller is responsible
+  // for keeping the storage alive until the transfer completes.
+  static DeviceToHostTransfer IntoTensor(
+      DeviceBufferRef buffer_ref, void* absl_nonnull tensor_data_ptr,
+      const void* absl_nonnull storage_data_ptr);
+
+  // Defines a device-to-host transfer into a byte buffer. The caller is
+  // responsible for allocating a buffer of sufficient size to hold the data,
+  // and for keeping it alive until the transfer completes.
+  static DeviceToHostTransfer IntoBytes(DeviceBufferRef buffer_ref,
+                                        void* absl_nonnull host_bytes_ptr);
+
+  // Starts the transfer, or schedules it to run immediately after the buffer
+  // materialization completes. Returns a future that will be set when the
+  // transfer completes.
+  // Idempotent; repeated calls will return the same future.
+  xla::Future<> Run();
+
+ private:
+  // Private constructor. Use static methods to create DeviceToHostTransfer
+  // objects. dst_ptr is the final write destination; dst_pinned_ptr is the
+  // storage pointer if one is provided through IntoTensor.
+  explicit DeviceToHostTransfer(DeviceBufferRef buffer_ref,
+                                void* absl_nonnull dst_ptr,
+                                const void* absl_nullable dst_pinned_ptr);
+
+  // Heap-allocated memory to hold state for the transfer. This is passed to
+  // callback functions as the transfer progresses.
+  struct DeviceToHostTransferImpl {
+    // The device-side data being transferred.
+    DeviceBufferRef buffer_ref;
+    // If the transfer data type is FP4E2M1FN, this buffer will be used to
+    // store the unpacked data on host, after which it will be packed and copied
+    // to the destination pointer.
+    std::vector<uint8_t> fp4_receiver;
+    // The final destination pointer for the transfer.
+    void* dst_ptr = nullptr;
+    // The pinned memory pointer if one is provided through IntoTensor.
+    const void* dst_pinned_ptr = nullptr;
+    // The promise to be set when the transfer completes (or fails).
+    xla::Promise<void> promise;
+  };
+
+  // Verifies that the materialization of the buffer_ref succeeded.
+  // If ready_status is not ok, or if a valid, non-deleted PjRtBuffer cannot be
+  // obtained, returns the error. Otherwise, returns a non-null, non-deleted
+  // PjRtBuffer*.
+  static absl::StatusOr<xla::PjRtBuffer* absl_nonnull> VerifyMaterialization(
+      absl::Status ready_status, const DeviceToHostTransferImpl& impl);
+
+  // A callback invoked when materialization has provided a PjRtBuffer to copy
+  // from. This will start the transfer using ToLiteral and schedule the
+  // callback OnToLiteralReady.
+  static void OnTransferReady(
+      absl::Status ready_status,
+      absl_nonnull std::unique_ptr<DeviceToHostTransferImpl> impl);
+
+  // A callback invoked when the PjRtBuffer has been copied to host memory.
+  // This will then:
+  //   1. Pack FP4 data if necessary.
+  //   2. Format the transfer error using AdaptXlaError.
+  //   3. Set the chained promise.
+  //   4. Free the impl object, dropping the reference to the device buffer.
+  static void OnToLiteralReady(
+      absl::Status to_literal_status,
+      absl_nonnull std::unique_ptr<DeviceToHostTransferImpl> impl);
+
+  // The implementation state for the transfer. If this is null, the transfer
+  // has already started and future_ can be used.
+  absl_nullable std::unique_ptr<DeviceToHostTransferImpl> impl_;
+
+  // The future that will be set when the transfer completes.
+  xla::Future<void> future_;
+};
 
 // Owns a prepared PJRT raw buffer alias and its underlying DeviceBufferRef for
 // zero-copy asynchronous DMA transfers.

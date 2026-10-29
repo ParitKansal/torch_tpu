@@ -25,23 +25,21 @@
 #include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/base/nullability.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/absl_log.h"
 #include "absl/log/absl_vlog_is_on.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/str_join.h"
 #include "absl/types/span.h"
-#include "csrc/common/context_manager.h"
-#include "csrc/common/context_states.h"
 #include "csrc/common/dtype.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/eager/device_buffer.h"
+#include "csrc/eager/device_buffer_utils.h"
 #include "csrc/eager/host_allocator.h"
 #include "csrc/pjrt/pjrt_utils.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
-#include "tsl/profiler/lib/traceme.h"
 #include "xla/future.h"
 #include "xla/layout.h"
 #include "xla/literal.h"
@@ -52,7 +50,6 @@
 #include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_executable.h"
-#include "xla/primitive_util.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/xla_data.pb.h"
@@ -112,192 +109,130 @@ void ValidateFp4Dimensions(absl::Span<const int64_t> dimensions) {
 
 }  // namespace
 
-// TODO(bawilson): refactor this to simplify
-absl::StatusOr<DeviceBufferRef> TpuMallocAndMemcpyHtoD(
-    const void* host_data, mlir::ElementType element_type,
-    absl::Span<const int64_t> dimensions, std::vector<uint8_t> backing_data,
-    const void* pinned_ptr) {
-  tsl::profiler::TraceMe trace("TpuMallocAndMemcpyHtoD");
-  if (!backing_data.empty()) {
-    TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=not visible to Python
-        backing_data.data() == host_data, error::kInvalidArgument)
-        << "expected backing data pointer to be " << host_data << ", got "
-        << backing_data.data();
-  }
-
-  if (element_type == mlir::ElementType::F4E2M1FN) {
-    ValidateFp4Dimensions(dimensions);
-  }
-
+HostToDeviceTransfer HostToDeviceTransfer::FromZeroes(
+    mlir::ElementType element_type, absl::Span<const int64_t> dimensions) {
   const xla::PrimitiveType type = ConvertTo<xla::PrimitiveType>(element_type);
-  ABSL_VLOG(1) << "[TpuMallocAndMemcpyHtoD INTERNAL ENTRY] host_data_is_null: "
-               << (host_data == nullptr) << ", type: "
-               << xla::primitive_util::LowercasePrimitiveTypeName(type)
-               << ", dimensions: [" << absl::StrJoin(dimensions, ",") << "]";
+  size_t buffer_size_bytes =
+      xla::ShapeUtil::ByteSizeOf(xla::ShapeUtil::MakeShape(type, dimensions));
+  std::vector<uint8_t> backing_data(buffer_size_bytes, 0);
+  return FromBytesVector(std::move(backing_data), element_type, dimensions);
+}
+
+std::vector<uint8_t> HostToDeviceTransfer::MakeUnpackedFp4(
+    const void* host_data, absl::Span<const int64_t> dimensions) {
+  ValidateFp4Dimensions(dimensions);
+  int64_t num_elements = 1;
+  for (const int64_t dim : dimensions) {
+    num_elements *= dim;
+  }
+  return UnpackFp4(static_cast<const uint8_t*>(host_data), num_elements);
+}
+
+HostToDeviceTransfer HostToDeviceTransfer::FromTensor(
+    const void* absl_nonnull tensor_data_ptr,
+    const void* absl_nonnull tensor_storage_ptr, mlir::ElementType element_type,
+    absl::Span<const int64_t> dimensions) {
+  if (element_type == mlir::ElementType::F4E2M1FN) {
+    std::vector<uint8_t> backing_data =
+        MakeUnpackedFp4(tensor_data_ptr, dimensions);
+    return HostToDeviceTransfer::FromBytesVector(std::move(backing_data),
+                                                 element_type, dimensions);
+  }
+  return HostToDeviceTransfer(tensor_data_ptr, tensor_storage_ptr, element_type,
+                              dimensions,
+                              /*backing_data=*/{});
+}
+
+HostToDeviceTransfer HostToDeviceTransfer::FromBytesVector(
+    std::vector<uint8_t> backing_data, mlir::ElementType element_type,
+    absl::Span<const int64_t> dimensions) {
+  return HostToDeviceTransfer(nullptr, nullptr, element_type, dimensions,
+                              std::move(backing_data));
+}
+
+absl::StatusOr<DeviceBufferRef> HostToDeviceTransfer::Run() {
+  if (device_buffer_ref_.has_value()) {
+    // Transfer is already started.
+    return device_buffer_ref_.value();
+  }
+
+  if (absl::c_find(dimensions_, 0) != dimensions_.end()) {
+    // If any dimension is zero, the buffer size is zero. In this case, don't
+    // actually copy any data; just create an empty DeviceBufferRef.
+    TT_ASSIGN_OR_RETURN(
+        device_buffer_ref_,
+        CreateEmptyDeviceBufferRef(std::move(dimensions_), element_type_));
+    return device_buffer_ref_.value();
+  }
 
   TT_ASSIGN_OR_RETURN(xla::PjRtClient* const client, GetPjRtClient());
   TT_ASSIGN_OR_RETURN(xla::PjRtDevice* const device, GetPjRtDevice());
 
-  int64_t num_elements = 1;
-  if (dimensions.empty() && type != xla::TUPLE) {
-    // Do nothing.
-  } else {
-    TT_ASSIGN_OR_RETURN(num_elements, NumElements(dimensions));
-  }
-
-  ABSL_VLOG(1) << "[TpuMallocAndMemcpyHtoD INTERNAL] Getting default memory "
-                  "space for device: "
-               << device->DebugString();
-  TT_ASSIGN_OR_RETURN(xla::PjRtMemorySpace* const memory_space,
-                      GetDefaultMemorySpace(device));
-  ABSL_VLOG(1) << "[TpuMallocAndMemcpyHtoD INTERNAL] Got memory space: "
-               << memory_space->DebugString();
-
+  // Get the parameters for the PjRtBuffer to be created.
+  const xla::PrimitiveType type = ConvertTo<xla::PrimitiveType>(element_type_);
   xla::PjRtClient::HostBufferSemantics semantics =
       xla::PjRtClient::HostBufferSemantics::kImmutableUntilTransferCompletes;
-  const void* effective_host_data = host_data;
-
-  if (host_data != nullptr && element_type == mlir::ElementType::F4E2M1FN) {
-    // Unpack FP4 data from host_data into backing_data and use that as the
-    // effective_host_data.
-    backing_data =
-        UnpackFp4(static_cast<const uint8_t*>(host_data), num_elements);
-    effective_host_data = backing_data.data();
-  } else if (host_data == nullptr && num_elements > 0) {
-    size_t buffer_size_bytes =
-        xla::ShapeUtil::ByteSizeOf(xla::ShapeUtil::MakeShape(type, dimensions));
-    if (buffer_size_bytes > 0) {
-      ABSL_VLOG(1) << "[TpuMallocAndMemcpyHtoD INTERNAL] host_data is nullptr, "
-                      "num_elements > 0. Creating temporary zeroed host buffer "
-                      "of size "
-                   << buffer_size_bytes << " bytes.";
-      backing_data.clear();
-      backing_data.resize(buffer_size_bytes, 0);
-      effective_host_data = backing_data.data();
-    } else {
-      ABSL_VLOG(1)
-          << "[TpuMallocAndMemcpyHtoD INTERNAL] host_data is nullptr, "
-             "num_elements > 0, but calculated byte size is 0. Passing "
-             "nullptr as effective_host_data.";
-    }
-  }
-
-  ABSL_VLOG(1) << "[TpuMallocAndMemcpyHtoD INTERNAL] Calling "
-                  "client->BufferFromHostBuffer with"
-               << " effective_host_data_is_null: "
-               << (effective_host_data == nullptr) << ", type: "
-               << xla::primitive_util::LowercasePrimitiveTypeName(type)
-               << ", dimensions: [" << absl::StrJoin(dimensions, ",") << "]"
-               << ", semantics: " << static_cast<int>(semantics);
-
+  TT_ASSIGN_OR_RETURN(xla::PjRtMemorySpace* const memory_space,
+                      GetDefaultMemorySpace(device));
   const xla::Layout* const layout_ptr =
-      GetContextState<LayoutContextState>().value_or(nullptr).get();
+      layout_.has_value() ? layout_->get() : nullptr;
 
-  bool should_hold =
-      (host_data != nullptr && pinned_ptr != nullptr && backing_data.empty());
-
+  // Start the transfer; this produces a PjRtBuffer that will contain the
+  // transferred data.
+  const void* host_data =
+      (backing_data_.empty() ? host_data_ : backing_data_.data());
   TT_ASSIGN_OR_RETURN(
       std::unique_ptr<xla::PjRtBuffer> buffer,
       AdaptXlaError(
           client->BufferFromHostBuffer(
-              effective_host_data, type, dimensions, std::nullopt, semantics,
-              [backing_data = std::move(backing_data)]() mutable {
+              host_data, type, dimensions_, std::nullopt, semantics,
+              [backing_data = std::move(backing_data_)]() mutable {
                 // This lambda ensures that the backing bytes vector is kept
                 // alive until the transfer completes.
                 backing_data = std::vector<uint8_t>();
               },
               memory_space, layout_ptr),
           /* context= */ "failed to start copy of buffer from host to device"));
-  if (should_hold) {
+
+  // If a tensor storage pointer was provided, keep the host data alive until
+  // the transfer completes.
+  if (host_pinned_ptr_ != nullptr) {
     bool is_host_pinned =
-        HoldPinnedPointerUntil(pinned_ptr, buffer->GetReadyFuture());
+        HoldPinnedPointerUntil(host_pinned_ptr_, buffer->GetReadyFuture());
     if (ABSL_VLOG_IS_ON(1)) {
       if (is_host_pinned) {
-        ABSL_VLOG(1) << "[TpuMallocAndMemcpyHtoD INTERNAL] Host buffer is "
+        ABSL_VLOG(1) << "[HostToDevice::Run] Host buffer is "
                         "pinned memory; keeping it alive until the "
                         "host-to-device transfer completes.";
       } else {
-        ABSL_VLOG(1) << "[TpuMallocAndMemcpyHtoD INTERNAL] Host buffer is not "
+        ABSL_VLOG(1) << "[HostToDevice::Run] Host buffer is not "
                         "pinned, continuing";
       }
     }
   }
 
-  ABSL_VLOG(1) << "[TpuMallocAndMemcpyHtoD INTERNAL] "
-                  "client->BufferFromHostBuffer SUCCEEDED.";
-  return DeviceBufferList::CreateMaterialized(std::move(buffer));
+  // Wrap the PjRtBuffer in a DeviceBufferRef, save it for idempotency, and
+  // return it.
+  TT_ASSIGN_OR_RETURN(device_buffer_ref_,
+                      DeviceBufferList::CreateMaterialized(std::move(buffer)));
+  return device_buffer_ref_.value();
 }
 
-namespace {
+DeviceToHostTransfer::DeviceToHostTransfer(
+    DeviceBufferRef buffer_ref, void* absl_nonnull dst_ptr,
+    const void* absl_nullable dst_pinned_ptr) {
+  // Create a promise and future to track the transfer's completion.
+  auto [promise, future] = xla::MakePromise<void>();
+  future_ = std::move(future);
 
-// TODO(bawilson): refactor this to simplify
-void StartD2H(absl::Status materialization_status,
-              const DeviceBufferRef& buffer_ref,
-              std::vector<uint8_t> fp4_receiver, void* dst_ptr,
-              xla::Promise<void> promise) {
-  // Verify that the materialization succeeded by retrieving the PjRtBuffer.
-  // If we can't, forward the error to the promise.
-  if (!materialization_status.ok()) {
-    promise.Set(materialization_status);
-    return;
-  }
-  absl::StatusOr<xla::PjRtBuffer*> buffer_or = buffer_ref.AwaitBuffer();
-  if (!buffer_or.ok()) {
-    promise.Set(buffer_or.status());
-    return;
-  }
-  if ((*buffer_or)->IsDeleted()) {
-    promise.Set(TT_ERROR(error::kUnavailable)
-                << "cannot start a device to host copy from a donated or "
-                   "deleted buffer");
-    return;
-  }
-  // Materialization succeeded.
-  // If we are copying FP4 data, we will copy to the temporary fp4_receiver
-  // buffer; otherwise, we will copy directly to the destination pointer.
-  void* effective_dst_ptr =
-      (fp4_receiver.empty() ? dst_ptr : fp4_receiver.data());
-  xla::Shape xla_shape = xla::ShapeUtil::MakeShapeWithDescendingLayout(
-      ConvertTo<xla::PrimitiveType>(buffer_ref.element_type()),
-      buffer_ref.dimensions());
-  auto literal = std::make_unique<xla::MutableBorrowingLiteral>(
-      static_cast<char*>(effective_dst_ptr), xla_shape);
-
-  // Start the transfer.
-  xla::Future<> to_literal_future = (*buffer_or)->ToLiteral(literal.get());
-
-  // When the transfer completes we will:
-  //   1. Pack FP4 data if necessary.
-  //   2. Release the underlying DeviceBufferList.
-  //   3. Format the transfer error using AdaptXlaError.
-  //   4. Set the chained promise.
-  // `literal` and `device_buffer_list` are kept alive until the transfer
-  // completes.
-  to_literal_future.OnReady(
-      [literal = std::move(literal),
-       device_buffer_list = buffer_ref.device_buffer_list(),
-
-       promise = std::move(promise), fp4_receiver = std::move(fp4_receiver),
-       dst_ptr](absl::Status s) mutable {
-        if (s.ok() && !fp4_receiver.empty()) {
-          PackFp4Vector(fp4_receiver, static_cast<uint8_t*>(dst_ptr));
-        }
-        device_buffer_list.reset();
-        promise.Set(AdaptXlaError(
-            s,
-            /*context=*/"failed to copy buffer from device to host"));
-      });
-}
-
-}  // namespace
-
-// TODO(bawilson): refactor this to simplify
-xla::Future<void> TpuMemcpyDtoHDirect(const DeviceBufferRef& buffer_ref,
-                                      void* dst_ptr,
-                                      const void* dst_pinned_ptr) {
   if (buffer_ref.size_bytes() == 0) {
-    return absl::OkStatus();
+    // Transferring nothing is a no-op and is effectively already complete.
+    promise.Set(absl::OkStatus());
+    return;
   }
+
+  // If the element type is FP4E2M1FN, we will need to create a temporary
+  // buffer to store the unpacked data.
   std::vector<uint8_t> fp4_receiver;
   if (buffer_ref.element_type() == mlir::ElementType::F4E2M1FN) {
     // buffer_ref.size_bytes() reflects the unpacked size of the data;
@@ -305,38 +240,118 @@ xla::Future<void> TpuMemcpyDtoHDirect(const DeviceBufferRef& buffer_ref,
     // than 1 byte per element.
     fp4_receiver.resize(buffer_ref.size_bytes());
   }
+  impl_ = std::make_unique<DeviceToHostTransferImpl>(
+      std::move(buffer_ref), std::move(fp4_receiver), dst_ptr, dst_pinned_ptr,
+      std::move(promise));
+}
 
-  auto [chained_promise, chained_future] = xla::MakePromise<void>();
-  if (dst_pinned_ptr != nullptr) {
-    bool dst_held = HoldPinnedPointerUntil(dst_pinned_ptr, chained_future);
+DeviceToHostTransfer DeviceToHostTransfer::IntoTensor(
+    DeviceBufferRef buffer_ref, void* absl_nonnull tensor_data_ptr,
+    const void* absl_nonnull storage_data_ptr) {
+  return DeviceToHostTransfer(std::move(buffer_ref), tensor_data_ptr,
+                              storage_data_ptr);
+}
+
+DeviceToHostTransfer DeviceToHostTransfer::IntoBytes(
+    DeviceBufferRef buffer_ref, void* absl_nonnull host_bytes_ptr) {
+  return DeviceToHostTransfer(std::move(buffer_ref), host_bytes_ptr,
+                              /*dst_pinned_ptr=*/nullptr);
+}
+
+void DeviceToHostTransfer::OnToLiteralReady(
+    absl::Status to_literal_status,
+    absl_nonnull std::unique_ptr<DeviceToHostTransferImpl> impl) {
+  if (to_literal_status.ok() && !impl->fp4_receiver.empty()) {
+    PackFp4Vector(impl->fp4_receiver, static_cast<uint8_t*>(impl->dst_ptr));
+  }
+  impl->promise.Set(
+      AdaptXlaError(to_literal_status,
+                    /*context=*/"failed to copy buffer from device to host"));
+  // impl is destructed here
+}
+
+absl::StatusOr<xla::PjRtBuffer* absl_nonnull>
+DeviceToHostTransfer::VerifyMaterialization(
+    absl::Status ready_status, const DeviceToHostTransferImpl& impl) {
+  if (!ready_status.ok()) {
+    return ready_status;
+  }
+  TT_ASSIGN_OR_RETURN(xla::PjRtBuffer* absl_nonnull buffer,
+                      impl.buffer_ref.AwaitBuffer());
+  if (buffer->IsDeleted()) {
+    return TT_ERROR(error::kUnavailable)
+           << "cannot start a device to host copy from a donated or "
+              "deleted buffer";
+  }
+  return buffer;
+}
+
+void DeviceToHostTransfer::OnTransferReady(
+    absl::Status ready_status,
+    absl_nonnull std::unique_ptr<DeviceToHostTransferImpl> impl) {
+  // Verify that the materialization succeeded by retrieving the PjRtBuffer.
+  // If we can't, forward the error to the promise.
+  absl::StatusOr<xla::PjRtBuffer*> buffer_or =
+      VerifyMaterialization(ready_status, *impl);
+  if (!buffer_or.ok()) {
+    impl->promise.Set(buffer_or.status());
+    return;  // impl is destructed here
+  }
+
+  // Materialization succeeded.
+  // If we are copying FP4 data, we will copy to the temporary fp4_receiver
+  // buffer; otherwise, we will copy directly to the destination pointer.
+  void* effective_dst_ptr =
+      (impl->fp4_receiver.empty() ? impl->dst_ptr : impl->fp4_receiver.data());
+  xla::Shape xla_shape = xla::ShapeUtil::MakeShapeWithDescendingLayout(
+      ConvertTo<xla::PrimitiveType>(impl->buffer_ref.element_type()),
+      impl->buffer_ref.dimensions());
+  auto literal = std::make_unique<xla::MutableBorrowingLiteral>(
+      static_cast<char*>(effective_dst_ptr), xla_shape);
+
+  // Start the transfer and queue the callback for when it completes.
+  xla::Future<> to_literal_future = (*buffer_or)->ToLiteral(literal.get());
+  to_literal_future.OnReady([literal = std::move(literal),
+                             impl = std::move(impl)](absl::Status s) mutable {
+    OnToLiteralReady(s, std::move(impl));
+  });
+  // impl is destructed here
+}
+
+xla::Future<> DeviceToHostTransfer::Run() {
+  if (impl_ == nullptr) {
+    return future_;
+  }
+
+  // If the destination pointer is into pinned memory, we will need to keep the
+  // underlying buffer alive until the transfer completes.
+  if (impl_->dst_pinned_ptr != nullptr) {
+    bool dst_held = HoldPinnedPointerUntil(impl_->dst_pinned_ptr, future_);
     if (ABSL_VLOG_IS_ON(1)) {
       if (dst_held) {
-        ABSL_VLOG(1) << "[TpuMemcpyDtoHDirect] Destination pointer is pinned "
-                        "memory; keeping it alive until the "
-                        "device-to-host transfer completes.";
+        ABSL_VLOG(1)
+            << "[DeviceToHostTransfer::Run] Destination pointer is pinned "
+               "memory; keeping it alive until the "
+               "device-to-host transfer completes.";
       } else {
         ABSL_VLOG(1)
-            << "[TpuMemcpyDtoHDirect] Destination pointer is not pinned "
+            << "[DeviceToHostTransfer::Run] Destination pointer is not pinned "
                "memory, continuing";
       }
     }
   }
 
-  if (buffer_ref.is_materialized()) {
-    // The buffer is already materialized, so we can start the transfer now.
-    StartD2H(absl::OkStatus(), buffer_ref, std::move(fp4_receiver), dst_ptr,
-             std::move(chained_promise));
+  xla::Future<> materialization_future =
+      impl_->buffer_ref.GetMaterializationFuture();
+  if (materialization_future.IsReady()) {
+    OnTransferReady(materialization_future.Await(), std::move(impl_));
   } else {
-    // The buffer is not materialized, so we will start the transfer when it
-    // becomes materialized.
-    buffer_ref.GetMaterializationFuture().OnReady(
-        [buffer_ref, fp4_receiver = std::move(fp4_receiver), dst_ptr,
-         chained_promise = std::move(chained_promise)](absl::Status s) mutable {
-          StartD2H(s, buffer_ref, std::move(fp4_receiver), dst_ptr,
-                   std::move(chained_promise));
+    materialization_future.OnReady(
+        [impl = std::move(impl_)](absl::Status s) mutable {
+          OnTransferReady(s, std::move(impl));
         });
   }
-  return chained_future;
+  return future_;
 }
 
 // RAII management holder for a PjRt RawBuffer alias and its underlying

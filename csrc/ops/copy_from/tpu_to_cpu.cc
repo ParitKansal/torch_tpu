@@ -152,14 +152,17 @@ absl::Status CopyDeviceBufferRefToCpuPtrImpl(
          "depends on a placeholder. \nPlaceholder tensors should only "
          "appear in compiled mode, which should never try to "
          "materialize tensors";
-
+  auto transfer =
+      (dst_pinned_ptr != nullptr
+           ? DeviceToHostTransfer::IntoTensor(src_buffer_ref, dest_ptr,
+                                              dst_pinned_ptr)
+           : DeviceToHostTransfer::IntoBytes(src_buffer_ref, dest_ptr));
   if (transfer_sync_mode == TransferSyncMode::kIsolated) {
     TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=not reachable from Python
         src_buffer_ref.is_materializing(), error::kFailedPrecondition)
         << "cannot materialize a tensor during a stream-isolated copy, "
            "materialization requires an active stream";
-    xla::Future<> future = TpuMemcpyDtoHDirect(src_buffer_ref, dest_ptr);
-    return future.Await();
+    return transfer.Run().Await();
   }
 
   if (transfer_sync_mode == TransferSyncMode::kEagerNonBlocking) {
@@ -171,9 +174,7 @@ absl::Status CopyDeviceBufferRefToCpuPtrImpl(
                     MaterializationBlockMode::kNonBlocking),
         ConvertTo<at::ScalarType>(src_buffer_ref.element_type()),
         src_buffer_ref.dimensions()));
-    xla::Future<> future =
-        TpuMemcpyDtoHDirect(src_buffer_ref, dest_ptr, dst_pinned_ptr);
-    RecordAsyncDeviceToHost(std::move(future));
+    RecordAsyncDeviceToHost(transfer.Run());
     return absl::OkStatus();
   }
 
@@ -199,8 +200,7 @@ absl::Status CopyDeviceBufferRefToCpuPtrImpl(
   }
 
   // Start the copy from TPU to CPU.
-  xla::Future<> future = TpuMemcpyDtoHDirect(src_buffer_ref, dest_ptr);
-  RecordAsyncDeviceToHost(std::move(future));
+  RecordAsyncDeviceToHost(transfer.Run());
 
   // Then wait for the copy (and materialization, if on the same stream) to
   // complete, returning any errors.

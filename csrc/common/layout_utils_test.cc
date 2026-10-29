@@ -120,6 +120,38 @@ TEST(LayoutUtilsTest, ResolveTpuLayout_FP4TensorWithOffset_Success) {
   EXPECT_EQ(layout.element_type, mlir::ElementType::F4E2M1FN);
 }
 
+TEST(LayoutUtilsTest, ResolveTpuLayout_FP4TensorTransposed_Success) {
+  auto tensor =
+      at::empty({2, 4}, at::TensorOptions().dtype(at::kFloat4_e2m1fn_x2)).t();
+
+  TT_ASSERT_OK_AND_ASSIGN(auto layout, ResolveTpuLayout(tensor));
+
+  EXPECT_EQ(layout.sizes, Dimensions({8, 2}));
+  EXPECT_EQ(layout.strides, Strides({1, 8}));
+  EXPECT_EQ(layout.storage_offset, 0);
+  EXPECT_EQ(layout.element_type, mlir::ElementType::F4E2M1FN);
+
+  auto unit_trailing =
+      at::empty({1, 4}, at::TensorOptions().dtype(at::kFloat4_e2m1fn_x2)).t();
+  unit_trailing.as_strided_({4, 1}, {1, 1}, 0);
+  TT_ASSERT_OK_AND_ASSIGN(auto unit_layout, ResolveTpuLayout(unit_trailing));
+  EXPECT_EQ(unit_layout.sizes, Dimensions({4, 2}));
+  EXPECT_EQ(unit_layout.strides, Strides({2, 1}));
+
+  auto unit_leading_transposed =
+      at::empty({4, 1}, at::TensorOptions().dtype(at::kFloat4_e2m1fn_x2)).t();
+  TT_ASSERT_OK_AND_ASSIGN(auto unit_leading_layout,
+                          ResolveTpuLayout(unit_leading_transposed));
+  EXPECT_EQ(unit_leading_layout.sizes, Dimensions({2, 4}));
+  EXPECT_EQ(unit_leading_layout.strides, Strides({1, 2}));
+
+  auto both_unit =
+      at::empty({1, 1}, at::TensorOptions().dtype(at::kFloat4_e2m1fn_x2)).t();
+  TT_ASSERT_OK_AND_ASSIGN(auto both_unit_layout, ResolveTpuLayout(both_unit));
+  EXPECT_EQ(both_unit_layout.sizes, Dimensions({1, 2}));
+  EXPECT_EQ(both_unit_layout.strides, Strides({2, 1}));
+}
+
 TEST(LayoutUtilsTest, ResolveTpuLayout_ZeroDimFP4Tensor_ReturnsError) {
   auto tensor = at::empty({}, at::TensorOptions().dtype(at::kFloat4_e2m1fn_x2));
   auto layout_or = ResolveTpuLayout(tensor);
@@ -135,6 +167,12 @@ TEST(LayoutUtilsTest, ResolveTpuLayout_FP4TensorNonContiguous_ReturnsError) {
 
   auto layout_or = ResolveTpuLayout(tensor);
   EXPECT_EQ(layout_or.status().code(), error::kInvalidArgument);
+
+  auto invalid_unit_stride =
+      at::empty({10, 8}, at::TensorOptions().dtype(at::kFloat4_e2m1fn_x2));
+  invalid_unit_stride.as_strided_({1, 4}, {1, 2}, 0);
+  EXPECT_EQ(ResolveTpuLayout(invalid_unit_stride).status().code(),
+            error::kInvalidArgument);
 }
 
 }  // namespace

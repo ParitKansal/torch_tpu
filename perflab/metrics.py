@@ -109,6 +109,12 @@ class PerformanceMetrics(MetricsInterface):
       xprof). An unavailable device time is not exported.
     peak_host_compilation_memory_mb: The peak host memory used by compilation in
       the process, or None if it was not measured. Only exported if measured.
+    model_flops_per_step: The model FLOPs of one benchmark step (see
+      perflab/flops.py), or None if they were not counted. Only exported, with
+      the achieved TFLOP/s derived from it, if counted.
+    peak_flops_per_second: The peak FLOP/s of the device for the benchmark's
+      dtype, or None if unknown. The model FLOPs utilization (MFU) is only
+      exported if both it and `model_flops_per_step` are known.
   """
 
   num_warmup_steps: int = 0
@@ -120,6 +126,25 @@ class PerformanceMetrics(MetricsInterface):
   post_warmup_run_session_xprof_url: str | None = None
   average_post_warmup_device_time_seconds: float = -1.0
   peak_host_compilation_memory_mb: float | None = None
+  model_flops_per_step: float | None = None
+  peak_flops_per_second: float | None = None
+
+  def _flops_metrics(self) -> Mapping[str, float]:
+    """Returns the FLOPs metrics, from the wall and the device step times."""
+    if self.model_flops_per_step is None:
+      return {}
+    res = {"model_flops_per_step": self.model_flops_per_step}
+    for prefix, step_time in (
+        ("", self.post_warmup_step_time_seconds),
+        ("device_", self.average_post_warmup_device_time_seconds),
+    ):
+      if step_time <= 0:
+        continue
+      flops_per_second = self.model_flops_per_step / step_time
+      res[f"{prefix}achieved_tflops_per_second"] = flops_per_second / 1e12
+      if self.peak_flops_per_second:
+        res[f"{prefix}mfu"] = flops_per_second / self.peak_flops_per_second
+    return res
 
   def metric_map(self) -> Mapping[str, float]:
     """Returns a map of metrics to be exported to MLCompass."""
@@ -147,6 +172,7 @@ class PerformanceMetrics(MetricsInterface):
       res["peak_host_compilation_memory_mb"] = (
           self.peak_host_compilation_memory_mb
       )
+    res |= self._flops_metrics()
     return res
 
 

@@ -190,9 +190,9 @@ TEST(AutoDonateInPlaceBuffer, EligibilityAndAliasingTests) {
   at::Tensor other = MakeTensor(std::move(dummy_buffer));
   ASSERT_FALSE(t.is_alias_of(other));
 
-  // In kDeferAndFuse, donation is disabled.
+  // In kDeferAndFuse, eligible tensor donates.
   SetEagerMode(EagerMode::kDeferAndFuse);
-  EXPECT_FALSE(should_donate(t, {t}, f32_type));
+  EXPECT_TRUE(should_donate(t, {t}, f32_type));
 
   // In kDeferNever, eligible tensor donates.
   SetEagerMode(EagerMode::kDeferNever);
@@ -201,6 +201,14 @@ TEST(AutoDonateInPlaceBuffer, EligibilityAndAliasingTests) {
   // In kDeferNeverAndLaunchBlocking, eligible tensor donates.
   SetEagerMode(EagerMode::kDeferNeverAndLaunchBlocking);
   EXPECT_TRUE(should_donate(t, {t}, f32_type));
+
+  // In kInternalDeferAll, eligible tensor donates.
+  SetEagerMode(EagerMode::kInternalDeferAll);
+  EXPECT_TRUE(should_donate(t, {t}, f32_type));
+
+  // In kInternalCompileFxGraph, automated in-place donation is disabled.
+  SetEagerMode(EagerMode::kInternalCompileFxGraph);
+  EXPECT_FALSE(should_donate(t, {t}, f32_type));
 
   // Reset to kDeferNever for the remaining tests.
   SetEagerMode(EagerMode::kDeferNever);
@@ -235,6 +243,22 @@ TEST(AutoDonateInPlaceBuffer, EligibilityAndAliasingTests) {
                           CreateEmptyDeviceBufferRef({0}, f32_type));
   at::Tensor t_zero_sized = MakeTensor(std::move(dummy_buffer));
   EXPECT_FALSE(should_donate(t_zero_sized, {t_zero_sized}, f32_type));
+
+  // Contiguous FP4 tensor donates, while transposed or sliced FP4 views do not.
+  constexpr auto fp4_type = mlir::ElementType::F4E2M1FN;
+  TT_ASSERT_OK_AND_ASSIGN(dummy_buffer,
+                          CreateEmptyDeviceBufferRef({2, 8}, fp4_type));
+  at::Tensor t_fp4 = MakeTensor(std::move(dummy_buffer));
+  EXPECT_TRUE(should_donate(t_fp4, {t_fp4}, fp4_type));
+
+  at::Tensor t_fp4_transposed = t_fp4;
+  t_fp4_transposed.t_();
+  EXPECT_FALSE(should_donate(t_fp4_transposed, {t_fp4_transposed}, fp4_type));
+
+  at::Tensor t_fp4_sliced = t_fp4;
+  t_fp4_sliced.as_strided_(/*size=*/{1, 4}, /*stride=*/{4, 1},
+                           /*storage_offset=*/4);
+  EXPECT_FALSE(should_donate(t_fp4_sliced, {t_fp4_sliced}, fp4_type));
 
   // Restore default mode.
   SetEagerMode(EagerMode::kDeferAndFuse);

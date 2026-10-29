@@ -167,6 +167,25 @@ TEST_EXCLUSIONS: Final[
             "test_per_sample_grads_simple",
         ],
     },
+    "inductor/test_flex_attention": {
+        "TestBlockMask": [
+            "test_backward_error_with_none_q_indices",
+            "test_block_mask_check_does_not_specialize_backed_dynamic_length",
+            "test_block_mask_vs_sequence_lengths",
+            "test_broadcasted_head_block_mask",
+            "test_compiling_create_block_mask_no_recompile",
+            "test_create_is_cuda_graphable",
+            "test_eager_tracing_correctness",
+            "test_flex_attention_poison_mod_bwd",
+            "test_flex_attention_poison_mod_fwd",
+            "test_flex_attention_poisoned_rel_logits",
+            "test_forward_pass_with_none_q_indices",
+            "test_upcast_appropriately",
+        ],
+        "TestFlexAttention": "*",
+        "TestLearnableBiases": "*",
+        "TestPagedAttention": "*",
+    },
     "inductor/test_slice_scatter_chunking": {
         "TestSliceScatterChunking": [
             "test_functionalized_copy_chain_compile",
@@ -502,6 +521,7 @@ TEST_EXCLUSIONS: Final[
             "test_grid_sample_large": "*",
             "test_gumbel_softmax": {"dtypes": [torch.float64]},
             "test_hardswish_inplace_overlap": "*",
+            "test_huber_loss_mixed_dtype_grad": "*",
             "test_instancenorm_mixed_dtype_backward": "*",
             "test_invalid_reduction_strings": "*",
             "test_leaky_relu_inplace_with_neg_slope": "*",
@@ -529,6 +549,7 @@ TEST_EXCLUSIONS: Final[
             "test_linear_inplace_activation": "*",
             "test_linear_sparse_inplace_activation": "*",
             "test_mse_loss_mixed_dtype_grad": "*",
+            "test_mse_loss_reduced_storage": "*",
             "test_nll_loss_1d_input_1d_target_invalid_size": "*",
             "test_nll_loss_1d_input_backward": "*",
             "test_nll_loss_invalid_target_dim": "*",
@@ -544,6 +565,9 @@ TEST_EXCLUSIONS: Final[
             "test_rnn_fused": {"dtypes": [torch.float32]},
             "test_rrelu_bounds_validation": "*",
             "test_smooth_l1_loss_bfloat16": "*",
+            "test_smooth_l1_loss_reduced_broadcast": "*",
+            "test_smooth_l1_loss_reduced_out_storage": "*",
+            "test_smooth_l1_loss_reduced_storage": "*",
             "test_smooth_l1_loss_vs_huber_loss": "*",
             "test_smoothl1loss_intergral_target": "*",  # go/LEGACY_TYPO
             "test_softmax_results": "*",
@@ -661,6 +685,7 @@ TEST_EXCLUSIONS: Final[
     },
     "test_sort_and_select": {
         "TestSortAndSelectCUDA": [
+            "test_select_ties_at_dtype_extremes",
             "test_topk_deterministic_ties",
         ],
         "TestSortAndSelectDevice": [

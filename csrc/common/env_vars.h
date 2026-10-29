@@ -122,8 +122,7 @@ inline constexpr char kTorchTpuHandshakePortEnvVar[] =
 inline constexpr char kTorchTpuInternalDetectRepeatedOpsEnvVar[] =
     "TORCH_TPU_INTERNAL_DETECT_REPEATED_OPS";
 // If set to "1" or "true", disables input buffer donation for in-place ATen
-// operations in DeferNever eager mode. Default is false (buffer donation is
-// enabled).
+// operations in eager mode. Default is false (buffer donation is enabled).
 inline constexpr char kTorchTpuInternalDisableInplaceBufferDonationEnvVar[] =
     "TORCH_TPU_INTERNAL_DISABLE_INPLACE_BUFFER_DONATION";
 // Specifies where to dump optimization pass IR artifacts (e.g. "print" or a
@@ -163,15 +162,10 @@ inline constexpr char kTorchTpuInternalSplitRngStateUpdate[] =
 // placeholders are always enabled.
 inline constexpr char kTorchTpuInternalStorageAwarePlaceholdersEnvVar[] =
     "TORCH_TPU_INTERNAL_STORAGE_AWARE_PLACEHOLDERS";
-// If unset or set to "1", schedule local compilation right away as a backup to
-// tier-3 compilation cache read (whichever succeeds first will unblock
-// execution). If set to "0", local compilation is done only after tier-3
-// compilation cache read fails.
-//
-// This env var is only used when the tier-3 compilation cache is enabled.
-inline constexpr char
-    kTorchTpuInternalTier3CompilationCacheLocalBackupTaskEnvVar[] =
-        "TORCH_TPU_INTERNAL_TIER3_COMPILATION_CACHE_LOCAL_BACKUP_TASK";
+// If set to `"1"` or `"true"`, unbounded kernels are loaded instead of static
+// ones if a compatible one exists.
+inline constexpr char kTorchTpuInternalUseUnboundedDynamicKernelsEnvVar[] =
+    "TORCH_TPU_INTERNAL_USE_UNBOUNDED_DYNAMIC_KERNELS";
 // TorchTPU-internal XLA compiler option overrides, in the format of
 // "key1=value1 key2=value2 ...". It is used to update `xla::CompileOptions`
 // through `env_option_overrides`, and takes precedence over `debug_options` set
@@ -320,7 +314,7 @@ inline constexpr auto kEnvVarToStage =
         {kTorchTpuInternalSplitRngStateUpdate, SymbolStage::InternalApi()},
         {kTorchTpuInternalStorageAwarePlaceholdersEnvVar,
          SymbolStage::InternalApi()},
-        {kTorchTpuInternalTier3CompilationCacheLocalBackupTaskEnvVar,
+        {kTorchTpuInternalUseUnboundedDynamicKernelsEnvVar,
          SymbolStage::InternalApi()},
         {kTorchTpuInternalXlaOptionsEnvVar, SymbolStage::InternalApi()},
         {kTorchTpuLaunchBlockingEnvVar, SymbolStage::Experimental()},

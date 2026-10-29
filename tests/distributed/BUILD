@@ -530,7 +530,7 @@ torch_tpu_py_test(
 torch_tpu_py_test(
     name = "alltoall_collective_test",
     srcs = ["alltoall_collective_test.py"],
-    shard_count = 8,
+    shard_count = 2,
     tags = if_oss(
         ["exclusive"],
         [],
@@ -542,6 +542,7 @@ torch_tpu_py_test(
         "requires-accel-hbm",
     ],
     deps = [
+        ":continuous_test_utils",
         ":distributed_utils",
         "//shims/absl_py/logging",
         "//shims/absl_py/testing:absltest",
@@ -549,7 +550,6 @@ torch_tpu_py_test(
         "//src/torch_tpu",
         "//src/torch_tpu/_internal/distributed:multiprocessing",
         "//src/torch_tpu/_internal/utils:test_utils",
-        "//tests:seed_test_utils",
     ],
 )
 

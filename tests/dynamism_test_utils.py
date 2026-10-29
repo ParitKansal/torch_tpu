@@ -162,116 +162,28 @@ def _should_skip_input_marking(
   return None
 
 
-# Mode-aware deny list mapping op names to the set of DynamismMode(s) for which they are excluded.
-untriaged_ops_deny_list: dict[
-    str, set[DynamismMode] | frozenset[DynamismMode]
-] = {
-    "angle": {COMPILE},  # Dynamo error
-    "bincount": ALL_MODES,  # MLIR assertion failure (bounds length vs rank)
-    "bmm": {COMPILE},  # numerical mismatch under dynamic compile
-    "clamp_min": ALL_MODES,  # dynamic triage (invalid result)
-    "conj_physical": ALL_MODES,  # identity operation for i64 and f64 fails
-    "diagonal": ALL_MODES,  # materialization failure (negative dimension size)
-    "eq": ALL_MODES,  # dynamic triage (invalid result)
-    "expand": ALL_MODES,  # view op - expand not yet supported
-    "expm1": ALL_MODES,  # dynamic triage (result differ)
-    "fft.rfft": ALL_MODES,  # expected all dimensions to be static
-    "fft.irfft": ALL_MODES,  # expected all dimensions to be static
-    "fft.ifft": ALL_MODES,  # expected all dimensions to be static
-    "fft.fft": ALL_MODES,  # expected all dimensions to be static
-    "flip": ALL_MODES,  # dynamic triage (invalid result)
-    "floor_divide": ALL_MODES,  # currently failing dynamism tests
-    "full_like": {COMPILE},  # buffer dimension mismatch
-    "index_add": ALL_MODES,  # invalid bound length (likely bad tensor copy)
-    "index_copy": ALL_MODES,  # invalid bound length (likely bad tensor copy)
-    "index_put": ALL_MODES,  # garbage data
-    "index_select": ALL_MODES,  # invalid gather
-    "isinf": {COMPILE},  # buffer dimension mismatch
-    "isin": ALL_MODES,  # materialization failure (negative dimension size)
-    "kron": ALL_MODES,  # dynamic triage (invalid result)
-    "ldexp": ALL_MODES,  # dynamic shape value permutation mismatch
-    "linalg.lu_factor_ex": (
-        ALL_MODES
-    ),  # materialization failure (negative dim size)
-    "logical_and": ALL_MODES,  # dynamic triage (invalid result)
-    "masked_scatter": ALL_MODES,  # unflatten ambiguous error
-    "matmul": ALL_MODES,  # reshapes in the structured delegate
-    "mm": {COMPILE},  # numerical mismatch under dynamic compile
-    "maximum": ALL_MODES,  # dynamic triage (invalid result)
-    "ne": ALL_MODES,  # dynamic triage (invalid result)
-    "neg": ALL_MODES,  # dynamic triage (invalid result)
-    "nn.functional.adaptive_avg_pool2d": ALL_MODES,  # sort op fails to infer
-    "nn.functional.batch_norm": ALL_MODES,  # dynamic triage (xla error)
-    "nn.functional.embedding": ALL_MODES,  # crash in shard 27
-    "nn.functional.embedding_bag": ALL_MODES,  # invalid gather
-    "nn.functional.grid_sample": ALL_MODES,  #
-    "nn.functional.hardswish": ALL_MODES,  # dynamic triage (adjust tolerance)
-    "nn.functional.interpolate": ALL_MODES,  # gather with dynamic slice size
-    "nn.functional.leaky_relu": ALL_MODES,  # dynamic triage (invalid result)
-    "nn.functional.max_pool1d": (
-        ALL_MODES
-    ),  # MLIR assertion failure (bounds length vs rank)
-    "nn.functional.max_pool2d": (
-        ALL_MODES
-    ),  # crash (negative dim size in compiled_mode.cc)
-    "nn.functional.max_pool3d": ALL_MODES,  # crash (Aborted)
-    "nn.functional.mse_loss": ALL_MODES,  # binop LHS / RHS mismatch
-    "nn.functional.nll_loss": (
-        ALL_MODES
-    ),  # numerical mismatch or failure in some shards
-    "nn.functional.pdist": (
-        ALL_MODES
-    ),  # inlined vector size fail (likely using bound)
-    "nn.functional.relu": ALL_MODES,  # dynamic triage (tolerance)
-    # Also on `compiled_deny_list` in op_testing.py, where compiled results
-    # mismatch CPU even with static shapes.
-    "nn.functional.scaled_dot_product_attention": {COMPILE},
-    "nn.functional.upsample_bilinear": ALL_MODES,  # MLIR gather out of bounds
-    "nn.functional.upsample_nearest": ALL_MODES,  # MLIR gather build failure
-    "normal": ALL_MODES,  # OK
-    "ones_like": {COMPILE},  # buffer dimension mismatch
-    "pow": ALL_MODES,  # dynamic triage (invalid result)
-    "remainder": ALL_MODES,  # dynamic triage (invalid result)
-    "round": ALL_MODES,  # dynamic triage (invalid result)
-    "sgn": ALL_MODES,  # dynamic triage (invalid result)
-    "searchsorted": ALL_MODES,  # expected last dim to be static
-    "sign": ALL_MODES,  # dynamic triage (invalid result)
-    "sinh": ALL_MODES,  # dynamic triage (invalid result)
-    "slice": ALL_MODES,  # reshape reassociation not supported
-    "squeeze": (
-        ALL_MODES
-    ),  # unsupported view op - enhance view op to detect squeeze
-    "squeeze_copy": ALL_MODES,  # unsupported view op
-    "std": {COMPILE},  # shape mismatch on out under dynamic compile
-    "sub": ALL_MODES,  # dynamic triage (invalid result)
-    "sum": ALL_MODES,  # return i64, which has lowering issues
-    "take": ALL_MODES,  # dynamic triage (invalid result)
-    "tan": ALL_MODES,  # dynamic triage (invalid result)
-    "to": ALL_MODES,  # fails numerics (?)
-    "tril": ALL_MODES,  # bad broadcast
-    "triu": ALL_MODES,  # bad broadcast, iota-like
-    "trunc": ALL_MODES,  # dynamic triage (invalid result)
-    "unique": ALL_MODES,  # dynamic shape operator / invalid TPU shape
-    "unique_consecutive": (
-        ALL_MODES
-    ),  # dynamic shape operator / invalid TPU shape
-    "var": ALL_MODES,  # dynamic triage (invalid result)
-    "var_mean": {COMPILE},  # reshape lowering failure in compile mode
-    "vdot": ALL_MODES,  # MLIR assertion failure (bounds length vs rank)
-    "view_as_complex": ALL_MODES,  # crash (Aborted)
-    "view_as_real": ALL_MODES,  # OK
-    "xlogy": ALL_MODES,  # dynamic triage (invalid result)
-    "zeros_like": {COMPILE},  # buffer dimension mismatch
-}
+DenyList = dict[str, dict[str, set[DynamismMode] | frozenset[DynamismMode]]]
 
-# Mode-aware deny lists of triaged ops, keyed by the reason for the skip. Add
-# newly triaged ops here instead of to `untriaged_ops_deny_list`.
-# TODO: b/449736443 - Support bounded dimensions in these lowerings.
-triaged_ops_deny_lists: dict[
-    str, dict[str, set[DynamismMode] | frozenset[DynamismMode]]
-] = {
+# Mode-aware deny lists for bounded dynamism op tests, keyed by the reason for
+# the skip. The reason is included in the skip message.
+#
+# Policy: every entry is a known bug in a lowering, XLA or TorchTPU, or a gap
+# in the dynamism test harness. The goal is to drive this to empty, so remove
+# entries as soon as the underlying issue is fixed. Add new entries under a
+# diagnosed reason, with a bug where possible. Use an "untriaged: " prefix only
+# when the root cause is unknown.
+#
+# Do not disable dynamism for an op in its test (ops_test.py); add it here.
+# For ops where dynamism is out of scope by design, use
+# `DYNAMISM_NOT_APPLICABLE_OPS` instead.
+#
+# TODO: b/449736443 - Fix the underlying issues and remove every entry, so that
+# DYNAMISM_DENY_LISTS is empty.
+DYNAMISM_DENY_LISTS: DenyList = {
+    # TODO: b/449736443 - Support bounded dimensions in these lowerings.
     "the lowering broadcasts a bounded input to a static shape": {
         "baddbmm": {EAGER},
+        "baddbmm.dtype": {EAGER},
         "bernoulli": {EAGER},
         # These abort the test process with a CHECK failure.
         "linalg.lu_solve": {EAGER},
@@ -280,10 +192,13 @@ triaged_ops_deny_lists: dict[
         "linalg.svd": {EAGER},
         "linalg.svdvals": {EAGER},
     },
+    # TODO: b/449736443 - Support bounded dimensions in these lowerings.
     "the lowering emits an op without bounded shape support": {
         # _upsample_bicubic2d_aa and _upsample_bilinear2d_aa lower via 1D gathers with static output sizes.
         "_upsample_bicubic2d_aa": ALL_MODES,
         "_upsample_bilinear2d_aa": ALL_MODES,
+        # embedding_renorm_ uses static BroadcastInDim and Scatter shapes.
+        "embedding_renorm_": ALL_MODES,
         # cross_entropy_loss lowers via gather/scatter and static element count
         # queries, and requires synchronized target/weight dynamic marking.
         "nn.functional.cross_entropy": ALL_MODES,
@@ -294,18 +209,249 @@ triaged_ops_deny_lists: dict[
         # TODO: b/566327707 - Remove once marked dims no longer carry over.
         "torch.ops.aten._safe_softmax.default": {COMPILE},
     },
+    # TODO: b/449736443 - Support bounded dimensions in these lowerings.
     "linalg decompositions do not support bounded dimensions": {
         "geqrf": {EAGER},  # Aborts the test process with a CHECK failure.
+        "linalg.cholesky": {EAGER},
+        "linalg.cholesky_ex": {EAGER},
         "linalg.inv": {EAGER},
         "linalg.lu": {EAGER},
         "linalg.solve_ex": {EAGER},
     },
+    # TODO: b/449736443 - Support bounded dimensions in these lowerings.
     "the result has wrong values": {
         # TODO: b/566327914 - With dim 0 bounded, the result matches the
         # transposed golden output.
         "nn.functional.hardtanh": {EAGER},
     },
+    "the op may work, but requires mark_dynamic test support": {
+        # Needs matmul-style marking.
+        "_addmm_activation": ALL_MODES,
+        "addmm": ALL_MODES,
+        "addmm.dtype": ALL_MODES,
+        "addmv": ALL_MODES,
+        "baddbmm.dtype": {COMPILE},
+        "dot": ALL_MODES,
+        "native_layer_norm": ALL_MODES,  # input/weight/bias have dim dependency
+        "_weight_norm_interface": ALL_MODES,  # v and g have dim dependency
+        "_weight_norm_interface_backward": (
+            ALL_MODES
+        ),  # grad_w, saved_v, saved_g, saved_norms have dim dependency
+        "lu_unpack": ALL_MODES,  # data, pivots have dim dependency
+        # Can only mark the concatenated dim dynamic for cat-like ops.
+        "cat": ALL_MODES,
+        "stack": ALL_MODES,
+        # col2im column dimension L must match static output_size/kernel_size.
+        "col2im": ALL_MODES,
+        # Per-channel observer/fake-quant buffers must match channel axis size.
+        "_fused_moving_avg_obs_fq_helper": ALL_MODES,
+        # RNN input, hidden state, and flat weight list have coupled dimensions.
+        "gru.input": ALL_MODES,
+        "lstm.input": ALL_MODES,
+        # TODO(amainz): Bounded dynamism requires synchronized scale/operand
+        # dimension marking and dynamic scale reshape support.
+        "torch._scaled_mm": ALL_MODES,
+        # TODO(amainz): Bounded dynamism requires synchronized group offset,
+        # scale, and operand dimension marking.
+        "_grouped_mm": ALL_MODES,
+        "torch._scaled_grouped_mm": ALL_MODES,
+        # TODO: segment_reduce and jagged ops require length/offset dimension
+        # matching under dynamism.
+        "_jagged_to_padded_dense_forward": ALL_MODES,
+        "_padded_dense_to_jagged_forward": ALL_MODES,
+        "_segment_reduce": ALL_MODES,
+    },
+    # TODO: b/449736443 - [XLA] Crash in complex rewriter.
+    "XLA crashes in the complex rewriter": {
+        "polar": ALL_MODES,
+    },
+    # TODO: b/449736443 - Reshape support for bounded dynamism needed.
+    "the op may lower to a reshape, which is not supported with dynamism": {
+        # transposes and permutes can lower to a reshape sometimes (1x3->3x1)
+        "t": ALL_MODES,
+    },
+    # TODO: b/449736443 - incompatible buffer shapes at dimension 0.
+    "reductions hit incompatible buffer shapes at dimension 0": {
+        "all": ALL_MODES,
+        "any": ALL_MODES,
+    },
+    "sparse COO ops are not supported": {
+        "sparse_coo_add": ALL_MODES,
+        "sparse_coo_add_dense_sparse": ALL_MODES,
+        "sparse_coo_clone": ALL_MODES,
+        "sparse_coo_coalesce": ALL_MODES,
+        "sparse_coo_copy_": ALL_MODES,
+        "sparse_coo_empty_like": ALL_MODES,
+        "sparse_coo_mul": ALL_MODES,
+        "sparse_coo_neg": ALL_MODES,
+        "sparse_coo_sub": ALL_MODES,
+        "sparse_coo_sub_dense_sparse": ALL_MODES,
+        "sparse_coo_to_dense": ALL_MODES,
+        "sparse_coo_zero_": ALL_MODES,
+    },
+    "untriaged: invalid result": {
+        # TODO: fix clamp() returning enormous errors or nans when dynamism is
+        # enabled.
+        "clamp": ALL_MODES,
+        "clamp_min": ALL_MODES,
+        "eq": ALL_MODES,
+        "flip": ALL_MODES,
+        "index_put": ALL_MODES,  # garbage data
+        "kron": ALL_MODES,
+        "logical_and": ALL_MODES,
+        "maximum": ALL_MODES,
+        "ne": ALL_MODES,
+        "neg": ALL_MODES,
+        "nn.functional.leaky_relu": ALL_MODES,
+        "pow": ALL_MODES,
+        "remainder": ALL_MODES,
+        "round": ALL_MODES,
+        "sgn": ALL_MODES,
+        "sign": ALL_MODES,
+        "sinh": ALL_MODES,
+        "sub": ALL_MODES,
+        "take": ALL_MODES,
+        "tan": ALL_MODES,
+        "trunc": ALL_MODES,
+        "var": ALL_MODES,
+        "xlogy": ALL_MODES,
+    },
+    "untriaged: numerical mismatch": {
+        "bmm": {COMPILE},  # under dynamic compile
+        "bmm.dtype": {COMPILE},  # under dynamic compile
+        "conj_physical": ALL_MODES,  # identity operation for i64 and f64 fails
+        "expm1": ALL_MODES,  # result differs
+        "mm": {COMPILE},  # under dynamic compile
+        "mm.dtype": {COMPILE},  # under dynamic compile
+        "nn.functional.hardswish": ALL_MODES,  # adjust tolerance
+        "nn.functional.nll_loss": ALL_MODES,  # or failure in some shards
+        "nn.functional.relu": ALL_MODES,  # tolerance
+        # Also on `compiled_deny_list` in op_testing.py, where compiled results
+        # mismatch CPU even with static shapes.
+        "nn.functional.scaled_dot_product_attention": {COMPILE},
+        "to": ALL_MODES,  # fails numerics (?)
+    },
+    "untriaged: buffer dimension mismatch": {
+        "full_like": {COMPILE},
+        "isinf": {COMPILE},
+        "ones_like": {COMPILE},
+        "zeros_like": {COMPILE},
+    },
+    "untriaged: MLIR assertion failure (bounds length vs rank)": {
+        "bincount": ALL_MODES,
+        "nn.functional.max_pool1d": ALL_MODES,
+        "vdot": ALL_MODES,
+    },
+    "untriaged: materialization failure (negative dimension size)": {
+        "diagonal": ALL_MODES,
+        "isin": ALL_MODES,
+        "linalg.lu_factor_ex": ALL_MODES,
+    },
+    "untriaged: expected all dimensions to be static": {
+        "fft.fft": ALL_MODES,
+        "fft.ifft": ALL_MODES,
+        "fft.irfft": ALL_MODES,
+        "fft.rfft": ALL_MODES,
+        "searchsorted": ALL_MODES,  # expected last dim to be static
+    },
+    "untriaged: invalid bound length": {
+        "index_add": ALL_MODES,  # likely bad tensor copy
+        "index_copy": ALL_MODES,  # likely bad tensor copy
+        "nn.functional.pdist": ALL_MODES,  # inlined vector size fail
+    },
+    "untriaged: invalid gather": {
+        "index_select": ALL_MODES,
+        "nn.functional.embedding_bag": ALL_MODES,
+        "nn.functional.interpolate": (
+            ALL_MODES
+        ),  # gather with dynamic slice size
+        "nn.functional.upsample_bilinear": ALL_MODES,  # gather out of bounds
+        "nn.functional.upsample_nearest": ALL_MODES,  # gather build failure
+    },
+    "untriaged: crash": {
+        "nn.functional.embedding": ALL_MODES,  # crash in shard 27
+        # negative dim size in compiled_mode.cc
+        "nn.functional.max_pool2d": ALL_MODES,
+        "nn.functional.max_pool3d": ALL_MODES,  # Aborted
+        "view_as_complex": ALL_MODES,  # Aborted
+    },
+    "untriaged: unsupported view op or reshape": {
+        "expand": ALL_MODES,  # view op - expand not yet supported
+        "masked_scatter": ALL_MODES,  # unflatten ambiguous error
+        "matmul": ALL_MODES,  # reshapes in the structured delegate
+        "slice": ALL_MODES,  # reshape reassociation not supported
+        # enhance view op to detect squeeze
+        "squeeze": ALL_MODES,
+        "squeeze_copy": ALL_MODES,
+        "var_mean": {COMPILE},  # reshape lowering failure in compile mode
+    },
+    "untriaged: shape mismatch": {
+        "ldexp": ALL_MODES,  # dynamic shape value permutation mismatch
+        "nn.functional.mse_loss": ALL_MODES,  # binop LHS / RHS mismatch
+        "std": {COMPILE},  # shape mismatch on out under dynamic compile
+        "tril": ALL_MODES,  # bad broadcast
+        "triu": ALL_MODES,  # bad broadcast, iota-like
+    },
+    "untriaged: data-dependent output shape (invalid TPU shape)": {
+        "unique": ALL_MODES,
+        "unique_consecutive": ALL_MODES,
+    },
+    # TODO(b/488338235): dynamism is flaky.
+    "untriaged: flaky": {
+        "_foreach_addcdiv": ALL_MODES,
+    },
+    "untriaged: unknown failure": {
+        "_native_multi_head_attention": ALL_MODES,
+        "_thnn_fused_gru_cell": ALL_MODES,
+        "_thnn_fused_lstm_cell": ALL_MODES,
+        "_transformer_encoder_layer_fwd": ALL_MODES,
+        "angle": {COMPILE},  # Dynamo error
+        "floor_divide": ALL_MODES,
+        # Eager mode is triaged under "the lowering broadcasts a bounded input
+        # to a static shape".
+        "linalg.svd": {COMPILE},
+        "linalg.svdvals": {COMPILE},
+        "nn.functional.adaptive_avg_pool2d": (
+            ALL_MODES
+        ),  # sort op fails to infer
+        "nn.functional.batch_norm": ALL_MODES,  # xla error
+        "nn.functional.grid_sample": ALL_MODES,
+        "normal": ALL_MODES,
+        "split_with_sizes_copy": ALL_MODES,  # b/483055194
+        "sum": ALL_MODES,  # return i64, which has lowering issues
+        "torch._scaled_grouped_mm_v2": ALL_MODES,
+        "view_as_real": ALL_MODES,
+    },
 }
+
+# Mode-aware lists of ops for which bounded dynamism is out of scope by design,
+# keyed by the reason. The reason is included in the skip message.
+#
+# Policy: unlike `DYNAMISM_DENY_LISTS`, these entries are not bugs and are not
+# expected to be removed. Each entry requires a justification of why dynamism
+# does not apply to the op, so this should rarely change.
+DYNAMISM_NOT_APPLICABLE_OPS: DenyList = {
+    "fused optimizers update fixed-shape parameters and optimizer states in place": {
+        "_fused_adagrad_": ALL_MODES,
+        "_fused_adagrad_.tensor_lr": ALL_MODES,
+        "_fused_adam_": ALL_MODES,
+        "_fused_adam_.tensor_lr": ALL_MODES,
+        "_fused_adamw_": ALL_MODES,
+        "_fused_adamw_.tensor_lr": ALL_MODES,
+        "_fused_sgd_": ALL_MODES,
+        "_fused_sgd_.tensor_lr": ALL_MODES,
+    },
+}
+
+
+def _find_reason(
+    deny_lists: DenyList, op_name: str, mode: DynamismMode
+) -> str | None:
+  """Returns the first reason in `deny_lists` that excludes `op_name` in `mode`."""
+  for reason, ops in deny_lists.items():
+    if mode in ops.get(op_name, ()):
+      return reason
+  return None
 
 
 def verify_op_supports_dynamism(
@@ -329,16 +475,18 @@ def verify_op_supports_dynamism(
     None if the op+input is supported, or an skipTest message if not.
   """
   op = op_info
-  if op.name in untriaged_ops_deny_list:
-    denied_modes = untriaged_ops_deny_list[op.name]
-    if mode in denied_modes:
-      return f"Op {op.name} is not supported in {mode.value} dynamism mode."
-  for reason, deny_list in triaged_ops_deny_lists.items():
-    if mode in deny_list.get(op.name, ()):
-      return (
-          f"Op {op.name} is not supported in {mode.value} dynamism mode:"
-          f" {reason}."
-      )
+  reason = _find_reason(DYNAMISM_NOT_APPLICABLE_OPS, op.name, mode)
+  if reason is not None:
+    return (
+        f"Dynamism is not applicable to {op.name} in {mode.value} mode:"
+        f" {reason}."
+    )
+  reason = _find_reason(DYNAMISM_DENY_LISTS, op.name, mode)
+  if reason is not None:
+    return (
+        f"Op {op.name} is not supported in {mode.value} dynamism mode:"
+        f" {reason}."
+    )
 
   ### [TEST INFRA TASKS] ###
   # The following indicate changes needed in this file to increase coverage.
@@ -367,37 +515,6 @@ def verify_op_supports_dynamism(
       input_value if op.name == "einsum" else canonical_input, args
   ):
     return "No valid input dimensions to mark dynamic."
-
-  require_mark_dynamic_support = [
-      # Needs matmul-style marking
-      "addmm",
-      "addmv",
-      "dot",
-      "native_layer_norm",  # input/weight/bias have dim dependency
-      "lu_unpack",  # data, pivots have dim dependency
-      # Can only mark the concatenated dim dynamic for cat-like ops.
-      "cat",
-      "stack",
-  ]
-  if op.name in require_mark_dynamic_support:
-    return f"{op.name} op may work, but requires mark_dynamic test support."
-
-  ### [XLA BUGS] ###
-  # TODO: b/449736443 - [XLA] Crash in complex rewriter.
-  if op.name in ["polar"]:
-    return f"{op.name} op is not supported."
-
-  ### [VIEW OP BUGS] ###
-  # TODO: b/449736443 - Reshape support for bounded dynamism needed.
-  # transposes and permutes can lower to a reshape sometimes (1x3->3x1)
-  if op.name in ["t", "t_"]:
-    return f"{op.name} op uses a reshape that is not supported with dynamism."
-
-  ### [TORCHTPU INFRA BUGS] ###
-  # TODO: b/449736443 - incompatible buffer shapes at dimension 0;
-  reduction_deny_list = ["all", "any"]
-  if op.name in reduction_deny_list:
-    return f"reduction op {op.name} is not supported with dynamism."
 
   # Valid testcase!
   return None
@@ -558,7 +675,10 @@ class BinaryElementwiseDynamicOpInfo(DynamicOpInfo):
     """Method to declare ops supported by this adapter."""
 
     additional_binary_ops = [
+        "__lshift__",
+        "__rshift__",
         "_log_softmax_backward_data",
+        "_masked_softmax",
         "_softmax_backward_data",
         "equal",
     ]
@@ -587,6 +707,7 @@ class TernaryElementwiseDynamicOpInfo(DynamicOpInfo):
   """A wrapper around OpInfo that supports bounded dynamism."""
 
   ternary_elementwise_ops = {
+      "_masked_softmax_backward",
       "addcdiv",
       "addcmul",
       "clamp",
@@ -713,7 +834,7 @@ class MatmulDynamicOpInfo(DynamicOpInfo):
   def adapter_supports_op(op_info: core.OpInfo):
     """Method to declare ops supported by this adapter."""
 
-    matmul_ops = ["bmm", "mm"]
+    matmul_ops = ["bmm", "bmm.dtype", "mm", "mm.dtype"]
     return op_info.name in matmul_ops
 
   def _mark_dependent_arg_dynamic(

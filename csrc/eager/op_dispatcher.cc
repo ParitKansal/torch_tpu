@@ -26,6 +26,7 @@
 
 #include "ATen/ScalarOps.h"
 #include "ATen/core/ATen_fwd.h"
+#include "ATen/core/TensorBody.h"
 #include "absl/base/no_destructor.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/absl_check.h"
@@ -123,15 +124,15 @@ absl::StatusOr<DeviceBufferRef> MakeBuffer(
     std::vector<uint8_t> scalar_bytes(scalar_tensor.storage().nbytes());
     std::memcpy(scalar_bytes.data(), scalar_tensor.data_ptr(),
                 scalar_tensor.storage().nbytes());
-    const void* scalar_data = scalar_bytes.data();
 
     // Then asynchronously copy it to device as a materialized DeviceBufferRef.
     TT_ASSIGN_OR_RETURN(mlir::ElementType element_type,
                         ConvertTo<mlir::ElementType>(scalar_type));
-    TT_ASSIGN_OR_RETURN(
-        DeviceBufferRef buf_ref,
-        TpuMallocAndMemcpyHtoD(scalar_data, element_type, /*dimensions=*/{},
-                               std::move(scalar_bytes)));
+    TT_ASSIGN_OR_RETURN(DeviceBufferRef buf_ref,
+                        HostToDeviceTransfer::FromBytesVector(
+                            std::move(scalar_bytes), element_type,
+                            /*dimensions=*/{})
+                            .Run());
     RecordAsyncHostToDevice(buf_ref);
     scalar_map.insert({hashable_scalar, buf_ref});
     return buf_ref;
@@ -176,6 +177,14 @@ bool IsEligibleDonor(const at::Tensor& in, const at::Tensor& out,
   if (!in_dtype.ok() || *in_dtype != out_dtype) {
     return false;
   }
+  if (*in_dtype == mlir::ElementType::F4E2M1FN &&
+      (!in.is_contiguous() || !out.is_contiguous() ||
+       in.storage_offset() != 0 || out.storage_offset() != 0 || in.dim() == 0 ||
+       in.stride(in.dim() - 1) != 1)) {
+    // Non-contiguous or sliced FP4 views cannot safely donate their underlying
+    // packed storage buffer in-place.
+    return false;
+  }
   // Note: We explicitly guard this check with `GetPrivateUse1DeviceType()`
   // because standalone C++ unit tests (e.g. in op_dispatcher_test) test ATen
   // layout, contiguity, and offset properties using CPU tensors. In standalone
@@ -192,6 +201,12 @@ bool IsEligibleDonor(const at::Tensor& in, const at::Tensor& out,
     return false;
   }
   const auto& in_buf = *in_buf_or;
+  if (*in_dtype == mlir::ElementType::F4E2M1FN &&
+      (in_buf.dimensions().empty() ||
+       in.size(in.dim() - 1) * 2 != in_buf.dimensions().back() ||
+       in.nbytes() * 2 != in_buf.size_bytes())) {
+    return false;
+  }
   if (in_buf.live_data_ptrs() > 1) {
     // Because XLA tensors are immutable, TorchTPU uses copy-on-write semantics.
     // This means that if a tensor is cloned, we construct a new `c10::Storage`
@@ -247,11 +262,13 @@ std::string EncodeParamCacheKey(const std::optional<PromotedScalar>& value) {
 // Safety and layout invariants verified for each donor-destination pair:
 // 1. In-place aliasing: destination must alias donor (is_alias_of).
 // 2. Feature flag & execution mode: donation must be enabled via
-//    IsInplaceBufferDonationEnabled() and restricted to synchronous eager modes
-//    (kDeferNever, kDeferNeverAndLaunchBlocking). In deferred execution
-//    (kDeferAndFuse), automated donation is currently not done.
-// 3. Dense layout: donor must be contiguous, zero-offset, unconjugated,
-//    non-empty, and identical in shape to the destination dimensions.
+//    IsInplaceBufferDonationEnabled() and restricted to eager execution modes
+//    that support in-place buffer donation (kDeferNever,
+//    kDeferNeverAndLaunchBlocking, kDeferAndFuse, and kInternalDeferAll).
+// 3. Shape: donor must be non-empty and identical in shape to the destination
+//    dimensions. The donor may be a view (e.g. a slice or a transpose), in
+//    which case its base buffer is donated to the ops that read the view and
+//    write the result back to the base.
 // 4. Data type: donor element type must match the destination element type.
 // 5. Single donation constraint: In XLA / StableHLO, each device buffer can be
 //    donated to at most ONE output buffer. Once an input is donated, it and all
@@ -267,7 +284,7 @@ void AutoDonateInPlaceBuffers(
     absl::Span<const at::Tensor> inputs, Indices& donated_indices,
     std::vector<uint8_t>& output_donated) {
   if (!donated_indices.empty() || !IsInplaceBufferDonationEnabled() ||
-      !IsDeferNeverMode(GetEagerMode())) {
+      !SupportsInplaceBufferDonation(GetEagerMode())) {
     return;
   }
 
@@ -300,8 +317,15 @@ absl::Status AssignBufferToOutput(const at::Tensor& output,
   TT_RET_CHECK(  // ERROR_COV_INFEASIBLE=Output tensors are always defined.
       output.defined(), error::kInvalidArgument)
       << "expected defined output tensor";
-  TT_RETURN_IF_ERROR(
-      ResizeTensorIfShapeDiffers(output, result_buffer.dimensions()));
+  Dimensions logical_dims(result_buffer.dimensions().begin(),
+                          result_buffer.dimensions().end());
+  if (result_buffer.element_type() == mlir::ElementType::F4E2M1FN) {
+    ABSL_CHECK(!logical_dims.empty());         // CRASH_OK
+    ABSL_CHECK_EQ(logical_dims.back() % 2, 0)  // CRASH_OK
+        << "Last dimension of FP4 must be even, got " << logical_dims.back();
+    logical_dims.back() /= 2;
+  }
+  TT_RETURN_IF_ERROR(ResizeTensorIfShapeDiffers(output, logical_dims));
   return AssignBufferToAtTensor(std::move(result_buffer), output,
                                 enable_autodonation);
 }

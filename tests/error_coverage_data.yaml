@@ -27,10 +27,12 @@ csrc/common/environment.cc: {infeasible: 0, remaining: 2, total: 2}
 csrc/common/error_utils.cc: {infeasible: 1, remaining: 5, total: 9}
 csrc/common/error_utils.h: {infeasible: 0, remaining: 3, total: 3}
 csrc/common/excess_precision.cc: {infeasible: 0, remaining: 0, total: 1}
-csrc/common/layout_utils.cc: {infeasible: 1, remaining: 1, total: 2}
+csrc/common/layout_utils.cc: {infeasible: 0, remaining: 0, total: 2}
 csrc/common/libtpu_version.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/common/static_shape_check.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/common/tier2_compilation_cache.cc: {infeasible: 0, remaining: 3, total: 3}
+csrc/common/tpu_hardware.cc: {infeasible: 1, remaining: 0, total: 1}
+csrc/common/unbounded_dynamic_kernel_registry.cc: {infeasible: 1, remaining: 0, total: 1}
 csrc/common/version.cc: {infeasible: 0, remaining: 0, total: 2}
 csrc/distributed/process_group_tpu.cc: {infeasible: 36, remaining: 25, total: 98}
 csrc/distributed/slicebuilder/discovery.cc: {infeasible: 0, remaining: 4, total: 4}
@@ -59,6 +61,7 @@ csrc/internal/dynamism/dynamism.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/internal/dynamism/dynamism_ops.cc: {infeasible: 0, remaining: 9, total: 10}
 csrc/internal/dynamism/dynamism_py.cc: {infeasible: 0, remaining: 2, total: 2}
 csrc/internal/mosaic/kiln/core/kernel.cc: {infeasible: 0, remaining: 8, total: 8}
+csrc/internal/mosaic/kiln/mlir/stablehlo_splice.cc: {infeasible: 1, remaining: 10, total: 11}
 csrc/internal/profiler/profiler_api.cc: {infeasible: 0, remaining: 5, total: 5}
 csrc/internal/profiler/tpu_profiler_plugin.cc: {infeasible: 0, remaining: 6, total: 6}
 csrc/internal/sync/sync.cc: {infeasible: 0, remaining: 2, total: 2}
@@ -217,7 +220,7 @@ csrc/ops/roll/roll_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/ops/round/round.cc: {infeasible: 1, remaining: 0, total: 1}
 csrc/ops/round/round_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 2}
 csrc/ops/scaled_dot_product_attention/flash_attention_kernel.cc: {infeasible: 0, remaining: 1, total: 1}
-csrc/ops/scaled_dot_product_attention/flash_attention_kernel_builder.cc: {infeasible: 0, remaining: 3, total: 4}
+csrc/ops/scaled_dot_product_attention/flash_attention_kernel_builder.cc: {infeasible: 0, remaining: 3, total: 3}
 csrc/ops/scaled_dot_product_attention/scaled_dot_product_attention_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/ops/scaled_dot_product_attention/scaled_dot_product_attention_shlo.cc: {infeasible: 0, remaining: 0, total: 5}
 csrc/ops/scaled_dot_product_attention/util.cc: {infeasible: 3, remaining: 0, total: 3}

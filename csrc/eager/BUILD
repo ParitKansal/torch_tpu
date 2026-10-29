@@ -142,6 +142,7 @@ torch_tpu_cc_test(
         ":current_stream",
         ":device_buffer",
         ":device_buffer_utils",
+        ":eager_mode",
         ":events_queue",
         ":materialize",
         ":split_traversal",
@@ -153,6 +154,7 @@ torch_tpu_cc_test(
         "//csrc/common:compilation_cache",
         "//csrc/common:compilation_spec",
         "//csrc/common:compile_options_key",
+        "//csrc/common:context_states",
         "//csrc/common:dimension_types",
         "//csrc/common:error_utils",
         "//csrc/common:oss_test_main",
@@ -166,6 +168,7 @@ torch_tpu_cc_test(
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
         "@llvm-project//mlir:IR",
         "@stablehlo//stablehlo/integrations/cpp/builder:attr_type_builder_util",
@@ -651,9 +654,6 @@ torch_tpu_cc_library(
         ":device_buffer_utils",
         ":eager_mode",
         ":events_queue",
-        ":materialize",
-        ":split_traversal",
-        ":structured_log_buffer",
         ":tensor_to_buffer",
         "//csrc/common:aten_utils",
         "//csrc/common:cache_key",
@@ -724,6 +724,10 @@ torch_tpu_cc_library(
         "//csrc/common:warnings",
         # Ensure that both TORCH_LIBRARY_IMPL values get built together always.
         ":amp_policies",  # buildcleaner: keep
+        # Registers the precompiled unbounded dynamic kernels at load time so
+        # TORCH_TPU_INTERNAL_USE_UNBOUNDED_DYNAMIC_KERNELS can serve them.
+        # Nothing references its symbols.
+        "//csrc/experimental/precompiled_kernels:kernel_registration",  # buildcleaner: keep
         "//csrc/common:to_string",
         "//csrc/ops/has_compatible_shallow_copy_type:has_compatible_shallow_copy_type_aten_kernels",
         "//csrc/ops/pooling",
@@ -837,6 +841,7 @@ torch_tpu_cc_library(
         "//csrc/ops/lerp:lerp_aten_kernels",
         "//csrc/ops/linalg:linalg_kernels",
         "//csrc/ops/linalg:linalg_svd_kernels",
+        "//csrc/ops/linalg/cholesky:linalg_cholesky_kernels",
         "//csrc/ops/linalg/lu:linalg_lu_kernels",
         "//csrc/ops/linalg/qr:linalg_qr_kernels",
         "//csrc/ops/linalg/solve_triangular:linalg_solve_triangular_kernels",
@@ -1106,6 +1111,7 @@ torch_tpu_cc_library(
     # otherwise, remote linking fails with DISTRIBUTOR(OUT_OF_MEMORY).
     tags = ["requires-mem:16g"],
     deps = [
+        ":current_stream",
         ":device_assignment",
         ":device_buffer",
         ":eager_mode",
@@ -1237,6 +1243,7 @@ torch_tpu_cc_test(
     },
     requires_libtpu = True,
     deps = [
+        ":current_stream",
         ":device_buffer",
         ":device_buffer_utils",
         ":eager_mode",
@@ -1252,6 +1259,7 @@ torch_tpu_cc_test(
         "//csrc/ops:op_names",
         "//csrc/ops:python_context",
         "@com_google_absl//absl/cleanup",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",

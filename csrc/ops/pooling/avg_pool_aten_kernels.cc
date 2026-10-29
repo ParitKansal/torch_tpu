@@ -25,14 +25,18 @@
 #include <vector>
 
 #include "ATen/core/ATen_fwd.h"
+#include "ATen/core/LegacyTypeDispatch.h"
 #include "ATen/core/TensorBody.h"
+#include "ATen/ops/avg_pool1d_native.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "c10/core/GradMode.h"
 #include "csrc/common/aten_utils.h"
 #include "csrc/common/cache_key.h"
 #include "csrc/common/dimension_types.h"
 #include "csrc/common/dtype.h"
 #include "csrc/common/error_utils.h"
+#include "csrc/common/fake_tensor_utils.h"
 #include "csrc/common/fixed_size_span.h"
 #include "csrc/common/to_string.h"
 #include "csrc/common/utils.h"
@@ -652,6 +656,25 @@ at::Tensor& AtenAvgPool1dOut(const at::Tensor& self,
                               /*spatial_dim_count=*/1, std::move(param_keys)));
         return out;
       });
+}
+
+at::Tensor AtenAvgPool1dAutograd(const at::Tensor& self,
+                                 at::IntArrayRef kernel_size,
+                                 at::IntArrayRef stride,
+                                 at::IntArrayRef padding, bool ceil_mode,
+                                 bool count_include_pad) {
+  // Differentiation (reverse or forward mode), FakeTensors and functorch
+  // transforms use the upstream decomposition (unsqueeze, avg_pool2d,
+  // squeeze), whose ops have derivative formulas. Other calls use the direct
+  // 1D kernel.
+  if (IsFakeOrFunctorchTensor(self) || self._fw_grad(/*level=*/0).defined() ||
+      (c10::GradMode::is_enabled() && self.requires_grad())) {
+    return at::native::avg_pool1d(self, kernel_size, stride, padding, ceil_mode,
+                                  count_include_pad);
+  }
+  at::AutoDispatchBelowAutograd guard;
+  return AtenAvgPool1d(self, kernel_size, stride, padding, ceil_mode,
+                       count_include_pad);
 }
 
 at::Tensor& AtenAvgPool2dOut(const at::Tensor& self,

@@ -6751,8 +6751,89 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
     t2 = torch.empty(shape, device=tpu_device).exponential_(lambd)
     self.assert_close(golden_result=t1.cpu(), torch_tpu_result=t2.cpu())
 
-    # Test properties (non-negative)
-    self.assertGreaterEqual(t1.min(), 0)
+    # Test strict positivity on (0, inf) and no -0.0
+    self.assertGreater(t1.min().item(), 0)
+    self.assertFalse(torch.signbit(t1).any().item())
+
+  @parameterized.named_parameters(
+      ("float32", torch.float32),
+      ("bfloat16", torch.bfloat16),
+      ("float16", torch.float16),
+      ("float64", torch.float64),
+  )
+  def test_exponential_support_and_precision(self, dtype: torch.dtype) -> None:
+    """Tests exponential_ strict (0, inf) support, acc_type precision, and edge cases."""
+    tpu_device = torch.device("tpu")
+    torch.manual_seed(42)
+
+    num_elements = 100_000
+    q = torch.empty(num_elements, device=tpu_device, dtype=dtype).exponential_(
+        1.0
+    )
+    self.assertTrue(torch.all(q > 0).item())
+    self.assertFalse(torch.signbit(q).any().item())
+
+    if dtype == torch.bfloat16:
+      # With f32 computation precision, bfloat16 draws must have far more than
+      # 2^7 = 128 distinct values and reach past the 7 * ln(2) ~= 4.85 ceiling.
+      self.assertGreater(q.unique().numel(), 128)
+      self.assertGreater(q.max().item(), 5.0)
+
+      rate = 1e30
+      q_rate = torch.empty(
+          100_000, device=tpu_device, dtype=dtype
+      ).exponential_(rate)
+      self.assertTrue(torch.all(q_rate > 0).item())
+      self.assertFalse(torch.signbit(q_rate).any().item())
+
+    if dtype == torch.float16:
+      # Verify lambd >= 2.0 and large lambd (1e5 > f16 max 65504) do not
+      # underflow to 0.0 on cast or overflow lambd to inf on the host.
+      for rate in (2.0, 1e5):
+        q_rate = torch.empty(
+            100_000, device=tpu_device, dtype=dtype
+        ).exponential_(rate)
+        self.assertTrue(torch.all(q_rate > 0).item())
+        self.assertFalse(torch.signbit(q_rate).any().item())
+
+    # lambd = inf must still produce 0.0 (upstream PyTorch contract).
+    q_inf = torch.empty(16, device=tpu_device, dtype=dtype).exponential_(
+        float("inf")
+    )
+    self.assertTrue(torch.all(q_inf == 0).item())
+
+    # Non-contiguous strided slice test
+    base = torch.zeros((16, 32), device=tpu_device, dtype=dtype)
+    strided_view = base[:, ::2]
+    strided_view.exponential_(1.0)
+    self.assertTrue(torch.all(strided_view > 0).item())
+    self.assertFalse(torch.signbit(strided_view).any().item())
+    self.assertTrue(torch.all(base[:, 1::2] == 0).item())
+
+    # Downstream Gumbel-max / exponential race sampler: -log(q) and argmax(p / q)
+    q_race = torch.empty(
+        (4096, 2), device=tpu_device, dtype=dtype
+    ).exponential_(1.0)
+    self.assertTrue(torch.isfinite(-torch.log(q_race)).all().item())
+    probs = torch.tensor([0.0, 1.0], device=tpu_device, dtype=dtype).expand(
+        4096, 2
+    )
+    scores = probs / q_race
+    self.assertFalse(torch.isnan(scores).any().item())
+    sampled = torch.argmax(scores, dim=-1)
+    self.assertTrue(torch.all(sampled == 1).item())
+
+    # Generator offset advancement must use compute_dtype bitwidth (32 for
+    # float16/bfloat16/float32, 64 for float64).
+    gen = torch.Generator(device=tpu_device).manual_seed(1234)
+    self.assertEqual(gen.get_offset(), 0)
+    n_gen = 256
+    torch.empty(n_gen, device=tpu_device, dtype=dtype).exponential_(
+        1.0, generator=gen
+    )
+    compute_bits = 64 if dtype == torch.float64 else 32
+    expected_offset = (n_gen * compute_bits + 127) // 128
+    self.assertEqual(gen.get_offset(), expected_offset)
 
   def test_random_distribution(self):
     for dtype in [
@@ -11983,6 +12064,173 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
       return q, r
 
     self.assert_close_tpu_vs_cpu(run)
+
+  @parameterized.product(
+      shape=[
+          (4, 4),
+          (10, 10),
+          (2, 3, 3),
+          (2, 3, 4, 4),
+          (0, 0),
+          (0, 3, 3),
+          (2, 0, 0),
+      ],
+      dtype=[
+          torch.float32,
+          torch.float64,
+          torch.complex64,
+          torch.complex128,
+      ],
+      upper=[False, True],
+  )
+  def test_linalg_cholesky_ex(self, shape, dtype, upper):
+    n = shape[-1]
+    a = torch.randn(shape, dtype=dtype)
+    eye = torch.eye(n, dtype=dtype).expand(shape)
+    spd = a @ a.mH + eye * max(n, 1)
+    if (
+        dtype == torch.complex128
+        and oss_utils.is_oss()
+        and (ver := utils.libtpu_version()) is not None
+        and ver < (0, 0, 52)
+    ):
+      with self.assertRaisesRegex(  # ASSERT_RAISES_OK=OSS libtpu < 0.0.52 version guard.
+          RuntimeError, "complex128 requires libtpu >= 0.0.52"
+      ):
+        torch.linalg.cholesky_ex(spd.to("tpu"), upper=upper)
+      return
+
+    def run(device):
+      l_func, info_func = torch.linalg.cholesky_ex(spd.to(device), upper=upper)
+      l_out = torch.empty_like(spd, device=device)
+      info_out = torch.empty(shape[:-2], dtype=torch.int32, device=device)
+      torch.linalg.cholesky_ex(
+          spd.to(device), upper=upper, out=(l_out, info_out)
+      )
+      # Also test pre-allocated non-contiguous (Fortran-strided)
+      # destination `l`.
+      l_noncontig = torch.empty_like(spd, device=device).mT
+      info_noncontig = torch.empty(shape[:-2], dtype=torch.int32, device=device)
+      torch.linalg.cholesky_ex(
+          spd.to(device), upper=upper, out=(l_noncontig, info_noncontig)
+      )
+      return (
+          l_func,
+          info_func,
+          l_out,
+          info_out,
+          l_noncontig,
+          info_noncontig,
+      )
+
+    rtol = 1e-6 if dtype in (torch.float64, torch.complex128) else 1e-4
+    atol = 1e-6 if dtype in (torch.float64, torch.complex128) else 1e-4
+    self.assert_close_tpu_vs_cpu(run, rtol=rtol, atol=atol)
+
+  @parameterized.product(
+      dtype=[
+          torch.float32,
+          torch.float64,
+          torch.complex64,
+          torch.complex128,
+      ],
+      upper=[False, True],
+  )
+  def test_linalg_cholesky_ex_non_positive_definite(self, dtype, upper):
+    # Batch of 3 matrices:
+    # - batch 0: positive-definite (succeeds, info == 0)
+    # - batch 1: fails at 1st leading minor (A[0, 0] == -1, info == 1)
+    # - batch 2: fails at 2nd leading minor (A[1, 1] == -1, info > 0)
+    batch = torch.stack([
+        torch.tensor([[4.0, 0.0], [0.0, 9.0]], dtype=dtype),
+        torch.tensor([[-1.0, 0.0], [0.0, 4.0]], dtype=dtype),
+        torch.tensor([[4.0, 0.0], [0.0, -1.0]], dtype=dtype),
+    ]).to("tpu")
+    if (
+        dtype == torch.complex128
+        and oss_utils.is_oss()
+        and (ver := utils.libtpu_version()) is not None
+        and ver < (0, 0, 52)
+    ):
+      with self.assertRaisesRegex(  # ASSERT_RAISES_OK=OSS libtpu < 0.0.52 version guard.
+          RuntimeError, "complex128 requires libtpu >= 0.0.52"
+      ):
+        torch.linalg.cholesky_ex(batch, upper=upper, check_errors=False)
+      return
+
+    l_tpu, info_tpu = torch.linalg.cholesky_ex(
+        batch, upper=upper, check_errors=False
+    )
+    info_cpu = info_tpu.cpu()
+    self.assertEqual(info_cpu[0].item(), 0)
+    self.assertEqual(info_cpu[1].item(), 1)
+    self.assertGreater(info_cpu[2].item(), 0)
+
+    # Verify the valid batch element (index 0) still matches CPU factor.
+    l_expected, _ = torch.linalg.cholesky_ex(batch[0].cpu(), upper=upper)
+    self.assertEqual(l_tpu[0].cpu(), l_expected)
+
+  def test_linalg_cholesky_multivariate_normal_and_constraint(self):
+    from torch.distributions import constraints, MultivariateNormal
+
+    covariance = torch.eye(4, device="tpu") * 2.0
+    self.assertTrue(constraints.positive_definite.check(covariance).item())
+    non_pd = torch.tensor([[-1.0, 0.0], [0.0, 1.0]], device="tpu")
+    self.assertFalse(constraints.positive_definite.check(non_pd).item())
+
+    mean = torch.zeros(4, device="tpu")
+    dist = MultivariateNormal(mean, covariance_matrix=covariance)
+    sample = dist.sample((10,))
+    self.assertEqual(sample.shape, (10, 4))
+    self.assertEqual(sample.device.type, "tpu")
+    log_prob = dist.log_prob(sample)
+    self.assertEqual(log_prob.shape, (10,))
+
+    # Test the exact HuggingFace transformers resize_token_embeddings pattern:
+    old_embeddings_weight = torch.randn(100, 32, device="tpu")
+    mean_embeddings = old_embeddings_weight.mean(dim=0)
+    old_centered_embeddings = old_embeddings_weight - mean_embeddings
+    cov = old_centered_embeddings.T @ old_centered_embeddings / 100
+    eps = 1e-4
+    cov_reg = eps * cov + torch.eye(32, device="tpu") * 1e-6
+    self.assertTrue(constraints.positive_definite.check(cov_reg).all().item())
+    mvn = MultivariateNormal(mean_embeddings, covariance_matrix=cov_reg)
+    new_weights = mvn.sample((15,))
+    self.assertEqual(new_weights.shape, (15, 32))
+    self.assertEqual(new_weights.device.type, "tpu")
+
+  def test_linalg_cholesky_ex_out_views_and_strides(self):
+    device = "tpu"
+    # 1. Sliced view with non-zero storage_offset
+    base_l = torch.zeros(2, 2, 2, dtype=torch.float32, device=device)
+    l_slice = base_l[1]  # offset = 4
+    base_info = torch.full((2,), -1, dtype=torch.int32, device=device)
+    info_slice = base_info[1]  # offset = 1
+
+    a = torch.tensor(
+        [[4.0, 0.0], [0.0, 9.0]], dtype=torch.float32, device=device
+    )
+    torch.linalg.cholesky_ex(a, out=(l_slice, info_slice))
+
+    self.assertEqual(l_slice.storage_offset(), 4)
+    self.assertEqual(info_slice.storage_offset(), 1)
+    self.assertTrue(torch.equal(base_l[0].cpu(), torch.zeros(2, 2)))
+    self.assertTrue(
+        torch.equal(base_l[1].cpu(), torch.tensor([[2.0, 0.0], [0.0, 3.0]]))
+    )
+    self.assertTrue(
+        torch.equal(base_info.cpu(), torch.tensor([-1, 0], dtype=torch.int32))
+    )
+
+    # 2. Transposed out tensor strides preserved
+    l_transposed = torch.empty(2, 2, dtype=torch.float32, device=device).t()
+    self.assertEqual(l_transposed.stride(), (1, 2))
+    info = torch.empty((), dtype=torch.int32, device=device)
+    torch.linalg.cholesky_ex(a, out=(l_transposed, info))
+    self.assertEqual(l_transposed.stride(), (1, 2))
+    self.assertTrue(
+        torch.equal(l_transposed.cpu(), torch.tensor([[2.0, 0.0], [0.0, 3.0]]))
+    )
 
   def _assert_all_nan(self, *tensors):
     for t in tensors:
@@ -19644,6 +19892,134 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
     self.assert_close_tpu_vs_cpu(compute, atol=atol)
 
   @parameterized.product(
+      shape=[(2, 3, 16), (3, 20), (1, 2, 5)],
+      kernel_size=[2, 3],
+      stride=[None, 1, 2, 3],
+      padding=[0, 1],
+      ceil_mode=[False, True],
+      count_include_pad=[False, True],
+      dtype=[torch.float32, torch.bfloat16],
+  )
+  def test_avg_pool1d_backward(
+      self,
+      shape,
+      kernel_size,
+      stride,
+      padding,
+      ceil_mode,
+      count_include_pad,
+      dtype,
+  ):
+    torch.manual_seed(42)
+    x_cpu = torch.randn(shape, dtype=dtype, requires_grad=True)
+    x_tpu = x_cpu.detach().to("tpu").requires_grad_(True)
+    kwargs = {
+        "kernel_size": kernel_size,
+        "padding": padding,
+        "ceil_mode": ceil_mode,
+        "count_include_pad": count_include_pad,
+    }
+    if stride is not None:
+      kwargs["stride"] = stride
+    atol = 5e-3 if dtype == torch.bfloat16 else None
+
+    out_cpu = torch.nn.functional.avg_pool1d(x_cpu, **kwargs)
+    out_tpu = torch.nn.functional.avg_pool1d(x_tpu, **kwargs)
+    self.assertIsNotNone(out_tpu.grad_fn)
+    utils.assert_close(actual=out_tpu.cpu(), expected=out_cpu, atol=atol)
+
+    grad_out_cpu = torch.randn_like(out_cpu)
+    out_cpu.backward(grad_out_cpu)
+    out_tpu.backward(grad_out_cpu.to("tpu"))
+    utils.assert_close(actual=x_tpu.grad.cpu(), expected=x_cpu.grad, atol=atol)
+
+  def test_avg_pool1d_backward_empty_batch(self):
+    x_cpu = torch.randn(0, 3, 16, requires_grad=True)
+    x_tpu = x_cpu.detach().to("tpu").requires_grad_(True)
+
+    out_cpu = torch.nn.functional.avg_pool1d(x_cpu, 2)
+    out_tpu = torch.nn.functional.avg_pool1d(x_tpu, 2)
+    self.assertIsNotNone(out_tpu.grad_fn)
+    self.assertEqual(out_tpu.shape, out_cpu.shape)
+
+    out_cpu.sum().backward()
+    out_tpu.sum().backward()
+    self.assertEqual(x_tpu.grad.shape, x_cpu.grad.shape)
+
+  def test_avg_pool1d_invalid_args_with_grad(self):
+    x = torch.randn(2, 3, 16)
+
+    def compute(device):
+      x_device = x.detach().to(device).requires_grad_(True)
+      # Padding larger than half the kernel size is rejected.
+      return torch.nn.functional.avg_pool1d(x_device, 2, padding=2)
+
+    self.assert_close_tpu_vs_cpu(compute, allow_failure=True)
+
+  def test_avg_pool1d_vmap(self):
+    torch.manual_seed(42)
+    x = torch.randn(4, 3, 16)
+
+    def compute(device):
+      return torch.vmap(lambda t: torch.nn.functional.avg_pool1d(t, 2))(
+          x.to(device)
+      )
+
+    self.assert_close_tpu_vs_cpu(compute)
+
+  def test_avg_pool1d_double_backward(self):
+    torch.manual_seed(42)
+    x_cpu = torch.randn(2, 3, 16, requires_grad=True)
+    x_tpu = x_cpu.detach().to("tpu").requires_grad_(True)
+
+    def grad_of_grad(x):
+      out = torch.nn.functional.avg_pool1d(x, 3, stride=2, padding=1)
+      (grad,) = torch.autograd.grad(out.pow(2).sum(), x, create_graph=True)
+      grad.pow(2).sum().backward()
+      return x.grad
+
+    utils.assert_close(
+        actual=grad_of_grad(x_tpu).cpu(), expected=grad_of_grad(x_cpu)
+    )
+
+  def test_avg_pool1d_forward_ad(self):
+    torch.manual_seed(42)
+    x = torch.randn(2, 3, 16)
+    tangent = torch.randn_like(x)
+
+    def jvp(device):
+      with torch.autograd.forward_ad.dual_level():
+        dual = torch.autograd.forward_ad.make_dual(
+            x.to(device), tangent.to(device)
+        )
+        out = torch.nn.functional.avg_pool1d(dual, 3, stride=2, padding=1)
+        return torch.autograd.forward_ad.unpack_dual(out).tangent
+
+    utils.assert_close(actual=jvp("tpu").cpu(), expected=jvp("cpu"))
+
+  def test_avg_pool1d_backward_compiled(self):
+    def pool(x):
+      return torch.nn.functional.avg_pool1d(x, 3, stride=2, padding=1)
+
+    compiled_pool = torch.compile(
+        pool, backend="tpu", fullgraph=True, dynamic=False
+    )
+    torch.manual_seed(42)
+    for length in (16, 24):
+      x_cpu = torch.randn(2, 3, length, requires_grad=True)
+      x_tpu = x_cpu.detach().to("tpu").requires_grad_(True)
+
+      out_cpu = pool(x_cpu)
+      out_tpu = compiled_pool(x_tpu)
+      self.assertIsNotNone(out_tpu.grad_fn)
+      utils.assert_close(actual=out_tpu.cpu(), expected=out_cpu)
+
+      grad_out = torch.randn_like(out_cpu)
+      out_cpu.backward(grad_out)
+      out_tpu.backward(grad_out.to("tpu"))
+      utils.assert_close(actual=x_tpu.grad.cpu(), expected=x_cpu.grad)
+
+  @parameterized.product(
       shape=[(2, 3, 16), (3, 20)],
       kernel_size=[2, 3],
       stride=[[], [1], [2]],
@@ -21426,18 +21802,15 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
     finally:
       torch.set_float32_matmul_precision(prev_prec)
 
-  @parameterized.parameters(True, False)
-  def test_flex_attention_causal(self, is_causal: bool):
+  @parameterized.named_parameters(
+      ("causal", lambda b, h, q_i, kv_i: q_i >= kv_i, True),
+      ("unmasked", flex_attention.noop_mask, False),
+      ("prefix", lambda b, h, q_i, kv_i: (kv_i < 128) | (q_i >= kv_i), False),
+  )
+  def test_flex_attention_causal(self, mask_mod, is_causal: bool):
     q, k, v = (
         torch.randn(1, 2, 512, 128, device="tpu", dtype=torch.bfloat16)
         for _ in range(3)
-    )
-
-    # Causal mask when is_causal=True, otherwise full unmasked attention.
-    mask_mod = (
-        (lambda b, h, q_i, kv_i: q_i >= kv_i)
-        if is_causal
-        else flex_attention.noop_mask
     )
     bm = flex_attention.create_block_mask(
         mask_mod, None, None, 512, 512, device="tpu"
@@ -21450,42 +21823,13 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
     ) as sdpa_mock:
       out = flex_attention.flex_attention(q, k, v, block_mask=bm)
       self.assertEqual(sdpa_mock.call_args.kwargs["is_causal"], is_causal)
-      self.assertEqual(
-          sdpa_mock.call_args.kwargs["attn_mask"] is None, is_causal
-      )
-
-    mask_2d = flex_attention.create_mask(mask_mod, 1, 1, 512, 512, device="tpu")
-    expected = torch.nn.functional.scaled_dot_product_attention(
-        q, k, v, attn_mask=mask_2d
-    )
-    utils.assert_close(out, expected)
-
-  @parameterized.parameters(128, 512)
-  def test_flex_attention_sliding_window(self, window_size: int):
-    q, k, v = (
-        torch.randn(1, 2, 512, 128, device="tpu", dtype=torch.bfloat16)
-        for _ in range(3)
-    )
-    mask_mod = lambda b, h, q_i, kv_i: (q_i >= kv_i) & (
-        q_i - kv_i < window_size
-    )
-    bm = flex_attention.create_block_mask(
-        mask_mod, None, None, 512, 512, device="tpu"
-    )
-    with mock.patch.object(
-        torch.nn.functional,
-        "scaled_dot_product_attention",
-        wraps=torch.nn.functional.scaled_dot_product_attention,
-    ) as sdpa_mock:
-      out = flex_attention.flex_attention(q, k, v, block_mask=bm)
-      is_full_causal = window_size == 512
-      self.assertEqual(sdpa_mock.call_args.kwargs["is_causal"], is_full_causal)
-      if is_full_causal:
+      if is_causal:
         self.assertIsNone(sdpa_mock.call_args.kwargs["attn_mask"])
       else:
         self.assertEqual(
-            sdpa_mock.call_args.kwargs["attn_mask"].shape, (window_size,)
+            sdpa_mock.call_args.kwargs["attn_mask"].shape, (1, 1, 512, 512)
         )
+
     mask_2d = flex_attention.create_mask(mask_mod, 1, 1, 512, 512, device="tpu")
     expected = torch.nn.functional.scaled_dot_product_attention(
         q, k, v, attn_mask=mask_2d
@@ -21496,7 +21840,7 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
     # Equal-length packed documents are folded into the batch dimension and
     # attended with the mask shared by all documents.
     # Converting that per-document mask to SDPA arguments is
-    # covered by the causal and sliding window tests above.
+    # covered by the causal test above.
     docs, doc_len, heads = 4, 512, 2
     seq = docs * doc_len
     q, k, v = (
@@ -21584,33 +21928,215 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
     mask[5, 2] = True
     self.assertIsNone(flex_attention_redirect.equal_square_tile_size(mask))
 
-  @parameterized.product(
-      window_size=[128, 160],
-      dtype=[torch.bfloat16, torch.float32],
-  )
-  def test_sdpa_sliding_window(self, window_size: int, dtype: torch.dtype):
-
-    def make_tensor():
-      return torch.randn(
-          1, 2, 512, 128, device="tpu", dtype=dtype, requires_grad=True
-      )
-
-    q, k, v, dy = make_tensor(), make_tensor(), make_tensor(), make_tensor()
-
-    def run(mask):
-      out = torch.nn.functional.scaled_dot_product_attention(
-          q, k, v, attn_mask=mask
-      )
-      return out, *torch.autograd.grad(out, (q, k, v), dy)
-
-    mask_1d = torch.empty(window_size, device="tpu", dtype=dtype)
-    # Reference 2D causal band mask: True where 0 <= row - col < window_size.
-    mask_2d = (
-        torch.ones(512, 512, device="tpu", dtype=torch.bool)
-        .tril_()
-        .triu_(1 - window_size)
+  def test_splash_sdpa_gqa_fwd_bwd(self):
+    batch, n_heads, n_kv_heads, seq_len, head_dim = 2, 8, 2, 512, 128
+    dtype = torch.bfloat16
+    torch.manual_seed(42)
+    q = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    k = torch.randn(
+        batch, n_kv_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    v = torch.randn(
+        batch, n_kv_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    dy = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
     )
-    utils.assert_close(run(mask_1d), run(mask_2d))
+
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    v_ref = v.detach().clone().requires_grad_(True)
+    out_ref = torch.nn.functional.scaled_dot_product_attention(
+        q_ref, k_ref, v_ref, is_causal=True, enable_gqa=True
+    )
+    out_ref.backward(dy)
+
+    out = torch.tpu.ops.splash_sdpa(q, k, v, is_causal=True, enable_gqa=True)
+    out.backward(dy)
+
+    self.assertEqual(k.grad.shape, (batch, n_kv_heads, seq_len, head_dim))
+    self.assertEqual(v.grad.shape, (batch, n_kv_heads, seq_len, head_dim))
+    utils.assert_close(out, out_ref, rtol=2e-2, atol=2e-2)
+    utils.assert_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
+    utils.assert_close(k.grad, k_ref.grad, rtol=3e-2, atol=3e-2)
+    utils.assert_close(v.grad, v_ref.grad, rtol=3e-2, atol=3e-2)
+
+  @parameterized.product(
+      seq_len=[384, 768],
+      compiled=[False, True],
+  )
+  def test_splash_sdpa_non_512_seq_len(self, seq_len: int, compiled: bool):
+    batch, n_heads, head_dim = 1, 4, 128
+    dtype = torch.bfloat16
+    torch.manual_seed(42)
+    q = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    k = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    v = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    dy = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    )
+
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    v_ref = v.detach().clone().requires_grad_(True)
+    out_ref = torch.nn.functional.scaled_dot_product_attention(
+        q_ref, k_ref, v_ref, is_causal=True
+    )
+    out_ref.backward(dy)
+
+    fn = torch.tpu.ops.splash_sdpa
+    if compiled:
+      fn = torch.compile(fn, backend="tpu")
+    out = fn(q, k, v, is_causal=True)
+    out.backward(dy)
+
+    utils.assert_close(out, out_ref, rtol=2e-2, atol=2e-2)
+    utils.assert_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
+    utils.assert_close(k.grad, k_ref.grad, rtol=3e-2, atol=3e-2)
+    utils.assert_close(v.grad, v_ref.grad, rtol=3e-2, atol=3e-2)
+
+  @parameterized.parameters(
+      {"block_dkv": 256},
+      {"block_kv": 256},
+  )
+  def test_splash_sdpa_small_explicit_blocks(self, **block_kwargs):
+    batch, n_heads, seq_len, head_dim = 1, 4, 1024, 128
+    dtype = torch.bfloat16
+    torch.manual_seed(42)
+    q = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    k = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    v = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    dy = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    )
+
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    v_ref = v.detach().clone().requires_grad_(True)
+    out_ref = torch.nn.functional.scaled_dot_product_attention(
+        q_ref, k_ref, v_ref, is_causal=True
+    )
+    out_ref.backward(dy)
+
+    out = torch.tpu.ops.splash_sdpa(q, k, v, is_causal=True, **block_kwargs)
+    out.backward(dy)
+
+    utils.assert_close(out, out_ref, rtol=2e-2, atol=2e-2)
+    utils.assert_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
+    utils.assert_close(k.grad, k_ref.grad, rtol=3e-2, atol=3e-2)
+    utils.assert_close(v.grad, v_ref.grad, rtol=3e-2, atol=3e-2)
+
+  @parameterized.product(
+      seg_dtype=[torch.int32, torch.int64],
+      compiled=[False, True],
+  )
+  def test_splash_sdpa_segment_ids_packed_documents(
+      self, seg_dtype: torch.dtype, compiled: bool
+  ):
+    batch, n_heads, n_kv_heads, seq_len, head_dim = 2, 4, 2, 768, 128
+    dtype = torch.bfloat16
+    torch.manual_seed(42)
+    q = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    k = torch.randn(
+        batch, n_kv_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    v = torch.randn(
+        batch, n_kv_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    ).requires_grad_(True)
+    dy = torch.randn(
+        batch, n_heads, seq_len, head_dim, device="tpu", dtype=dtype
+    )
+
+    seg_row0 = [0] * 200 + [1] * 312 + [2] * 256
+    seg_row1 = [0] * 384 + [1] * 128 + [2] * 256
+    segment_ids = torch.tensor(
+        [seg_row0, seg_row1], device="tpu", dtype=seg_dtype
+    )
+
+    causal = torch.ones(seq_len, seq_len, device="tpu", dtype=torch.bool).tril()
+    same_seg = segment_ids[:, None, :, None] == segment_ids[:, None, None, :]
+    attn_mask = causal[None, None, :, :] & same_seg
+
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    v_ref = v.detach().clone().requires_grad_(True)
+    out_ref = torch.nn.functional.scaled_dot_product_attention(
+        q_ref, k_ref, v_ref, attn_mask=attn_mask, enable_gqa=True
+    )
+    out_ref.backward(dy)
+
+    fn = torch.tpu.ops.splash_sdpa
+    if compiled:
+      fn = torch.compile(fn, backend="tpu")
+    out = fn(q, k, v, is_causal=True, enable_gqa=True, segment_ids=segment_ids)
+    out.backward(dy)
+
+    utils.assert_close(out, out_ref, rtol=2e-2, atol=2e-2)
+    utils.assert_close(q.grad, q_ref.grad, rtol=3e-2, atol=3e-2)
+    utils.assert_close(k.grad, k_ref.grad, rtol=3e-2, atol=3e-2)
+    utils.assert_close(v.grad, v_ref.grad, rtol=3e-2, atol=3e-2)
+
+    # Verify zero cross-document gradient leakage: a loss depending only on
+    # document 0 in batch 0 (positions < 200) must produce zero gradients on
+    # documents 1 and 2 (positions >= 200).
+    q2 = q.detach().clone().requires_grad_(True)
+    k2 = k.detach().clone().requires_grad_(True)
+    v2 = v.detach().clone().requires_grad_(True)
+    out2 = torch.tpu.ops.splash_sdpa(
+        q2, k2, v2, is_causal=True, enable_gqa=True, segment_ids=segment_ids
+    )
+    out2[0, :, :200, :].sum().backward()
+    self.assertEqual(q2.grad[0, :, 200:, :].abs().max().item(), 0.0)
+    self.assertEqual(k2.grad[0, :, 200:, :].abs().max().item(), 0.0)
+    self.assertEqual(v2.grad[0, :, 200:, :].abs().max().item(), 0.0)
+
+  def test_splash_sdpa_invalid_inputs(self):
+    q = torch.randn(2, 8, 512, 128, device="tpu", dtype=torch.bfloat16)
+    k_bad_gqa = torch.randn(2, 3, 512, 128, device="tpu", dtype=torch.bfloat16)
+    v_bad_gqa = torch.randn(2, 3, 512, 128, device="tpu", dtype=torch.bfloat16)
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=no jax in errors tests
+        ValueError, r"n_heads \(8\) must be divisible by n_kv_heads \(3\)"
+    ):
+      torch.tpu.ops.splash_sdpa(q, k_bad_gqa, v_bad_gqa, enable_gqa=True)
+
+    q_bad_seq = torch.randn(1, 4, 100, 128, device="tpu", dtype=torch.bfloat16)
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=no jax in errors tests
+        ValueError, r"seq_len \(100\) must be a positive multiple of 128"
+    ):
+      torch.tpu.ops.splash_sdpa(q_bad_seq, q_bad_seq, q_bad_seq)
+
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=no jax in errors tests
+        ValueError, r"block_kv \(200\) must be a positive multiple of 128"
+    ):
+      torch.tpu.ops.splash_sdpa(q, q, q, block_kv=200)
+
+    bad_seg_1d = torch.zeros(512, device="tpu", dtype=torch.int32)
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=no jax in errors tests
+        ValueError, "segment_ids"
+    ):
+      torch.tpu.ops.splash_sdpa(q, q, q, segment_ids=bad_seg_1d)
+
+    bad_seg_float = torch.zeros(2, 512, device="tpu", dtype=torch.float32)
+    with self.assertRaisesRegex(  # ASSERT_RAISES_OK=no jax in errors tests
+        ValueError, "segment_ids"
+    ):
+      torch.tpu.ops.splash_sdpa(q, q, q, segment_ids=bad_seg_float)
 
   def test_pointwise_op_dtype_promotion(self):
     """Ensure that pointwise ops promote as expected.
@@ -24178,6 +24704,63 @@ class OpTestingFrameworkTest(op_testing.OpInfoTestBase):
     torch.add(a, b, alpha=70000.0, out=out)
     self.assertEqual(out.dtype, torch.float16)
     utils.assert_close(actual=out.cpu(), expected=expected)
+
+  def test_addmm_bool_scalars_on_float(self):
+    b = torch.ones(2, 2, dtype=torch.float32)
+    m1 = torch.full((2, 2), 2.0, dtype=torch.float32)
+    m2 = torch.full((2, 2), 3.0, dtype=torch.float32)
+    for beta, alpha in ((False, True), (True, True), (True, False)):
+      with self.subTest(beta=beta, alpha=alpha):
+        self.assert_close_tpu_vs_cpu(
+            lambda device, beta=beta, alpha=alpha: torch.addmm(
+                b.to(device),
+                m1.to(device),
+                m2.to(device),
+                beta=beta,
+                alpha=alpha,
+            )
+        )
+
+  def test_addmm_out_dtype_float32_from_low_precision(self):
+    for mat_dtype in (torch.bfloat16, torch.float16):
+      for self_dtype in (mat_dtype, torch.float32):
+        for beta, alpha in ((1.0, 1.0), (0.0, 2.0), (2.0, 3.0)):
+          with self.subTest(
+              mat_dtype=mat_dtype, self_dtype=self_dtype, beta=beta, alpha=alpha
+          ):
+            b_cpu = torch.ones(3, 4, dtype=self_dtype)
+            m1_cpu = torch.ones(3, 5, dtype=mat_dtype)
+            m2_cpu = torch.ones(5, 4, dtype=mat_dtype)
+            expected = beta * b_cpu.float() + alpha * (
+                m1_cpu.float() @ m2_cpu.float()
+            )
+
+            b_tpu = b_cpu.to("tpu")
+            m1_tpu = m1_cpu.to("tpu")
+            m2_tpu = m2_cpu.to("tpu")
+            res = torch.addmm(
+                b_tpu,
+                m1_tpu,
+                m2_tpu,
+                beta=beta,
+                alpha=alpha,
+                out_dtype=torch.float32,
+            )
+            self.assertEqual(res.dtype, torch.float32)
+            utils.assert_close(res.cpu(), expected)
+
+            out_tpu = torch.empty(3, 4, dtype=torch.float32, device="tpu")
+            torch.addmm(
+                b_tpu,
+                m1_tpu,
+                m2_tpu,
+                beta=beta,
+                alpha=alpha,
+                out_dtype=torch.float32,
+                out=out_tpu,
+            )
+            self.assertEqual(out_tpu.dtype, torch.float32)
+            utils.assert_close(out_tpu.cpu(), expected)
 
 
 if __name__ == "__main__":

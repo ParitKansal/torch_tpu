@@ -153,6 +153,21 @@ torch_tpu_py_library(
 )
 
 torch_tpu_py_library(
+    name = "flops",
+    srcs = ["flops.py"],
+    deps = [
+        ":common",
+        ":context",
+        ":mode",
+        ":registry",
+        ":step_lib",
+        ":target",
+        "//shims/absl_py/logging",
+        "//shims/torch:pytorch",
+    ],
+)
+
+torch_tpu_py_library(
     name = "metrics",
     srcs = ["metrics.py"],
 )
@@ -342,6 +357,7 @@ torch_tpu_py_test(
         ":discovery",
         ":fake_memory",
         ":flags",
+        ":flops",
         ":measure",
         ":metrics",
         ":mode",
@@ -413,6 +429,7 @@ torch_tpu_py_test(
         ":discovery",
         ":fake_memory",
         ":flags",
+        ":flops",
         ":measure",
         ":metrics",
         ":mode",
@@ -483,6 +500,7 @@ torch_tpu_py_test(
         ":discovery",
         ":fake_memory",
         ":flags",
+        ":flops",
         ":measure",
         ":metrics",
         ":mode",
@@ -551,6 +569,7 @@ torch_tpu_py_test(
         ":discovery",
         ":fake_memory",
         ":flags",
+        ":flops",
         ":measure",
         ":metrics",
         ":mode",
@@ -656,6 +675,7 @@ torch_tpu_py_test(
         ":discovery",
         ":fake_memory",
         ":flags",
+        ":flops",
         ":measure",
         ":metrics",
         ":mode",
@@ -715,6 +735,7 @@ torch_tpu_py_test(
         ":discovery",
         ":fake_memory",
         ":flags",
+        ":flops",
         ":measure",
         ":metrics",
         ":mode",

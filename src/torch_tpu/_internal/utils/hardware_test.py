@@ -14,6 +14,7 @@
 
 from collections.abc import Callable, Sequence
 import dataclasses
+import functools
 import math
 import os
 import pathlib
@@ -97,7 +98,7 @@ class TpuTopologyMockTest(seed_test_utils.RepeatableTest):
       (1, "1,1,1"),
       (4, "2,2,1"),
       # The 8-chip topology differs between internal and OSS builds.
-      (8, ",".join(map(str, hardware._V5E_TOPOLOGY[8]))),
+      (8, ",".join(map(str, hardware.TpuSpec.V5E.topologies[8]))),
   )
   def test_v5e_chips(self, num_chips, expected_topology):
     self._run_mock_test(
@@ -187,10 +188,8 @@ class TpuTopologyMockTest(seed_test_utils.RepeatableTest):
     self.assertIsNone(hardware.get_tpu_topology(world_size=4))
 
   def test_no_pci_devices_dir(self):
-    missing_dir = pathlib.Path(self.create_tempdir().full_path) / "devices"
-    self.enter_context(
-        mock.patch.object(hardware, "_PCI_DEVICES_DIR", missing_dir)
-    )
+    root = pathlib.Path(self.create_tempdir().full_path)
+    self._patch_pci_dirs(root / "devices", root / "vfio")
 
     self.assertIsNone(hardware.get_tpu_topology())
     self.assertEqual(hardware.get_tpu_device_count(), 0)
@@ -307,6 +306,42 @@ class TpuTopologyMockTest(seed_test_utils.RepeatableTest):
     ):
       hardware.TpuSpec.V7.topology(3)
 
+  def _patch_pci_dirs(
+      self, pci_devices_dir: pathlib.Path, vfio_dir: pathlib.Path
+  ) -> None:
+    self.enter_context(
+        mock.patch.object(
+            hardware._hardware_backend,
+            "get_tpu_spec",
+            functools.partial(
+                hardware._hardware_backend.get_tpu_spec,
+                pci_devices_dir=os.fspath(pci_devices_dir),
+            ),
+        )
+    )
+    self.enter_context(
+        mock.patch.object(
+            hardware._hardware_backend,
+            "get_tpu_device_count",
+            functools.partial(
+                hardware._hardware_backend.get_tpu_device_count,
+                pci_devices_dir=os.fspath(pci_devices_dir),
+                vfio_dir=os.fspath(vfio_dir),
+            ),
+        )
+    )
+    self.enter_context(
+        mock.patch.object(
+            hardware._hardware_backend,
+            "get_tpu_topology",
+            functools.partial(
+                hardware._hardware_backend.get_tpu_topology,
+                pci_devices_dir=os.fspath(pci_devices_dir),
+                vfio_dir=os.fspath(vfio_dir),
+            ),
+        )
+    )
+
   def _set_up_pci_fs(self, devices: Sequence[_FakePciDevice]) -> None:
     """Makes `hardware` scan a fake sysfs and devfs with the given devices."""
     root = pathlib.Path(self.create_tempdir().full_path)
@@ -328,10 +363,7 @@ class TpuTopologyMockTest(seed_test_utils.RepeatableTest):
         if device.vfio_exposed:
           (vfio_dir / device.iommu_group).touch()
 
-    self.enter_context(
-        mock.patch.object(hardware, "_PCI_DEVICES_DIR", pci_devices_dir)
-    )
-    self.enter_context(mock.patch.object(hardware, "_VFIO_DIR", vfio_dir))
+    self._patch_pci_dirs(pci_devices_dir, vfio_dir)
 
   def _run_mock_test(
       self,
@@ -346,7 +378,7 @@ class TpuTopologyMockTest(seed_test_utils.RepeatableTest):
     self.assertEqual(hardware.get_tpu_topology(), expected_topology)
     self.assertEqual(hardware.get_tpu_device_count(), expected_device_count)
     self.assertEqual(hardware.get_tpu_device_name(), expected_device_name)
-    self.assertEqual(hardware.get_tpu_spec(), expected_spec)
+    self.assertIs(hardware.get_tpu_spec(), expected_spec)
     self.assertEqual(
         hardware.get_hbm_bytes_per_device(),
         None if expected_spec is None else expected_spec.hbm_bytes_per_device,
@@ -515,6 +547,16 @@ class DeviceCapabilityTest(seed_test_utils.RepeatableTest):
         tpu_spec.bf16_flops_per_device, expected_bf16_flops_per_device
     )
     self.assertEqual(tpu_spec.sparse_core_spec, expected_sparse_core_spec)
+    reconstructed = hardware.TpuSpec(
+        name=tpu_spec.name,
+        devices_per_chip=tpu_spec.devices_per_chip,
+        hbm_bytes_per_chip=tpu_spec.hbm_bytes_per_chip,
+        bf16_flops_per_chip=tpu_spec.bf16_flops_per_chip,
+        topologies=tpu_spec.topologies,
+        sparse_core_spec=tpu_spec.sparse_core_spec,
+    )
+    self.assertEqual(reconstructed, tpu_spec)
+    self.assertEqual(reconstructed.topologies, tpu_spec.topologies)
 
   def test_each_tpu_spec_has_pci_device_id_and_topologies(self):
     tpu_specs = [
@@ -523,14 +565,14 @@ class DeviceCapabilityTest(seed_test_utils.RepeatableTest):
         if isinstance(value, hardware.TpuSpec)
     ]
     self.assertCountEqual(
-        hardware._TPU_SPEC_BY_PCI_DEVICE_ID.values(), tpu_specs
+        hardware.TpuSpec.specs_by_pci_device_id().values(), tpu_specs
     )
     for tpu_spec in tpu_specs:
       with self.subTest(tpu=tpu_spec.name):
         self.assertNotEmpty(tpu_spec.topologies)
 
   def test_topologies_match_device_counts_and_devices_per_chip(self):
-    for tpu_spec in hardware._TPU_SPEC_BY_PCI_DEVICE_ID.values():
+    for tpu_spec in hardware.TpuSpec.specs_by_pci_device_id().values():
       for num_devices, topology in tpu_spec.topologies.items():
         with self.subTest(tpu=tpu_spec.name, num_devices=num_devices):
           self.assertEqual(math.prod(topology), num_devices)

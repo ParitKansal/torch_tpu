@@ -274,13 +274,6 @@ absl::StatusOr<c10::SymDimVector> ValidateLinearInputs(
   return output_dims;
 }
 
-// Converts the sizes of real (non-fake) tensors, which are never symbolic, to
-// `Dimensions`.
-Dimensions ToDimensions(c10::SymIntArrayRef sym_dims) {
-  const at::IntArrayRef dims = C10_AS_INTARRAYREF_SLOW(sym_dims);
-  return Dimensions(dims.begin(), dims.end());
-}
-
 // Validates the self (input), grad_output, and weight tensors for
 // `aten::linear_backward`.
 absl::Status ValidateLinearBackwardInputs(const at::Tensor& self,
@@ -288,8 +281,8 @@ absl::Status ValidateLinearBackwardInputs(const at::Tensor& self,
                                           const at::Tensor& weight) {
   TT_ASSIGN_OR_RETURN(const c10::SymDimVector sym_expected_output_dims,
                       ValidateLinearInputs(self, weight, std::nullopt));
-  const Dimensions expected_output_dims =
-      ToDimensions(sym_expected_output_dims);
+  TT_ASSIGN_OR_RETURN(const Dimensions expected_output_dims,
+                      ConcreteSizeToDimensions(sym_expected_output_dims));
   TT_RET_CHECK(grad_output.scalar_type() == self.scalar_type(),
                error::kInvalidArgument)
       << "expected the grad_output tensor to have dtype "
@@ -343,10 +336,12 @@ absl::StatusOr<DeviceBufferRef> Linear(const at::Tensor& input,
                                        const at::Tensor& weight,
                                        const std::optional<at::Tensor>& bias,
                                        OpParamCacheKeys param_keys) {
-  TT_ASSIGN_OR_RETURN(const c10::SymDimVector output_dims,
+  TT_ASSIGN_OR_RETURN(const c10::SymDimVector sym_output_dims,
                       ValidateLinearInputs(input, weight, bias));
+  TT_ASSIGN_OR_RETURN(Dimensions output_dims,
+                      ConcreteSizeToDimensions(sym_output_dims));
   return DispatchLinearImpl<absl::StatusOr<DeviceBufferRef>>(
-      input, weight, bias, ToDimensions(output_dims), std::move(param_keys),
+      input, weight, bias, std::move(output_dims), std::move(param_keys),
       [&]  // REF_CAPTURE_OK=called synchronously
       (auto op_builder, auto options) {
         return DispatchOp<2>(std::move(op_builder), {input, weight},
@@ -362,12 +357,14 @@ absl::StatusOr<DeviceBufferRef> Linear(const at::Tensor& input,
 absl::Status LinearOut(const at::Tensor& input, const at::Tensor& weight,
                        const std::optional<at::Tensor>& bias, at::Tensor& out,
                        OpParamCacheKeys param_keys) {
-  TT_ASSIGN_OR_RETURN(const c10::SymDimVector output_dims,
+  TT_ASSIGN_OR_RETURN(const c10::SymDimVector sym_output_dims,
                       ValidateLinearInputs(input, weight, bias));
   TT_RETURN_IF_ERROR(ValidateOutDtype(out, input.scalar_type(),
                                       /*allow_out_dtype_cast=*/false));
+  TT_ASSIGN_OR_RETURN(Dimensions output_dims,
+                      ConcreteSizeToDimensions(sym_output_dims));
   return DispatchLinearImpl<absl::Status>(
-      input, weight, bias, ToDimensions(output_dims), std::move(param_keys),
+      input, weight, bias, std::move(output_dims), std::move(param_keys),
       [&]  // REF_CAPTURE_OK=called synchronously
       (auto op_builder, auto options) {
         return DispatchOpOut<2>(std::move(op_builder), {input, weight}, out,

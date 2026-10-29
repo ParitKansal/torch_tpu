@@ -506,6 +506,7 @@ enum class OpName {
   kLerpTensorOut,
   kLgammaOut,
   kLiftFreshOut,
+  kLinalgCholeskyExL,
   kLinalgInvExInverse,
   kLinalgLuFactorExOut,
   kLinalgLuOut,
@@ -1859,6 +1860,8 @@ ToString(  // NOLINT(google-readability-function-size)
       return "lgamma.out";
     case OpName::kLiftFreshOut:
       return "liftfresh.out";
+    case OpName::kLinalgCholeskyExL:
+      return "linalg_cholesky_ex.L";
     case OpName::kLinalgInvExInverse:
       return "linalg_inv_ex.inverse";
     case OpName::kLinalgLuFactorExOut:

@@ -1059,7 +1059,6 @@ _GEN_MODEL_CONFIGS_RAW: dict[str, dict[str, Any]] = {
     "lightglue_superpoint_forward_gen": {
         "skipped_run_modes": {
             "compiled",
-            "eager_optimized",
         },
     },
     "lightglue_superpoint_train_gen": {
@@ -1830,12 +1829,18 @@ _GEN_MODEL_CONFIGS_RAW: dict[str, dict[str, Any]] = {
             "eager_optimized",
         },
     },
+    "tapas_base_finetuned_sqa_train_gen": {
+        "model_load_fn": load_model.tapas_load_model,
+    },
     "tapas_base_finetuned_wtq_train_gen": {
         "skipped_run_modes": {
             "compiled",
             "eager_default",
             "eager_optimized",
         },
+    },
+    "tapas_large_finetuned_sqa_train_gen": {
+        "model_load_fn": load_model.tapas_load_model,
     },
     "text2vec_base_chinese_paraphrase_train_gen": {
         "skipped_run_modes": {

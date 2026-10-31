@@ -17,10 +17,12 @@
 #include "csrc/common/env_vars.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "absl/log/absl_check.h"
 #include "c10/util/Exception.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -153,6 +155,68 @@ TEST(EnvVarsTest, GetIntegerEnvOnceReturnsNulloptOnInvalidValue) {
   setenv(kTorchTpuHandshakePortEnvVar, "invalid_int", 1);
   EXPECT_EQ((GetIntegerEnvOnce<int, kTorchTpuHandshakePortEnvVar>()),
             std::nullopt);
+}
+
+// Sets the env vars that reference ${RANK}, runs `read_first`, and checks that
+// the rank is expanded both in the memoized values and in the process
+// environment that libtpu and XLA read.
+template <typename ReadFirst>
+void CheckRankIsExpandedOnFirstRead(ReadFirst read_first) {
+  SetEnv<kXlaFlagsEnvVar>("--xla_disable_hlo_passes=some_pass_${RANK}");
+  SetEnv<kLibtpuInitArgsEnvVar>("some_args_${RANK}");
+  SetEnv<kRankEnvVar>("1234");
+
+  read_first();
+
+  ABSL_CHECK_EQ(ExpandAndGetXlaFlagsEnvVarOnce().value_or(""),
+                "--xla_disable_hlo_passes=some_pass_1234");
+  ABSL_CHECK_EQ(ExpandAndGetLibtpuInitArgsEnvVarOnce().value_or(""),
+                "some_args_1234");
+  const char* const xla_flags = std::getenv(kXlaFlagsEnvVar);
+  ABSL_CHECK_NE(xla_flags, nullptr);
+  ABSL_CHECK_EQ(std::string(xla_flags),
+                "--xla_disable_hlo_passes=some_pass_1234");
+  const char* const libtpu_init_args = std::getenv(kLibtpuInitArgsEnvVar);
+  ABSL_CHECK_NE(libtpu_init_args, nullptr);
+  ABSL_CHECK_EQ(std::string(libtpu_init_args), "some_args_1234");
+}
+
+// The rank is expanded and memoized at most once per process, and other tests
+// in this binary read RANK, so the tests below run in a subprocess where the
+// env vars are set before anything reads them. They use the "threadsafe" style,
+// which re-executes the test binary, since the "fast" style forks the current
+// process and inherits its memoized env vars.
+
+TEST(EnvVarsDeathTest, ExpandAndGetXlaFlagsEnvVarOnceExpandsRank) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      {
+        CheckRankIsExpandedOnFirstRead(
+            [] { static_cast<void>(ExpandAndGetXlaFlagsEnvVarOnce()); });
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST(EnvVarsDeathTest, ExpandAndGetLibtpuInitArgsEnvVarOnceExpandsRank) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      {
+        CheckRankIsExpandedOnFirstRead(
+            [] { static_cast<void>(ExpandAndGetLibtpuInitArgsEnvVarOnce()); });
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST(EnvVarsDeathTest, EnsureRankIsExpandedInEnvVarsExpandsRank) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      {
+        CheckRankIsExpandedOnFirstRead([] { EnsureRankIsExpandedInEnvVars(); });
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
 }
 
 }  // namespace

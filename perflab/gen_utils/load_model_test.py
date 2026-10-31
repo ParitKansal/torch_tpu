@@ -189,6 +189,41 @@ class LoadModelTest(seed_test_utils.RepeatableTest):
     self.assertIsNone(model.config.problem_type)
     self.assertNotIn("labels", inputs)
 
+  def _load_tapas(
+      self, model: nn.Module, is_training: bool
+  ) -> tuple[nn.Module, dict[str, Any]]:
+    with mock.patch.object(
+        model_helpers,
+        "get_module_registry",
+        return_value=_fake_registry(model, self.inputs),
+    ):
+      return load_model.tapas_load_model(
+          self.ctx, "google/tapas-base-finetuned-sqa", is_training=is_training
+      )
+
+  def test_tapas_load_model_training_generates_binary_cell_selection_labels(
+      self,
+  ):
+    _, inputs = self._load_tapas(
+        _FakeTextModel(types.SimpleNamespace(vocab_size=30522)),
+        is_training=True,
+    )
+
+    self.assertEqual(inputs["labels"].shape, (1, 128))
+    self.assertEqual(inputs["labels"].dtype, torch.long)
+    self.assertFalse(inputs["labels"].requires_grad)
+    self.assertTrue(
+        torch.all((inputs["labels"] == 0) | (inputs["labels"] == 1))
+    )
+
+  def test_tapas_load_model_inference_omits_labels(self):
+    _, inputs = self._load_tapas(
+        _FakeTextModel(types.SimpleNamespace(vocab_size=30522)),
+        is_training=False,
+    )
+
+    self.assertNotIn("labels", inputs)
+
   def _load_time_series(
       self,
       context_length: int,

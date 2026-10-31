@@ -307,8 +307,7 @@ GraphKey AnnotateGraphKeyWithArgumentLayouts(
 GraphKey AnnotateGraphKeyWithDonatedInputs(
     const GraphKey& graph_key, absl::Span<const int64_t> donated_inputs) {
   if (donated_inputs.empty()) return graph_key;
-  Indices normalized_donated_inputs(donated_inputs.begin(),
-                                    donated_inputs.end());
+  Indices normalized_donated_inputs = CopyIntVector(donated_inputs);
   std::sort(normalized_donated_inputs.begin(), normalized_donated_inputs.end());
   normalized_donated_inputs.erase(std::unique(normalized_donated_inputs.begin(),
                                               normalized_donated_inputs.end()),
@@ -785,11 +784,7 @@ std::vector<Shape> GetShapes(absl::Span<const DeviceBufferRef> buffers) {
   std::vector<Shape> shapes;
   shapes.reserve(buffers.size());
   for (const auto& buffer : buffers) {
-    Shape shape(CopyIntVector(buffer.dimensions()), buffer.element_type());
-    for (const auto& dynamic_dim : buffer.dynamic_dimensions()) {
-      shape.dynamic_dimensions().push_back(dynamic_dim);
-    }
-    shapes.push_back(std::move(shape));
+    shapes.push_back(buffer.shape());
   }
   return shapes;
 }

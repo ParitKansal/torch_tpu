@@ -2805,7 +2805,8 @@ Device-side assertion tracking was not enabled by user.""",
     with et.assert_raises_message(
         err_type,
         gpu="""tensors used as indices must be long, int, byte or bool tensors""",
-        tpu="""index_put_(): expected index tensors to have dtype bool, byte, int32, or int64, got float32 at index 0""",
+        tpu="""index_put_(): expected index tensors to have dtype bool, int32, or int64, got float32 at index 0""",
+        message_reviewed_by="jihonggan",
     ):
       torch.index_put_(
           torch.tensor([0, 1], device=et.device()),
@@ -4890,6 +4891,98 @@ Device-side assertion tracking was not enabled by user.""",
         gpu=f""""pdist_cuda_backward" not implemented for '{cpu_dtype_str}'""",
     ):
       torch.ops.aten._pdist_backward(grad, self_tensor, 2.0, pdist)
+
+  def test_pdist_forward_invalid_inputs(self):
+    x_1d = torch.ones(3, device=et.device())
+    x_2d = torch.ones(3, 4, device=et.device())
+    x_int32 = torch.ones(3, 4, dtype=torch.int32, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""pdist_forward(): expected the input dtype to be floating point, got int32""",
+        gpu=""""pdist_cuda" not implemented for 'Int'""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._pdist_forward(x_int32, 2.0)
+
+    with et.assert_raises_message(
+        RuntimeError if et.is_on_tpu() else IndexError,
+        tpu="""pdist_forward(): expected the input to be a 2D tensor, got 1D""",
+        gpu="""Dimension out of range (expected to be in range of [-1, 0], but got 1)""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._pdist_forward(x_1d, 2.0)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""pdist_forward(): expected the p value to be >= 0, got -1""",
+        gpu="""pdist only supports non-negative p values""",
+        message_reviewed_by="gunhyun",
+    ):
+      if et.is_on_tpu():
+        torch.ops.aten._pdist_forward(x_2d, -1.0)
+      else:
+        torch.nn.functional.pdist(x_2d, p=-1.0)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""pdist_forward(): expected the input to be contiguous, got non-contiguous tensor""",
+        gpu="""_pdist_forward requires contiguous input""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._pdist_forward(x_2d.t(), 2.0)
+
+  def test_pdist_backward_invalid_inputs(self):
+    grad = torch.ones(1, device=et.device())
+    self_1d = torch.ones(2, device=et.device())
+    self_2d = torch.ones(2, 2, device=et.device())
+    pdist = torch.ones(1, device=et.device())
+
+    with et.assert_raises_message(
+        RuntimeError if et.is_on_tpu() else IndexError,
+        tpu="""pdist_backward(): expected the input to be a 2D tensor, got 1D""",
+        gpu="""Dimension out of range (expected to be in range of [-1, 0], but got 1)""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._pdist_backward(grad, self_1d, 2.0, pdist)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""pdist_backward(): expected the input to be contiguous, got non-contiguous tensor""",
+        gpu="""_pdist_backward requires self to be contiguous""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._pdist_backward(grad, self_2d.t(), 2.0, pdist)
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""pdist_backward(): expected pdist to be contiguous, got non-contiguous tensor""",
+        gpu="""_pdist_backward requires pdist to be contiguous""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._pdist_backward(
+          grad, self_2d, 2.0, torch.ones(2, 2, device=et.device())[:, 0]
+      )
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""pdist_backward(): expected grad, input, and pdist to be on the same device, got tpu:0, tpu:0, and cpu""",
+        gpu="""Expected all tensors to be on the same device, but got pdist is on cpu, different from other tensors on cuda:0 (when checking argument in method wrapper_CUDA___pdist_backward)""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._pdist_backward(
+          grad, self_2d, 2.0, torch.ones(1, device="cpu")
+      )
+
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""pdist_backward(): expected grad, input, and pdist to have the same dtype, got float32, float32, and float64""",
+        gpu="""expected scalar type Float but found Double""",
+        message_reviewed_by="gunhyun",
+    ):
+      torch.ops.aten._pdist_backward(
+          grad, self_2d, 2.0, pdist.to(torch.float64)
+      )
 
   # TODO(lwh): fix this test once G3 pytorch version is updated
   @unittest.skip("Disabled due to pytorch version mismatch")
@@ -8019,9 +8112,9 @@ Supported combinations for non-constant padding:
   def test_index_too_many_indices(self):
     t = torch.ones(2, 2, device=et.device())
     indices = [
-        torch.ones(2, device=et.device()),
-        torch.ones(2, device=et.device()),
-        torch.ones(2, device=et.device()),
+        torch.ones(2, dtype=torch.long, device=et.device()),
+        torch.ones(2, dtype=torch.long, device=et.device()),
+        torch.ones(2, dtype=torch.long, device=et.device()),
     ]
 
     # Call the out overload.
@@ -8353,6 +8446,24 @@ Supported combinations for non-constant padding:
           ),
           torch.tensor([0, 1], dtype=torch.int64, device=et.device()),
       )
+
+  def test_embedding_bag_max_backward_bfloat16(self):
+    weight = torch.randn(
+        10, 5, dtype=torch.bfloat16, device=et.device(), requires_grad=True
+    )
+    indices = torch.tensor([7, 4, 6, 5, 9], device=et.device())
+    offsets = torch.tensor([0, 3], device=et.device())
+    out = torch.nn.functional.embedding_bag(
+        indices, weight, offsets, mode="max"
+    )
+
+    with et.assert_raises_message(
+        NotImplementedError,
+        tpu="""embedding_bag_backward(): not implemented for bfloat16 when mode is 'max'""",
+        gpu=""""embedding_bag_backward_cuda_max" not implemented for 'BFloat16'""",
+        message_reviewed_by="wan",
+    ):
+      out.sum().backward()
 
   def test_embedding_bag_include_last_offset_empty_offsets(self):
     weight = torch.randn(5, 3, dtype=torch.float32, device=et.device())
@@ -17256,6 +17367,21 @@ class MaskedSoftmaxErrorTest(et.ErrorTestBase):
     ):
       torch.split_with_sizes_copy(self_t, [2, 2], dim=0, out=out)
 
+  def test_split_with_sizes_copy_dim1_split_sizes_mismatch(self):
+    out = [
+        torch.empty(2, 2, device=et.device()),
+        torch.empty(2, 3, device=et.device()),
+    ]
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""split_with_sizes_copy(): expected split_sizes to sum to 6 (the input's size at dimension 1), got [2, 3]""",
+        gpu="""split_with_sizes expects split_sizes to sum exactly to 6 (input tensor's size at dimension 1), but got split_sizes=[2, 3]""",
+        message_reviewed_by="pgmoka",
+    ):
+      torch.split_with_sizes_copy(
+          torch.zeros(2, 6, device=et.device()), [2, 3], dim=1, out=out
+      )
+
   def test_select_scatter_errors(self):
     self_0d = torch.tensor(1.0, device=et.device())
     src_0d = torch.tensor(2.0, device=et.device())
@@ -18078,6 +18204,24 @@ class UpsampleBilinear2dAaErrorTest(et.ErrorTestBase):
           message_reviewed_by="gunhyun",
       ):
         torch.addcdiv(s, t1, t2, value=1e40)
+
+  def test_out_of_memory_error(self):
+    """Tests that OOM raises OutOfMemoryError."""
+    with et.assert_raises_message(
+        torch.OutOfMemoryError,
+        tpu="""the TPU ran out of memory while allocating tensor uint8[107374182400]""",
+        gpu=re.compile(
+            r"CUDA out of memory\. Tried to allocate 100\.00 GiB\..*",
+            re.DOTALL,
+        ),
+        message_reviewed_by="wan",
+    ):
+      # GPU raises torch.OutOfMemoryError here (eager allocation of 100 GiB):
+      b = torch.empty(100 * 1024**3, dtype=torch.uint8, device=et.device())
+      b.fill_(1)
+      # TPU defers allocation/execution and raises torch.OutOfMemoryError here
+      # upon materialization:
+      b[:8].sum().item()
 
 
 if __name__ == "__main__":

@@ -103,8 +103,7 @@ mlir::MlirOp CreatePoolIndicesIota(const mlir::RankedTensorType& input_shape,
   for (size_t i = 0; i < spatial_dims.size(); ++i) {
     broadcast_dims.push_back(2 + i);
   }
-  llvm::SmallVector<int64_t> target_shape(input_shape.getShape().begin(),
-                                          input_shape.getShape().end());
+  Dimensions target_shape = CopyIntVector(input_shape.getShape());
   mlir::RankedTensorType target_tensor_type =
       mlir::RankedTensorType::get(target_shape, element_type);
   mlir::MlirOp iota_broadcast = mlir::stablehlo::BroadcastInDim(
@@ -414,8 +413,7 @@ UncoveredTailSliceInfo SliceUncoveredSpatialTail(
   };
 
   Dimensions slice_starts(total_num_dims, 0);
-  Dimensions slice_limits(input_shape.getShape().begin(),
-                          input_shape.getShape().end());
+  Dimensions slice_limits = CopyIntVector(input_shape.getShape());
   Dimensions slice_strides(total_num_dims, 1);
 
   for (int64_t i = 0; i < spatial_dim_count; ++i) {
@@ -1035,7 +1033,7 @@ at::Tensor TpuMaxPool1d(const at::Tensor& self, at::IntArrayRef kernel_size,
                   BuildMaxPoolNd(self, kernel_size, stride, padding, dilation,
                                  ceil_mode, spatial_dim_count,
                                  std::move(param_keys)));
-              return MakeTensor(std::move(result_buf));
+              return MakeTensor(result_buf);
             });
 }
 
@@ -1055,7 +1053,7 @@ at::Tensor TpuMaxPool1dBackward(const at::Tensor& grad_output,
             BuildMaxPoolBackwardGradInputNd(
                 grad_output, self, kernel_size, stride, padding, dilation,
                 ceil_mode, spatial_dim_count, std::move(param_keys)));
-        return MakeTensor(std::move(grad_buf));
+        return MakeTensor(grad_buf);
       });
 }
 
@@ -1144,7 +1142,7 @@ at::Tensor TpuMaxPool2d(const at::Tensor& self, at::IntArrayRef kernel_size,
                   BuildMaxPoolNd(self, kernel_size, stride, padding, dilation,
                                  ceil_mode, spatial_dim_count,
                                  std::move(param_keys)));
-              return MakeTensor(std::move(result_buf));
+              return MakeTensor(result_buf);
             });
 }
 
@@ -1164,7 +1162,7 @@ at::Tensor TpuMaxPool2dBackward(const at::Tensor& grad_output,
             BuildMaxPoolBackwardGradInputNd(
                 grad_output, self, kernel_size, stride, padding, dilation,
                 ceil_mode, spatial_dim_count, std::move(param_keys)));
-        return MakeTensor(std::move(grad_buf));
+        return MakeTensor(grad_buf);
       });
 }
 
@@ -1254,7 +1252,7 @@ at::Tensor TpuMaxPool3d(const at::Tensor& self, at::IntArrayRef kernel_size,
                   BuildMaxPoolNd(self, kernel_size, stride, padding, dilation,
                                  ceil_mode, spatial_dim_count,
                                  std::move(param_keys)));
-              return MakeTensor(std::move(result_buf));
+              return MakeTensor(result_buf);
             });
 }
 
@@ -1274,7 +1272,7 @@ at::Tensor TpuMaxPool3dBackward(const at::Tensor& grad_output,
             BuildMaxPoolBackwardGradInputNd(
                 grad_output, self, kernel_size, stride, padding, dilation,
                 ceil_mode, spatial_dim_count, std::move(param_keys)));
-        return MakeTensor(std::move(grad_buf));
+        return MakeTensor(grad_buf);
       });
 }
 

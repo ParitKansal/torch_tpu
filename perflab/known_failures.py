@@ -331,8 +331,28 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
             " _segment_reduce()"
         ),
     ),
+    # XLA:TPU VMEM buffer coloring failure under `jax.jit` on v7_1x1x1.
+    KnownFailure(
+        benchmark="tiny_doc_qa_vision_encoder_decoder_forward_gen",
+        framework=mode_lib.Framework.TORCHAX,
+        device_kind=target_lib.DeviceKind.TPU,
+        run_modes=frozenset({common.RunMode.COMPILED}),
+        reason=(
+            "XLA:TPU VMEM buffer coloring failure (Too many buffers are"
+            " colored in the alternate memory)"
+        ),
+    ),
     # Run modes re-enabled by cl/1007476058 that fail past the single warmup
     # step of its audit.
+    KnownFailure(
+        benchmark="bge_multilingual_gemma2_train_gen",
+        framework=mode_lib.Framework.TORCH,
+        device_kind=target_lib.DeviceKind.TPU,
+        run_modes=frozenset(
+            {common.RunMode.EAGER_DEFAULT, common.RunMode.EAGER_OPTIMIZED}
+        ),
+        reason="HBM OOM during the training warmup on v7_1x1x1",
+    ),
     KnownFailure(
         benchmark="hf_seamless_m4t_medium_train_gen",
         framework=mode_lib.Framework.TORCH,
@@ -356,40 +376,6 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
         ),
         reason="HBM OOM during the training warmup on v7_1x1x1",
     ),
-    KnownFailure(
-        benchmark="tapas_base_finetuned_sqa_train_gen",
-        framework=mode_lib.Framework.TORCH,
-        device_kind=target_lib.DeviceKind.TPU,
-        run_modes=frozenset(
-            {common.RunMode.EAGER_DEFAULT, common.RunMode.EAGER_OPTIMIZED}
-        ),
-        reason=(
-            "generated labels are random token ids, but TAPAS question"
-            " answering needs 0/1 cell selection labels"
-        ),
-    ),
-    KnownFailure(
-        benchmark="tapas_large_finetuned_sqa_train_gen",
-        framework=mode_lib.Framework.TORCH,
-        device_kind=target_lib.DeviceKind.TPU,
-        run_modes=frozenset(
-            {common.RunMode.EAGER_DEFAULT, common.RunMode.EAGER_OPTIMIZED}
-        ),
-        reason=(
-            "generated labels are random token ids, but TAPAS question"
-            " answering needs 0/1 cell selection labels"
-        ),
-    ),
-    KnownFailure(
-        benchmark="tapas_large_finetuned_sqa_train_gen",
-        framework=mode_lib.Framework.TORCH,
-        device_kind=target_lib.DeviceKind.CUDA,
-        run_modes=frozenset({common.RunMode.EAGER_DEFAULT}),
-        reason=(
-            "generated labels are random token ids, but TAPAS question"
-            " answering needs 0/1 cell selection labels"
-        ),
-    ),
     # TODO(b/571695076): Remove once the 4096 parameter training step compiles
     # within the subprocess timeout.
     KnownFailure(
@@ -399,6 +385,18 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
         run_modes=frozenset({common.RunMode.COMPILED}),
         reason=(
             "Inductor compilation of the training step exceeds the 900 s"
+            " subprocess timeout on b200_1"
+        ),
+    ),
+    # Inductor compilation of the forward step exceeds the 900 s subprocess
+    # timeout on b200_1.
+    KnownFailure(
+        benchmark="qwen3_5_9b_forward_gen",
+        framework=mode_lib.Framework.TORCH,
+        device_kind=target_lib.DeviceKind.CUDA,
+        run_modes=frozenset({common.RunMode.COMPILED}),
+        reason=(
+            "Inductor compilation of the forward step exceeds the 900 s"
             " subprocess timeout on b200_1"
         ),
     ),

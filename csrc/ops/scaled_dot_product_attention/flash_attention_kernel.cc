@@ -67,9 +67,10 @@ kiln::IndexIndices LseBlockIndexMap() {
 
 void InitSoftmaxScratch(const FlashAttnConfig& config, const Tiling& tiling,
                         const KernelArgs& args) {
-  args.acc_ref() = kiln::Zeros(kiln::f32(tiling.qt, config.vo_head_dim));
-  args.l_ref() = kiln::Zeros(kiln::f32(tiling.qt, kLanes));
-  args.m_ref() = kiln::NInf(kiln::f32(tiling.qt, kLanes));
+  kiln::Store(args.acc_ref,
+              kiln::Zeros(kiln::f32(tiling.qt, config.vo_head_dim)));
+  kiln::Store(args.l_ref, kiln::Zeros(kiln::f32(tiling.qt, kLanes)));
+  kiln::Store(args.m_ref, kiln::NInf(kiln::f32(tiling.qt, kLanes)));
 }
 
 kiln::Tile ApplyDropoutToProbabilities(const FlashAttnConfig& config,
@@ -93,13 +94,15 @@ void StoreNormalizedOutput(const FlashAttnConfig& config,
   const int64_t rows = state.acc.dims()[0];
   kiln::Tile is_zero_l = state.l == 0.0f;
   kiln::Tile safe_l = Select(is_zero_l, 1.0f, state.l);
-  args.o_ref(0, 0, kiln::Slice(row_offset, rows), kiln::all) =
+  kiln::SliceDim row_slice = kiln::Slice(row_offset, rows);
+  kiln::Tile out =
       state.acc * kiln::Reciprocal(safe_l).Lanes(config.vo_head_dim);
+  kiln::Store(args.o_ref(0, 0, row_slice, kiln::all), out);
   if (args.lse_ref) {
     kiln::Tile lse =
         Select(is_zero_l, kiln::NInf(state.l.shape()), state.m + Log2(safe_l));
-    (*args.lse_ref)(0, 0, kiln::all, kiln::Slice(row_offset, rows)) =
-        kiln::Transpose(lse.Lanes(1));
+    kiln::Tile lse_row = kiln::Transpose(lse.Lanes(1));
+    kiln::Store((*args.lse_ref)(0, 0, kiln::all, row_slice), lse_row);
   }
 }
 
@@ -114,7 +117,8 @@ SoftmaxState UpdateSoftmaxState(const FlashAttnConfig& config,
   const int64_t d_vo = config.vo_head_dim;
   kiln::DType dt = config.element_type;
 
-  kiln::Tile k(args.k_ref(0, 0, kiln::Slice(col_offset, kc), kiln::all));
+  kiln::Tile k =
+      kiln::Load(args.k_ref(0, 0, kiln::Slice(col_offset, kc), kiln::all));
   kiln::Tile s =
       kiln::Dot(q, k, {.transpose_rhs = true, .precision = config.precision}) *
       (config.scale * kLog2e);
@@ -136,7 +140,8 @@ SoftmaxState UpdateSoftmaxState(const FlashAttnConfig& config,
     // select on p in the inner loop.
     mij = Max(mij, std::numeric_limits<float>::lowest());
   }
-  kiln::Tile v(args.v_ref(0, 0, kiln::Slice(col_offset, kc), kiln::all));
+  kiln::Tile v =
+      kiln::Load(args.v_ref(0, 0, kiln::Slice(col_offset, kc), kiln::all));
 
   if (!prev.has_value()) {
     kiln::Tile p = Exp2(s - mij.Lanes(kc));
@@ -163,9 +168,9 @@ SoftmaxState UpdateSoftmaxState(const FlashAttnConfig& config,
 SoftmaxState LoadSoftmaxState(const KernelArgs& args, int64_t row_offset,
                               int64_t num_rows) {
   return SoftmaxState{
-      .m = kiln::Tile(args.m_ref(kiln::Slice(row_offset, num_rows), kiln::all)),
-      .l = kiln::Tile(args.l_ref(kiln::Slice(row_offset, num_rows), kiln::all)),
-      .acc = kiln::Tile(
+      .m = kiln::Load(args.m_ref(kiln::Slice(row_offset, num_rows), kiln::all)),
+      .l = kiln::Load(args.l_ref(kiln::Slice(row_offset, num_rows), kiln::all)),
+      .acc = kiln::Load(
           args.acc_ref(kiln::Slice(row_offset, num_rows), kiln::all)),
   };
 }
@@ -173,9 +178,10 @@ SoftmaxState LoadSoftmaxState(const KernelArgs& args, int64_t row_offset,
 void StoreSoftmaxState(const KernelArgs& args, const SoftmaxState& state,
                        int64_t row_offset) {
   const int64_t num_rows = state.acc.dims()[0];
-  args.m_ref(kiln::Slice(row_offset, num_rows), kiln::all) = state.m;
-  args.l_ref(kiln::Slice(row_offset, num_rows), kiln::all) = state.l;
-  args.acc_ref(kiln::Slice(row_offset, num_rows), kiln::all) = state.acc;
+  kiln::SliceDim row_slice = kiln::Slice(row_offset, num_rows);
+  kiln::Store(args.m_ref(row_slice, kiln::all), state.m);
+  kiln::Store(args.l_ref(row_slice, kiln::all), state.l);
+  kiln::Store(args.acc_ref(row_slice, kiln::all), state.acc);
 }
 
 // Processes a single [band_rows, kt] query band across its active KV
@@ -185,7 +191,8 @@ void EmitQueryBand(const FlashAttnConfig& config, const Tiling& tiling,
                    int64_t band_rows, int64_t num_kv_subblocks,
                    bool single_kv_step, bool has_padding,
                    bool square_causal_diag_block, bool intersects_causal_diag) {
-  kiln::Tile q(args.q_ref(0, 0, kiln::Slice(row_offset, band_rows), kiln::all));
+  kiln::Tile q = kiln::Load(
+      args.q_ref(0, 0, kiln::Slice(row_offset, band_rows), kiln::all));
 
   std::optional<SoftmaxState> state =
       single_kv_step
@@ -354,9 +361,9 @@ absl::StatusOr<kiln::Kernel> CreateKernel(const FlashAttnConfig& config,
                          StoreNormalizedOutput(
                              config, args,
                              SoftmaxState{
-                                 .m = kiln::Tile(args.m_ref),
-                                 .l = kiln::Tile(args.l_ref),
-                                 .acc = kiln::Tile(args.acc_ref),
+                                 .m = kiln::Load(args.m_ref),
+                                 .l = kiln::Load(args.l_ref),
+                                 .acc = kiln::Load(args.acc_ref),
                              },
                              /*row_offset=*/0);
                        });

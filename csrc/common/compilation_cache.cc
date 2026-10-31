@@ -540,6 +540,7 @@ CompilationCache::GetOrCreateUnboundedDynamicCacheEntry(
     cache_lookup =
         AddCacheEntry(dynamic_key, CacheEntryKind::kUnboundedDynamic);
     cache_lookup->unbounded_dynamic_kernel = dynamic_kernel;
+    perf_stats_.num_unbounded_dynamic_hits++;
     return cache_lookup;
   }
 
@@ -548,6 +549,7 @@ CompilationCache::GetOrCreateUnboundedDynamicCacheEntry(
   const SharedLoadedExecutableWithMetadataFuture& future =
       cache_lookup->executable_future;
   if (!IsFutureReady(future) || future.get().ok()) {
+    perf_stats_.num_unbounded_dynamic_hits++;
     return cache_lookup;
   }
 

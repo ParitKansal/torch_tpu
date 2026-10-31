@@ -27,6 +27,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "csrc/common/cache_key.h"
 #include "csrc/common/compilation.h"
 #include "csrc/common/compilation_spec.h"
 #include "csrc/eager/device_buffer.h"
@@ -94,18 +95,23 @@ class ExecutionTask {
 
   absl::Span<const DeviceBufferRef> outputs() const { return outputs_; }
 
+  [[nodiscard]] CorePinningMode core_pinning_mode() const {
+    return core_pinning_mode_;
+  }
+
  private:
-  explicit ExecutionTask(std::string name,
-                         std::vector<DeviceBufferRef> arguments,
-                         std::vector<DeviceBufferRef> outputs,
-                         CompiledKernel compiled_kernel,
-                         ArgumentLayoutValidation layout_validation =
-                             ArgumentLayoutValidation::kValidate)
+  explicit ExecutionTask(
+      std::string name, std::vector<DeviceBufferRef> arguments,
+      std::vector<DeviceBufferRef> outputs, CompiledKernel compiled_kernel,
+      ArgumentLayoutValidation layout_validation =
+          ArgumentLayoutValidation::kValidate,
+      CorePinningMode core_pinning_mode = CorePinningMode::kUnpinned)
       : name_(std::move(name)),
         arguments_(std::move(arguments)),
         outputs_(std::move(outputs)),
         compiled_kernel_(std::move(compiled_kernel)),
-        layout_validation_(layout_validation) {}
+        layout_validation_(layout_validation),
+        core_pinning_mode_(core_pinning_mode) {}
 
   // Runs the execution task and early-returns if there is any failure.
   absl::Status RunInternal();
@@ -138,6 +144,9 @@ class ExecutionTask {
   // traversals, which compile or look up the executable using the exact layouts
   // of `arguments_`.
   ArgumentLayoutValidation layout_validation_;
+  // The core pinning mode of the originating Traversal, or kUnpinned for
+  // pre-compiled executables.
+  CorePinningMode core_pinning_mode_;
 };
 
 // The result of attempting to make a batch of ExecutionTasks from a list of

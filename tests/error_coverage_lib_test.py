@@ -306,8 +306,8 @@ class CoverageDataTest(absltest.TestCase):  # ABSLTEST_OK=No RNG used.
 
   def test_load_reads_the_stats_of_each_file(self):
     path = self._write(
-        "csrc/a.cc: {infeasible: 0, remaining: 1, total: 2}\n"
-        "csrc/b.cc: {infeasible: 1, remaining: 0, total: 1}\n"
+        "csrc/a.cc: {remaining: 1, total: 2, infeasible: 0}\n"
+        "csrc/b.cc: {remaining: 0, total: 1, infeasible: 1}\n"
     )
 
     self.assertEqual(
@@ -357,8 +357,8 @@ class CoverageDataTest(absltest.TestCase):  # ABSLTEST_OK=No RNG used.
             "csrc/b.cc": {"total": 2, "remaining": 1, "infeasible": 0},
             "csrc/a.cc": {"total": 1, "remaining": 0, "infeasible": 1},
         }),
-        "csrc/a.cc: {infeasible: 1, remaining: 0, total: 1}\n"
-        "csrc/b.cc: {infeasible: 0, remaining: 1, total: 2}\n",
+        "csrc/a.cc: {remaining: 0, total: 1, infeasible: 1}\n"
+        "csrc/b.cc: {remaining: 1, total: 2, infeasible: 0}\n",
     )
 
 

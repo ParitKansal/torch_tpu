@@ -270,7 +270,7 @@ absl::StatusOr<at::Tensor> MakePlaceholder(absl::Span<const int64_t> sizes,
                                            bool is_pinned_host) {
   TT_ASSIGN_OR_RETURN(mlir::ElementType tensor_element_type,
                       ConvertTo<mlir::ElementType>(dtype));
-  Dimensions physical_sizes(sizes.begin(), sizes.end());
+  Dimensions physical_sizes = CopyIntVector(sizes);
   if (dtype == at::kFloat4_e2m1fn_x2) {
     TT_RET_CHECK(!physical_sizes.empty(), error::kInvalidArgument)
         << "expected float4_e2m1fn_x2 tensors to be at least 1-dimensional";
@@ -280,7 +280,7 @@ absl::StatusOr<at::Tensor> MakePlaceholder(absl::Span<const int64_t> sizes,
       DeviceBufferRef placeholder,
       DeviceBufferList::CreatePlaceholder(std::move(physical_sizes),
                                           tensor_element_type, is_pinned_host));
-  auto new_tensor = MakeTensor(std::move(placeholder));
+  auto new_tensor = MakeTensor(placeholder);
   new_tensor.set_requires_grad(requires_grad);
   return new_tensor;
 }
@@ -295,7 +295,7 @@ absl::StatusOr<at::Tensor> MakePlaceholder(Shape shape, bool requires_grad,
                                                dynamic_dim.lower_bound,
                                                dynamic_dim.upper_bound));
   }
-  auto new_tensor = MakeTensor(std::move(placeholder));
+  auto new_tensor = MakeTensor(placeholder);
   new_tensor.set_requires_grad(requires_grad);
   return new_tensor;
 }
@@ -687,7 +687,7 @@ std::vector<at::Tensor> ExecuteCompiledModelImpl(
   std::vector<at::Tensor> output_tensors;
   output_tensors.reserve(num_outputs);
   for (auto& result_buffer : result_buffer_refs) {
-    output_tensors.push_back(MakeTensor(std::move(result_buffer)));
+    output_tensors.push_back(MakeTensor(result_buffer));
   }
 
   return output_tensors;
@@ -752,7 +752,7 @@ absl::StatusOr<at::Tensor> MakeConstantTensor(const at::Tensor& cpu_tensor) {
       CreateConstantDeviceBufferRef(std::move(cpu_bytes_copy),
                                     std::move(dimensions), element_type));
 
-  return MakeTensor(std::move(buffer_ref));
+  return MakeTensor(buffer_ref);
 }
 
 absl::Status AssignConstantTensor(const at::Tensor& cpu_src_tensor,

@@ -251,7 +251,9 @@ torch_tpu_py_test(
         "//shims/absl_py/testing:parameterized",
         "//src/torch_tpu",
         "//src/torch_tpu:_tcmalloc_check",
+        "//src/torch_tpu/_internal:env",
         "//src/torch_tpu/_internal:warnings",
+        "//src/torch_tpu/_internal/distributed:multiprocessing",
     ],
 )
 
@@ -304,6 +306,7 @@ torch_tpu_py_test(
         ":subprocess_test_utils",
         "//shims/absl_py/flags",
         "//shims/absl_py/testing:absltest",
+        "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//src/torch_tpu:_loader",
         "//src/torch_tpu/_internal:env",
@@ -460,6 +463,20 @@ torch_tpu_py_library(
         ":oss_utils",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
+        "//src/torch_tpu/_internal/utils:hardware",
+    ],
+)
+
+torch_tpu_py_test(
+    name = "accelerator_test_utils_test",
+    srcs = ["accelerator_test_utils_test.py"],
+    deps = [
+        ":accelerator_test_utils",
+        ":oss_utils",
+        ":seed_test_utils",
+        "//shims/absl_py/testing:absltest",
+        "//src/torch_tpu",
+        "//src/torch_tpu/_internal/utils:hardware",
     ],
 )
 
@@ -997,7 +1014,7 @@ torch_tpu_py_test(
     timeout = "long",  # Needed for asan.
     srcs = ["ops_test.py"],
     args = [
-        "--check_dynamism_using_seed=-1",
+        "--check_dynamism=True",
         "--print_op_inputs=1",
         "--max_samples_per_op_dtype=1",  # No need to test many samples to catch dynamism bugs.
     ],
@@ -1007,7 +1024,7 @@ torch_tpu_py_test(
         "requires-tpu-v6e",
         "requires-tpu-v5lite",
     ],
-    shard_count = 32,
+    shard_count = 50,
     tags = [
         "nomsan",  # TODO: fix the test in msan mode.
         "notsan",  # TODO: fix the test in tsan mode.
@@ -1032,7 +1049,7 @@ torch_tpu_py_test(
     timeout = "long",  # Needed for asan.
     srcs = ["ops_test.py"],
     args = [
-        "--check_dynamism_using_seed=-1",
+        "--check_dynamism=True",
         "--use_compiled=True",
         "--print_op_inputs=1",
         "--max_samples_per_op_dtype=1",  # No need to test many samples to catch dynamism bugs.
@@ -1044,7 +1061,7 @@ torch_tpu_py_test(
         "requires-tpu-v6e",
         "requires-tpu-v5lite",
     ],
-    shard_count = 32,
+    shard_count = 50,
     tags = [
         "nomsan",  # TODO: fix the test in msan mode.
         "notsan",  # TODO: fix the test in tsan mode.
@@ -2887,6 +2904,24 @@ torch_tpu_py_test(
         "//shims/absl_py/testing:absltest",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
+    ],
+)
+
+torch_tpu_py_test(
+    name = "view_narrow_dtype_test",
+    size = "medium",
+    srcs = ["view_narrow_dtype_test.py"],
+    main = "view_narrow_dtype_test.py",
+    run_on_accelerators = ["requires-tpu-v6e"],
+    shard_count = 2,
+    tags = ["nofastbuild"],
+    deps = [
+        ":seed_test_utils",
+        "//shims/absl_py/testing:absltest",
+        "//shims/absl_py/testing:parameterized",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+        "//src/torch_tpu/_internal/execution_mode",
     ],
 )
 

@@ -96,21 +96,12 @@ Ref SliceRefImpl(Ref base, llvm::ArrayRef<DimDesc> dims);
 // A memref kernel argument or allocation (VMEM block, SMEM scalar-prefetch
 // buffer, or HBM buffer). Slicing emits `tpu::MemRefSliceOp` /
 // `tpu::MemRefSqueezeOp` and returns another `Ref`, so sliced and non-sliced
-// references share the exact same interface.
+// references share the exact same interface. Memory is only accessed through
+// the explicit free functions `Load`, `LoadScalar`, and `Store`.
 class Ref : public ValueBase {
  public:
   Ref(const Ref&) = default;
-  Ref& operator=(const Ref&) = delete;
-
-  Ref& operator=(Tile rhs);
-  Ref& operator=(Scalar rhs);
-
-  explicit operator Scalar() const;
-  explicit operator Tile() const;
-
-  // Stores `value` into this VMEM ref, optionally masked by an i1 `mask` tile
-  // (`tpu.vector_store` / Pallas `pltpu.store`).
-  void Store(Tile value, std::optional<Tile> mask = std::nullopt);
+  Ref& operator=(const Ref&) = default;
 
   llvm::ArrayRef<int64_t> dims() const;
   Shape shape() const { return Shape(dims(), dtype()); }
@@ -146,12 +137,28 @@ class Ref : public ValueBase {
   Ref(const void* impl, DType dtype);
 };
 
-// Stores `value` into `dst` (a VMEM ref), optionally masked by an i1 `mask`
-// tile (`tpu.vector_store` / Pallas `pltpu.store`).
-inline void Store(Ref dst, Tile value,
-                  std::optional<Tile> mask = std::nullopt) {
-  dst.Store(value, mask);
-}
+// Loads the whole of `src`, a VMEM ref with a static shape, as a tile. Slice
+// first to load a window: `Load(ref(0, Slice(c, kChunk)))`.
+Tile Load(Ref src);
+
+// Loads `src`, a 0-D SMEM ref, as a scalar (`memref.load`). Index first to load
+// an element: `LoadScalar(ref(i, j))`.
+Scalar LoadScalar(Ref src);
+
+// TODO(willfroom): Add the "add" option.
+struct StoreOptions {
+  // If set, an i1 tile; only elements where `mask` is true are written.
+  // Reshaped or broadcast to the dimensions of the destination.
+  std::optional<Tile> mask = std::nullopt;
+};
+
+// Stores `value` into `dst`, a VMEM ref with a static shape. `value` is
+// converted to the dtype of `dst` and reshaped or broadcast to its dimensions.
+void Store(Ref dst, Tile value, const StoreOptions& options = {});
+
+// Stores `value` into `dst`, a 0-D SMEM ref (`memref.store`). `value` is
+// converted to the dtype of `dst`.
+void Store(Ref dst, Scalar value);
 
 }  // namespace torch_tpu::kiln
 

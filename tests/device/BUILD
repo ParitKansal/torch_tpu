@@ -102,6 +102,77 @@ torch_tpu_py_test(
     ],
 )
 
+# `device_count_test.py` runs the same scenarios against `torch.cuda` and
+# `torch.tpu`, so that the CUDA target documents the behavior TorchTPU should
+# match.
+torch_tpu_py_test(
+    name = "device_count_test_cuda",
+    srcs = ["device_count_test.py"],
+    args = ["--device_type=cuda"],
+    main = "device_count_test.py",
+    nolocal = "Skipping in local runs by default as it requires --config=cuda.",
+    tags = [
+        "nozapfhahn",  # Requires --config=cuda; excluded from Zapfhahn coverage.
+        # Requires multiple devices to tell the host's device count apart from
+        # the visible device count.
+        "requires-gpu-sm90-full:2",
+    ],
+    deps = [
+        "//shims/absl_py/flags",
+        "//shims/absl_py/testing:absltest",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+        "//src/torch_tpu/_internal/distributed:multiprocessing",
+        "//src/torch_tpu/_internal/utils:annotations",
+        "//tests:accelerator_test_utils",
+    ],
+)
+
+torch_tpu_py_test(
+    name = "device_count_test_tpu",
+    srcs = ["device_count_test.py"],
+    args = ["--device_type=tpu"],
+    main = "device_count_test.py",
+    # Excluded from TAP until `torch.tpu.device_count()` counts only the devices
+    # this process can use before the TPU runtime is initialized, as CUDA does.
+    notap = "Fails until torch.tpu.device_count() matches CUDA before init (b/577219302).",
+    tags = [
+        "requires-tpu-v5lite:8",
+    ],
+    deps = [
+        "//shims/absl_py/flags",
+        "//shims/absl_py/testing:absltest",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+        "//src/torch_tpu/_internal/distributed:multiprocessing",
+        "//src/torch_tpu/_internal/utils:annotations",
+        "//tests:accelerator_test_utils",
+    ],
+)
+
+# Like `device_count_test_tpu`, but on a worker that has one TPU chip. Forge
+# leaves placeholder device files for the host's other chips, which TorchTPU
+# counts before the TPU runtime is initialized.
+torch_tpu_py_test(
+    name = "device_count_test_tpu_single_chip",
+    srcs = ["device_count_test.py"],
+    args = ["--device_type=tpu"],
+    main = "device_count_test.py",
+    notap = "Fails until torch.tpu.device_count() matches CUDA before init (b/577219302).",
+    tags = [
+        "requires-tpu-v5lite",
+    ],
+    deps = [
+        "//shims/absl_py/flags",
+        "//shims/absl_py/testing:absltest",
+        "//shims/torch:pytorch",
+        "//src/torch_tpu",
+        "//src/torch_tpu/_internal/distributed:multiprocessing",
+        "//src/torch_tpu/_internal/utils:annotations",
+        "//tests:accelerator_test_utils",
+    ],
+)
+
 test_suite(
     name = "device_module_tests",
     tests = [

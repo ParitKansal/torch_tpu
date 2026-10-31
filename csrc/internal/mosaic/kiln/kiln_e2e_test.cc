@@ -181,10 +181,11 @@ TEST_F(KilnE2eTest, BlockwiseMatmulWithScratchAccumulator) {
                   })},
           ScratchSpec::Vmem(f32(kTm, kTn)), [](Ref a, Ref b, Ref out, Ref acc) {
             Scalar kk = ProgramId(2);
-            If(kk == 0, [&] { acc = Zeros(acc.shape()); });
-            acc = Tile(acc) + Dot(Tile(a), Tile(b),
-                                  {.precision = ContractPrecision::kFP32});
-            If(kk == NumPrograms(2) - 1, [&] { out = Tile(acc); });
+            If(kk == 0, [&] { Store(acc, Zeros(acc.shape())); });
+            Store(acc,
+                  Load(acc) + Dot(Load(a), Load(b),
+                                  {.precision = ContractPrecision::kFP32}));
+            If(kk == NumPrograms(2) - 1, [&] { Store(out, Load(acc)); });
           }));
 
   xla::Literal a_lit = Make2dF32(kM, kK, [](int64_t m, int64_t k) {
@@ -208,8 +209,9 @@ TEST_F(KilnE2eTest, BlockwiseMatmulWithScratchAccumulator) {
 TEST_F(KilnE2eTest, ScalarPrefetchGatherAndReduce) {
   constexpr int64_t kRows = 4, kTileRows = 8, kCols = 256, kChunk = 128;
 
-  IndexMap gathered = IndexMap(
-      [] { return IndexIndices{Scalar(ScalarPrefetch(0)(ProgramId(0))), 0}; });
+  IndexMap gathered = IndexMap([] {
+    return IndexIndices{LoadScalar(ScalarPrefetch(0)(ProgramId(0))), 0};
+  });
 
   TT_ASSERT_OK_AND_ASSIGN(
       Kernel kernel,
@@ -222,9 +224,9 @@ TEST_F(KilnE2eTest, ScalarPrefetchGatherAndReduce) {
                    [](Ref /*indices*/, Ref rows, Ref out) {
                      Tile total = Zeros(out.shape());
                      for (int64_t c = 0; c < kCols; c += kChunk) {
-                       total = total + Tile(rows(all, Slice(c, kChunk)));
+                       total = total + Load(rows(all, Slice(c, kChunk)));
                      }
-                     out = total;
+                     Store(out, total);
                    }));
 
   std::array<int32_t, kRows> idx_values = {3, 1, 2, 0};
@@ -270,8 +272,8 @@ TEST_F(KilnE2eTest, SpliceStablehloIntoKernelBody) {
                    OutSpec{f32(kRows, kCols)}, [&](Ref a, Ref b, Ref out) {
                      TT_ASSERT_OK_AND_ASSIGN(
                          Tile result,
-                         SpliceStablehlo(kModule, {Tile(a), Tile(b)}));
-                     out = result;
+                         SpliceStablehlo(kModule, {Load(a), Load(b)}));
+                     Store(out, result);
                    }));
 
   // Small exact values of both signs, so the comparison can be bit-exact.
@@ -308,8 +310,8 @@ TEST_F(KilnE2eTest, SpliceStablehloLegalizesChlo) {
                    InSpec{f32(kRows, kCols)}, OutSpec{f32(kRows, kCols)},
                    [&](Ref a, Ref out) {
                      TT_ASSERT_OK_AND_ASSIGN(
-                         Tile result, SpliceStablehlo(kModule, {Tile(a)}));
-                     out = result;
+                         Tile result, SpliceStablehlo(kModule, {Load(a)}));
+                     Store(out, result);
                    }));
 
   xla::Literal a = Make2dF32(kRows, kCols, [](int64_t r, int64_t c) {
@@ -331,13 +333,14 @@ TEST_F(KilnE2eTest, TileAndScalarControlFlowOperations) {
       CreateKernel(GridSpec{.name = "tile_scalar_e2e", .grid = {1}},
                    InSpec{f32(kRows, kCols)}, OutSpec{f32(kRows, kCols)},
                    [](Ref in, Ref out) {
-                     out = Tile(in);
-                     For(0, 4,
-                         [&](Scalar i) { out = Tile(out) + i.AsType(f32); });
-                     Tile acc = Tile(out);
+                     Store(out, Load(in));
+                     For(0, 4, [&](Scalar i) {
+                       Store(out, Load(out) + i.AsType(f32));
+                     });
+                     Tile acc = Load(out);
                      Tile col_iota = Iota(i32(kRows, kCols), /*axis=*/1);
                      Tile even_mask = (col_iota % 2) == 0;
-                     out = Select(even_mask, acc * 2.0, acc - 1.0);
+                     Store(out, Select(even_mask, acc * 2.0, acc - 1.0));
                    }));
 
   xla::Literal input = Make2dF32(kRows, kCols, [](int64_t r, int64_t c) {
@@ -357,7 +360,7 @@ TEST_F(KilnE2eTest, GridFreeKernelWithVmemOperands) {
       Kernel kernel,
       CreateKernel(GridSpec{.name = "grid_free_vmem_e2e"},
                    InSpec::Vmem(f32(8, 128)), OutSpec::Vmem(f32(8, 128)),
-                   [](Ref in, Ref out) { out = Tile(in) * 2.0; }));
+                   [](Ref in, Ref out) { Store(out, Load(in) * 2.0); }));
   xla::Literal input = Make2dF32(8, 128, [](int64_t r, int64_t c) {
     return static_cast<float>(r * 128 + c);
   });
@@ -394,7 +397,7 @@ TEST_F(KilnE2eTest, GridKernelWithHbmAndDma) {
                      in_copy.Start();
                      in_copy.Wait();
 
-                     buf = Tile(buf) + Tile(vmem_bias);
+                     Store(buf, Load(buf) + Load(vmem_bias));
 
                      AsyncCopy(buf, hbm_out(Slice(row, kTileRows), all), sem,
                                {.priority = 0})
@@ -436,7 +439,7 @@ TEST_F(KilnE2eTest, DynamicHbmTiledLoopWithDma) {
                        Ref out_slice = hbm_out(Slice(aligned, kTileRows), all);
 
                        AsyncCopy(in_slice, vmem_tile, sem).Wait();
-                       vmem_tile = Tile(vmem_tile) * 2.0;
+                       Store(vmem_tile, Load(vmem_tile) * 2.0);
                        AsyncCopy(vmem_tile, out_slice, sem).Wait();
                      });
                    }));
@@ -474,10 +477,10 @@ TEST_F(KilnE2eTest, PipelinedSum) {
                   return BlockRegion{.offsets = {step * kChunk},
                                      .sizes = {kChunk}};
                 }};
-            acc = Zeros(acc.shape());
+            Store(acc, Zeros(acc.shape()));
             EmitPipeline(0, in.Dim(0) / kChunk, {std::move(input)},
                          /*outputs=*/{}, [&](const PipelineStep& s) {
-                           acc = Tile(acc) + Tile(s.inputs[0]);
+                           Store(acc, Load(acc) + Load(s.inputs[0]));
                          });
             AsyncCopy(acc, out, AllocaDmaSemaphore()).Wait();
           }));
@@ -517,13 +520,13 @@ TEST_F(KilnE2eTest, PipelinedSumOfProducts) {
           InSpec::Hbm(f32(kDynamic, kCols)), InSpec::Hbm(f32(kDynamic, kCols)),
           OutSpec::Hbm(f32(kRows, kCols)), ScratchSpec::Vmem(f32(kRows, kCols)),
           [&](Ref a, Ref b, Ref out, Ref acc) {
-            acc = Zeros(acc.shape());
+            Store(acc, Zeros(acc.shape()));
             EmitPipeline(
                 0, a.Dim(0) / kRows,
                 {{.hbm = a, .block_shape = {kRows, kCols}, .region = band},
                  {.hbm = b, .block_shape = {kRows, kCols}, .region = band}},
                 /*outputs=*/{}, [&](const PipelineStep& s) {
-                  acc = Tile(acc) + Tile(s.inputs[0]) * Tile(s.inputs[1]);
+                  Store(acc, Load(acc) + Load(s.inputs[0]) * Load(s.inputs[1]));
                 });
             AsyncCopy(acc, out, AllocaDmaSemaphore()).Wait();
           }));
@@ -571,7 +574,7 @@ TEST_F(KilnE2eTest, PipelinedInputOutputStreaming) {
                 {{.hbm = in, .block_shape = {kChunk}, .region = chunk}},
                 {{.hbm = out, .block_shape = {kChunk}, .region = chunk}},
                 [&](const PipelineStep& s) {
-                  Store(s.outputs[0], Tile(s.inputs[0]) * 2.0);
+                  Store(s.outputs[0], Load(s.inputs[0]) * 2.0);
                 });
           }));
 
@@ -609,8 +612,8 @@ TEST_F(KilnE2eTest, PipelinedTwo2dOutputs) {
                 {{.hbm = out0, .block_shape = {kRows, kCols}, .region = band},
                  {.hbm = out1, .block_shape = {kRows, kCols}, .region = band}},
                 [&](const PipelineStep& s) {
-                  Store(s.outputs[0], Tile(s.inputs[0]) * 2.0);
-                  Store(s.outputs[1], Tile(s.inputs[0]) + 1.0);
+                  Store(s.outputs[0], Load(s.inputs[0]) * 2.0);
+                  Store(s.outputs[1], Load(s.inputs[0]) + 1.0);
                 });
           }));
 

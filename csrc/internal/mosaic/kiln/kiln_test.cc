@@ -27,6 +27,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "absl/status/status.h"
@@ -79,6 +80,19 @@ Matcher<const absl::StatusOr<Kernel>&> IsOkAndMatchesIr(
   return IsOkAndHolds(MatchesIr(pattern));
 }
 
+// Copy assignment rebinds a `Ref`; memory is only accessed through `Load` and
+// `Store`. A `Ref` cannot be assigned from or converted to a value.
+static_assert(std::is_copy_assignable_v<Ref>);
+static_assert(!std::is_assignable_v<Ref&, Tile>);
+static_assert(!std::is_assignable_v<Ref&, Scalar>);
+static_assert(!std::is_constructible_v<Tile, Ref>);
+static_assert(!std::is_constructible_v<Scalar, Ref>);
+
+// `Load` loads a `Tile` and `LoadScalar` loads a `Scalar`.
+static_assert(std::is_same_v<decltype(Load(std::declval<Ref>())), Tile>);
+static_assert(
+    std::is_same_v<decltype(LoadScalar(std::declval<Ref>())), Scalar>);
+
 // out[i, j] += a[i, k] @ b[k, j], with K as the innermost ("arbitrary") grid
 // axis and an f32 accumulator in scratch.
 TEST(KilnTest, BlockwiseMatmul) {
@@ -102,9 +116,9 @@ TEST(KilnTest, BlockwiseMatmul) {
               })},
       ScratchSpec{f32(kTm, kTn)}, [](Ref a, Ref b, Ref out, Ref acc) {
         Scalar kk = ProgramId(2);
-        If(kk == 0, [&] { acc = Zeros(acc.shape()); });
-        acc = Tile(acc) + Dot(Tile(a), Tile(b));
-        If(kk == NumPrograms(2) - 1, [&] { out = Tile(acc).ToBF16(); });
+        If(kk == 0, [&] { Store(acc, Zeros(acc.shape())); });
+        Store(acc, Load(acc) + Dot(Load(a), Load(b)));
+        If(kk == NumPrograms(2) - 1, [&] { Store(out, Load(acc).ToBF16()); });
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func private @matmul_index_map_0(
@@ -156,8 +170,9 @@ TEST(KilnTest, BlockwiseMatmul) {
 TEST(KilnTest, ScalarPrefetchAndLoop) {
   constexpr int64_t kRows = 64, kCols = 1024, kChunk = 128;
 
-  IndexMap gathered = IndexMap(
-      [] { return IndexIndices{Scalar(ScalarPrefetch(0)(ProgramId(0))), 0}; });
+  IndexMap gathered = IndexMap([] {
+    return IndexIndices{LoadScalar(ScalarPrefetch(0)(ProgramId(0))), 0};
+  });
 
   absl::StatusOr<Kernel> kernel = CreateKernel(
       GridSpec{.name = "gather_rows", .grid = {kRows}},
@@ -167,9 +182,9 @@ TEST(KilnTest, ScalarPrefetchAndLoop) {
       [](Ref /*indices*/, Ref rows, Ref out) {
         Tile total = Zeros(f32(1, kChunk));
         for (int64_t c = 0; c < kCols; c += kChunk) {
-          total = total + Tile(rows(0, Slice(c, kChunk)));
+          total = total + Load(rows(0, Slice(c, kChunk)));
         }
-        out(0, all) = total;
+        Store(out(0, all), total);
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func private @gather_rows_index_map_0(
@@ -213,10 +228,10 @@ TEST(KilnTest, RefSliceRankCollapsing) {
                    OutSpec{.shape = f32(32, 128)}, [](Ref in4d, Ref out2d) {
                      // in4d(0, 0) collapses the first 2 dimensions, resulting
                      // in rank 2.
-                     Tile tile2d(in4d(0, 0));
+                     Tile tile2d = Load(in4d(0, 0));
                      EXPECT_EQ(tile2d.rank(), 2);
                      EXPECT_THAT(tile2d.dims(), ElementsAre(32, 128));
-                     out2d = tile2d;
+                     Store(out2d, tile2d);
                    });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @rank_collapse(
@@ -228,40 +243,40 @@ TEST(KilnTest, RefSliceRankCollapsing) {
 }
 
 TEST(KilnTest, LiteralOverloads) {
-  absl::StatusOr<Kernel> kernel =
-      CreateKernel(GridSpec{.name = "literal_ops", .grid = {1}},
-                   InSpec{f32(32, 128)}, InSpec{i32(32, 128)},
-                   OutSpec{f32(32, 128)}, [](Ref f_in, Ref i_in, Ref out) {
-                     Tile f(f_in);
-                     Tile i(i_in);
+  absl::StatusOr<Kernel> kernel = CreateKernel(
+      GridSpec{.name = "literal_ops", .grid = {1}}, InSpec{f32(32, 128)},
+      InSpec{i32(32, 128)}, OutSpec{f32(32, 128)},
+      [](Ref f_in, Ref i_in, Ref out) {
+        Tile f = Load(f_in);
+        Tile i = Load(i_in);
 
-                     // Float tile with int literal and float literal
-                     Tile f_add_int = f + 1;      // int literal
-                     Tile f_sub_float = f - 2.5;  // float literal
-                     Tile f_scale = 0.5 * f;      // literal on LHS
-                     Tile f_clamp = Max(f, -10000.0);
-                     Tile f_mask = Select(f > 0, f, 0.0);
+        // Float tile with int literal and float literal
+        Tile f_add_int = f + 1;      // int literal
+        Tile f_sub_float = f - 2.5;  // float literal
+        Tile f_scale = 0.5 * f;      // literal on LHS
+        Tile f_clamp = Max(f, -10000.0);
+        Tile f_mask = Select(f > 0, f, 0.0);
 
-                     // Int tile with int literal
-                     Tile i_add_int = i + 10;
-                     Tile i_cmp = i == 0;
-                     Tile i_combined = Select(i_cmp, i_add_int, 0);
+        // Int tile with int literal
+        Tile i_add_int = i + 10;
+        Tile i_cmp = i == 0;
+        Tile i_combined = Select(i_cmp, i_add_int, 0);
 
-                     // Scalar with int and float literal + bool Scalar
-                     Scalar s = ProgramId(0);
-                     Scalar s_plus = s + 1;
-                     Scalar s_bool = s_plus == 1;
-                     EXPECT_TRUE(s_bool.dtype().IsBool());
-                     EXPECT_FALSE(s_bool.dtype().IsIntOrFloat());
+        // Scalar with int and float literal + bool Scalar
+        Scalar s = ProgramId(0);
+        Scalar s_plus = s + 1;
+        Scalar s_bool = s_plus == 1;
+        EXPECT_TRUE(s_bool.dtype().IsBool());
+        EXPECT_FALSE(s_bool.dtype().IsIntOrFloat());
 
-                     If(
-                         s_bool,
-                         [&] {
-                           out = f_add_int + f_sub_float + f_scale + f_clamp +
-                                 f_mask + i_combined.ToF32();
-                         },
-                         [&] { out = Zeros(out.shape()); });
-                   });
+        If(
+            s_bool,
+            [&] {
+              Store(out, f_add_int + f_sub_float + f_scale + f_clamp + f_mask +
+                             i_combined.ToF32());
+            },
+            [&] { Store(out, Zeros(out.shape())); });
+      });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @literal_ops(
     CHECK-SAME:    %[[PID:arg[0-9]+]]: i32, %[[F_IN:arg[0-9]+]]: memref<32x128xf32, #tpu.memory_space<vmem>>, %[[I_IN:arg[0-9]+]]: memref<32x128xi32, #tpu.memory_space<vmem>>, %[[OUT:arg[0-9]+]]: memref<32x128xf32, #tpu.memory_space<vmem>>)
@@ -303,34 +318,35 @@ TEST(KilnTest, LiteralOverloads) {
 }
 
 TEST(KilnTest, ScalarFloatOperations) {
-  absl::StatusOr<Kernel> kernel =
-      CreateKernel(GridSpec{.name = "scalar_float_ops", .grid = {1}},
-                   InSpec{.shape = f32(32, 128), .space = MemorySpace::kSmem},
-                   OutSpec{.shape = f32(32, 128), .space = MemorySpace::kSmem},
-                   [](Ref in, Ref out) {
-                     Scalar sf = F32(2.5);
-                     EXPECT_TRUE(sf.dtype().IsFloat());
-                     EXPECT_FALSE(sf.dtype().IsInt());
+  absl::StatusOr<Kernel> kernel = CreateKernel(
+      GridSpec{.name = "scalar_float_ops", .grid = {1}},
+      InSpec{.shape = f32(32, 128), .space = MemorySpace::kSmem},
+      OutSpec{.shape = f32(32, 128), .space = MemorySpace::kSmem},
+      [](Ref in, Ref out) {
+        Scalar sf = F32(2.5);
+        EXPECT_TRUE(sf.dtype().IsFloat());
+        EXPECT_FALSE(sf.dtype().IsInt());
 
-                     Scalar sf2 = sf * 2.0;
-                     Scalar sf3 = sf2 + 1.0;
-                     Scalar sf_div = sf3 / 2.0;
-                     Scalar sf_neg = -sf;
+        Scalar sf2 = sf * 2.0;
+        Scalar sf3 = sf2 + 1.0;
+        Scalar sf_div = sf3 / 2.0;
+        Scalar sf_neg = -sf;
 
-                     Scalar sf_exp = Exp(sf);
-                     Scalar sf_log = Log(sf);
-                     Scalar sf_sqrt = Sqrt(sf);
-                     Scalar sf_rsqrt = Rsqrt(sf);
-                     Scalar sf_abs = Abs(sf_neg);
+        Scalar sf_exp = Exp(sf);
+        Scalar sf_log = Log(sf);
+        Scalar sf_sqrt = Sqrt(sf);
+        Scalar sf_rsqrt = Rsqrt(sf);
+        Scalar sf_abs = Abs(sf_neg);
 
-                     Scalar sf_sel = Select(sf > 1.0, sf, 0.0);
-                     Scalar sf_min = Min(sf, 10.0);
-                     Scalar sf_max = Max(sf, 0.0);
+        Scalar sf_sel = Select(sf > 1.0, sf, 0.0);
+        Scalar sf_min = Min(sf, 10.0);
+        Scalar sf_max = Max(sf, 0.0);
 
-                     Scalar loaded(in(0, 0));
-                     out(0, 0) = loaded + sf_exp + sf_log + sf_sqrt + sf_rsqrt +
-                                 sf_abs + sf_sel + sf_min + sf_max + sf_div;
-                   });
+        Scalar loaded = LoadScalar(in(0, 0));
+        Scalar result = loaded + sf_exp + sf_log + sf_sqrt + sf_rsqrt + sf_abs +
+                        sf_sel + sf_min + sf_max + sf_div;
+        Store(out(0, 0), result);
+      });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @scalar_float_ops(
     CHECK-SAME:    %{{.*}}: i32, %[[IN:arg[0-9]+]]: memref<32x128xf32, #tpu.memory_space<smem>>, %[[OUT:arg[0-9]+]]: memref<32x128xf32, #tpu.memory_space<smem>>)
@@ -349,7 +365,7 @@ TEST(KilnTest, ScalarFloatOperations) {
     CHECK:         %[[MIN:.*]] = arith.minimumf %[[SF]], %{{.*}} : f32
     CHECK:         %[[MAX:.*]] = arith.maximumf %[[SF]], %{{.*}} : f32
 
-    // Scalar(ref) on an SMEM ref is a scalar memref.load of the squeezed slice.
+    // LoadScalar(ref) on an SMEM ref is a scalar memref.load of the squeezed slice.
     CHECK:         %[[IN_SLICE:.*]] = tpu.memref_slice %[[IN]][%{{.*}}, %{{.*}}] : memref<32x128xf32, #tpu.memory_space<smem>> -> memref<1x1xf32, #tpu.memory_space<smem>>
     CHECK:         %[[IN_SQ:.*]] = tpu.memref_squeeze %[[IN_SLICE]] : memref<1x1xf32, #tpu.memory_space<smem>> -> memref<f32, #tpu.memory_space<smem>>
     CHECK:         %[[LOADED:.*]] = memref.load %[[IN_SQ]][] : memref<f32, #tpu.memory_space<smem>>
@@ -387,11 +403,11 @@ TEST(KilnTest, BitwiseOperations) {
         Scalar stream = Fmix32(pid ^ 0x9E3779B9u);
         Scalar shifted = (stream << 1) | (stream & 1);
 
-        Tile t(in);
+        Tile t = Load(in);
         Tile hashed = Fmix32(t ^ shifted);
         Tile masked = (hashed & 0xFFFF) | (hashed >> 16);
         Tile masked_signed = masked.AsType(i32);
-        out = Select(masked_signed >= 0, masked_signed, 0);
+        Store(out, Select(masked_signed >= 0, masked_signed, 0));
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @bitwise_ops(
@@ -432,7 +448,7 @@ TEST(KilnTest, TileScalarSplat) {
   absl::StatusOr<Kernel> kernel = CreateKernel(
       GridSpec{.name = "tile_scalar_splat", .grid = {1}}, InSpec{f32(32, 128)},
       OutSpec{i32(32, 128)}, [](Ref float_in, Ref out) {
-        Tile float_tile(float_in);
+        Tile float_tile = Load(float_in);
         Scalar int_scalar = I32(42);
 
         // Verify 0-D tile properties when splatted from a scalar.
@@ -447,7 +463,7 @@ TEST(KilnTest, TileScalarSplat) {
         Tile splatted_int_tile = float_tile.Splat(int_scalar);
         EXPECT_EQ(splatted_int_tile.shape(), i32(32, 128));
 
-        out = splatted_int_tile;
+        Store(out, splatted_int_tile);
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @tile_scalar_splat(
@@ -464,8 +480,8 @@ TEST(KilnTest, TileScalarArithmetic) {
       GridSpec{.name = "tile_scalar_arith", .grid = {2}}, InSpec{f32(32, 128)},
       InSpec{i32(32, 128)}, OutSpec{f32(32, 128)},
       [](Ref float_in, Ref int_in, Ref out) {
-        Tile float_tile(float_in);
-        Tile int_tile(int_in);
+        Tile float_tile = Load(float_in);
+        Tile int_tile = Load(int_in);
 
         Scalar program_id = ProgramId(0);
         Scalar float_scalar = F32(1.5);
@@ -481,8 +497,8 @@ TEST(KilnTest, TileScalarArithmetic) {
         Tile tile_mod_scalar = int_tile % int_scalar;
         Tile scalar_mod_tile = int_scalar % int_tile;
 
-        out = sum + diff + product + quotient + max_tile + min_tile +
-              tile_mod_scalar.ToF32() + scalar_mod_tile.ToF32();
+        Store(out, sum + diff + product + quotient + max_tile + min_tile +
+                       tile_mod_scalar.ToF32() + scalar_mod_tile.ToF32());
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @tile_scalar_arith(
@@ -513,7 +529,7 @@ TEST(KilnTest, TileScalarBitwise) {
   absl::StatusOr<Kernel> kernel = CreateKernel(
       GridSpec{.name = "tile_scalar_bitwise", .grid = {1}},
       InSpec{i32(32, 128)}, OutSpec{i32(32, 128)}, [](Ref int_in, Ref out) {
-        Tile int_tile(int_in);
+        Tile int_tile = Load(int_in);
         Scalar int_scalar = I32(42);
 
         Tile bitwise_xor = int_tile ^ int_scalar;
@@ -524,8 +540,8 @@ TEST(KilnTest, TileScalarBitwise) {
         Tile tile_shr_scalar = int_tile >> int_scalar;
         Tile scalar_shr_tile = int_scalar >> int_tile;
 
-        out = bitwise_xor + bitwise_or + bitwise_and + tile_shl_scalar +
-              scalar_shl_tile + tile_shr_scalar + scalar_shr_tile;
+        Store(out, bitwise_xor + bitwise_or + bitwise_and + tile_shl_scalar +
+                       scalar_shl_tile + tile_shr_scalar + scalar_shr_tile);
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @tile_scalar_bitwise(
@@ -555,8 +571,8 @@ TEST(KilnTest, TileScalarComparisonAndSelect) {
       GridSpec{.name = "tile_scalar_cmp_select", .grid = {1}},
       InSpec{f32(32, 128)}, InSpec{i32(32, 128)}, OutSpec{f32(32, 128)},
       [](Ref float_in, Ref int_in, Ref out) {
-        Tile float_tile(float_in);
-        Tile int_tile(int_in);
+        Tile float_tile = Load(float_in);
+        Tile int_tile = Load(int_in);
 
         Scalar float_scalar = F32(1.5);
         Scalar int_scalar = I32(42);
@@ -573,8 +589,9 @@ TEST(KilnTest, TileScalarComparisonAndSelect) {
             Select(ne_mask, float_scalar, float_scalar * 2.0);
         Tile select_literal_scalar = Select(eq_mask, 0.0, float_scalar);
 
-        out = select_tile_scalar + select_scalar_tile + select_scalar_literal +
-              select_scalar_scalar + select_literal_scalar;
+        Store(out, select_tile_scalar + select_scalar_tile +
+                       select_scalar_literal + select_scalar_scalar +
+                       select_literal_scalar);
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @tile_scalar_cmp_select(
@@ -639,7 +656,7 @@ TEST(KilnTest, ScalarCompoundAssignmentArithmetic) {
                      sf /= rhs_f;
                      sf /= 4.0;
 
-                     out(0) = sf;
+                     Store(out(0), sf);
                    });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @scalar_compound_arith(
@@ -685,7 +702,7 @@ TEST(KilnTest, ScalarCompoundAssignmentBitwise) {
                      s <<= 2;
                      s >>= rhs;
                      s >>= 1;
-                     out(0) = s;
+                     Store(out(0), s);
                    });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @scalar_compound_bitwise(
@@ -710,8 +727,8 @@ TEST(KilnTest, TileFloatCompoundAssignment) {
       CreateKernel(GridSpec{.name = "tile_float_compound_assign", .grid = {2}},
                    InSpec{f32(8, 128)}, InSpec{f32(8, 128)},
                    OutSpec{f32(8, 128)}, [](Ref in0, Ref in1, Ref out) {
-                     Tile f(in0);
-                     Tile rhs(in1);
+                     Tile f = Load(in0);
+                     Tile rhs = Load(in1);
                      Scalar sf = ProgramId(0).ToF32();
                      Tile& f_ref = (f += rhs);
                      EXPECT_EQ(&f_ref, &f);
@@ -726,7 +743,7 @@ TEST(KilnTest, TileFloatCompoundAssignment) {
                      f /= rhs;
                      f /= sf;
                      f /= 4.0;
-                     out = f;
+                     Store(out, f);
                    });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @tile_float_compound_assign(
@@ -760,8 +777,8 @@ TEST(KilnTest, TileIntCompoundAssignmentArithmetic) {
       CreateKernel(GridSpec{.name = "tile_int_compound_arith", .grid = {2}},
                    InSpec{i32(8, 128)}, InSpec{i32(8, 128)},
                    OutSpec{i32(8, 128)}, [](Ref in0, Ref in1, Ref out) {
-                     Tile i(in0);
-                     Tile rhs(in1);
+                     Tile i = Load(in0);
+                     Tile rhs = Load(in1);
                      Scalar s = ProgramId(0);
                      i += rhs;
                      i += s;
@@ -778,7 +795,7 @@ TEST(KilnTest, TileIntCompoundAssignmentArithmetic) {
                      i %= rhs;
                      i %= s;
                      i %= 7;
-                     out = i;
+                     Store(out, i);
                    });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @tile_int_compound_arith(
@@ -814,8 +831,8 @@ TEST(KilnTest, TileCompoundAssignmentBitwise) {
       CreateKernel(GridSpec{.name = "tile_compound_bitwise", .grid = {2}},
                    InSpec{i32(8, 128)}, InSpec{i32(8, 128)},
                    OutSpec{i32(8, 128)}, [](Ref in0, Ref in1, Ref out) {
-                     Tile i(in0);
-                     Tile rhs(in1);
+                     Tile i = Load(in0);
+                     Tile rhs = Load(in1);
                      Scalar s = ProgramId(0);
                      i &= rhs;
                      i &= s;
@@ -832,7 +849,7 @@ TEST(KilnTest, TileCompoundAssignmentBitwise) {
                      i >>= rhs;
                      i >>= s;
                      i >>= 1;
-                     out = i;
+                     Store(out, i);
                    });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @tile_compound_bitwise(
@@ -864,17 +881,16 @@ TEST(KilnTest, TileCompoundAssignmentBitwise) {
 }
 
 TEST(KilnTest, TileReciprocal) {
-  EXPECT_THAT(CreateKernel(GridSpec{.name = "tile_reciprocal", .grid = {1}},
-                           InSpec{f32(32, 128)}, OutSpec{f32(32, 128)},
-                           [&](Ref in, Ref out) {
-                             Tile t(in);
-                             Tile exact_default = Reciprocal(t);
-                             Tile exact_explicit =
-                                 Reciprocal(t, ReciprocalMode::kExact);
-                             Tile approx =
-                                 Reciprocal(t, ReciprocalMode::kApprox);
-                             out = exact_default + exact_explicit + approx;
-                           }),
+  EXPECT_THAT(CreateKernel(
+                  GridSpec{.name = "tile_reciprocal", .grid = {1}},
+                  InSpec{f32(32, 128)}, OutSpec{f32(32, 128)},
+                  [&](Ref in, Ref out) {
+                    Tile t = Load(in);
+                    Tile exact_default = Reciprocal(t);
+                    Tile exact_explicit = Reciprocal(t, ReciprocalMode::kExact);
+                    Tile approx = Reciprocal(t, ReciprocalMode::kApprox);
+                    Store(out, exact_default + exact_explicit + approx);
+                  }),
               IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @tile_reciprocal(
     CHECK-SAME:    %{{.*}}: i32, %[[IN:arg[0-9]+]]: memref<32x128xf32, #tpu.memory_space<vmem>>, %[[OUT:arg[0-9]+]]: memref<32x128xf32, #tpu.memory_space<vmem>>)
@@ -893,14 +909,14 @@ TEST(KilnTest, RotateGatherExtractBitcastAndMaskedStore) {
       GridSpec{.name = "rotate_gather_extract_bitcast_store", .grid = {1}},
       InSpec{f32(8, 128)}, OutSpec{i32(1, 128)}, [](Ref in, Ref out) {
         Scalar step = ProgramId(0);
-        Tile rotated = Rotate(Tile(in), 8 - (step & 7), /*axis=*/0);
+        Tile rotated = Rotate(Load(in), 8 - (step & 7), /*axis=*/0);
         Tile row0 = rotated.Slice({0, 0}, {1, 128});
         Tile gathered = Gather(row0, Splat(step, {1, 128}), /*axis=*/1);
         Scalar lane_f32 = Extract(gathered, {0, 0});
         Scalar lane_bits = Bitcast(lane_f32, i32);
         Tile row_bits = Bitcast(row0, i32);
         Tile mask = Iota(i32(1, 128), /*axis=*/1) == (step & 127);
-        Store(out, row_bits + lane_bits, mask);
+        Store(out, row_bits + lane_bits, {.mask = mask});
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @rotate_gather_extract_bitcast_store(
@@ -938,14 +954,14 @@ TEST(KilnTest, ForLoopWithInductionVarAndBounds) {
           EXPECT_FALSE(i.dtype().IsFloat());
           EXPECT_EQ(i.dtype(), i32);
           Scalar i_next = i + 1;
-          If(i_next < 5, [&] { out = Tile(in); });
+          If(i_next < 5, [&] { Store(out, Load(in)); });
         });
 
         // Loop with dynamic Scalar bounds.
         Scalar iters = I32(10);
         For(iters, [&](Scalar i) {
           EXPECT_EQ(i.dtype(), i32);
-          If(i == 0, [&] { out = Tile(in); });
+          If(i == 0, [&] { Store(out, Load(in)); });
         });
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
@@ -981,7 +997,64 @@ TEST(KilnTest, ForLoopWithInductionVarAndBounds) {
   )"));
 }
 
-TEST(KilnTest, ScalarMismatchedTypesFail) {
+// Carries a scalar and a tile through four iterations.
+TEST(KilnTest, ForLoopWithCarriedState) {
+  EXPECT_THAT(CreateKernel(GridSpec{.name = "for_carry", .grid = {1}},
+                           InSpec{f32(8, 128)}, OutSpec{f32(8, 128)},
+                           [](Ref in, Ref out) {
+                             Scalar s = I32(1);
+                             Tile t = Load(in);
+                             For(0, 4, 1, {&s, &t}, [&](Scalar) {
+                               s = s + 2;
+                               t = t + Load(in);
+                             });
+                             Store(out, t * s.ToF32());
+                           }),
+              IsOkAndMatchesIr(R"(
+    CHECK-LABEL: func.func @for_carry(
+    CHECK:         %[[ONE:.*]] = arith.constant 1 : i32
+    CHECK:         %[[IN:.*]] = vector.load
+    CHECK:         %[[RES:.*]]:2 = scf.for %{{.*}} = %{{.*}} to %{{.*}} step %{{.*}} iter_args(%[[S:.*]] = %[[ONE]], %[[T:.*]] = %[[IN]]) -> (i32, vector<8x128xf32>) {
+    CHECK:           %[[S2:.*]] = arith.addi %[[S]], %{{.*}} : i32
+    CHECK:           %[[T2:.*]] = arith.addf %[[T]], %{{.*}} : vector<8x128xf32>
+    CHECK:           scf.yield %[[S2]], %[[T2]] : i32, vector<8x128xf32>
+    CHECK:         }
+    CHECK:         arith.sitofp %[[RES]]#0 : i32 to f32
+    CHECK:         arith.mulf %[[RES]]#1, %{{.*}} : vector<8x128xf32>
+  )"));
+}
+
+// An i32 -> u32 swap keeps the MLIR type, so only Kiln can catch it.
+TEST(KilnDeathTest, ForLoopRejectsChangedStateDtype) {
+  EXPECT_THAT(
+      CreateKernel(
+          GridSpec{.name = "for_carry_dtype", .grid = {1}}, InSpec{f32(8, 128)},
+          OutSpec{f32(8, 128)},
+          [](Ref, Ref) {
+            Scalar s = I32(0);
+            EXPECT_DEATH(
+                For(0, 4, 1, {&s}, [&](Scalar i) { s = i.AsType(u32); }),
+                "For\\(\\) loop variable 0 changed dtype: expected i32, got "
+                "u32");
+          }),
+      IsOk());
+}
+
+TEST(KilnTest, ForLoopWithEmptyState) {
+  EXPECT_THAT(CreateKernel(GridSpec{.name = "for_empty_carry", .grid = {1}},
+                           InSpec{f32(8, 128)}, OutSpec{f32(8, 128)},
+                           [](Ref in, Ref out) {
+                             For(0, 4, 1, {},
+                                 [&](Scalar) { Store(out, Load(in)); });
+                           }),
+              IsOkAndMatchesIr(R"(
+    CHECK:     scf.for
+    CHECK:       tpu.vector_store {{.*}}
+    CHECK-NEXT:  }
+  )"));
+}
+
+TEST(KilnDeathTest, ScalarMismatchedTypesFail) {
   absl::StatusOr<Kernel> kernel = CreateKernel(
       GridSpec{.name = "mismatched", .grid = {1}}, InSpec{f32(32, 128)},
       InSpec{i32(32, 128)}, InSpec{u32(32, 128)}, OutSpec{f32(32, 128)},
@@ -998,9 +1071,9 @@ TEST(KilnTest, ScalarMismatchedTypesFail) {
         EXPECT_DEATH(For(s_f, [](Scalar) {}),
                      "IndexArg requires an integer scalar");
 
-        Tile t_f(f_in);
-        Tile t_i(i_in);
-        Tile t_u(u_in);
+        Tile t_f = Load(f_in);
+        Tile t_i = Load(i_in);
+        Tile t_u = Load(u_in);
         EXPECT_DEATH(t_f + t_i, "\\+ requires operands of the same dtype");
         EXPECT_DEATH(t_i + t_u, "\\+ requires operands of the same dtype");
         EXPECT_DEATH(static_cast<void>(t_i == t_u),
@@ -1014,12 +1087,18 @@ TEST(KilnTest, ScalarMismatchedTypesFail) {
 
         EXPECT_DEATH(f_in(0, 0, 0), "Too many slice indices");
         EXPECT_DEATH(f_in(0, Slice(0, 0)), "Slice size must be positive");
-        EXPECT_DEATH(static_cast<void>(Scalar(f_in)),
-                     "Ref::operator Scalar\\(\\) expects a 0-D ref");
-        EXPECT_DEATH(static_cast<void>(Scalar(f_in(0, 0))),
-                     "Ref::operator Scalar\\(\\) expects an SMEM ref");
+        EXPECT_DEATH(static_cast<void>(LoadScalar(f_in)),
+                     "LoadScalar\\(\\) requires a 0-D ref");
+        EXPECT_DEATH(static_cast<void>(LoadScalar(f_in(0, 0))),
+                     "LoadScalar\\(\\) requires an SMEM ref");
+        EXPECT_DEATH(Store(f_in, F32(1.0)),
+                     "Store\\(\\) of a Scalar requires a 0-D ref");
+        EXPECT_DEATH(Store(f_in(0, 0), F32(1.0)),
+                     "Store\\(\\) of a Scalar requires an SMEM ref");
+        EXPECT_DEATH(Store(out, t_f, {.mask = t_i}),
+                     "Masked Store\\(\\) requires an i1 mask tile");
 
-        out = t_f;
+        Store(out, t_f);
       });
   ASSERT_THAT(kernel, IsOk());
 }
@@ -1146,7 +1225,7 @@ TEST(KilnTest, DTypeInTileAndScalarOps) {
         EXPECT_EQ(in.shape(), f32(32, 128));
         EXPECT_EQ(out.shape(), Shape({32, 128}, f32));
 
-        Tile t(in);
+        Tile t = Load(in);
         EXPECT_EQ(t.dtype(), f32);
         EXPECT_EQ(t.shape(), f32(32, 128));
         EXPECT_EQ(t.shape().rank(), 2);
@@ -1176,7 +1255,7 @@ TEST(KilnTest, DTypeInTileAndScalarOps) {
         Tile ninf = NInf(f32({32, 128}));
         EXPECT_EQ(ninf.shape(), f32(32, 128));
 
-        out = t_bf16.ToF32();
+        Store(out, t_bf16.ToF32());
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @dtype_ops(
@@ -1198,10 +1277,12 @@ TEST(KilnTest, SimplifiedOverloadsAndBounds) {
         Scalar ten = I32(10);
 
         // For with (Scalar, int64_t) - previously unsupported combination.
-        For(zero, 10, [&](Scalar i) { If(i == 0, [&] { out = Tile(in); }); });
+        For(zero, 10,
+            [&](Scalar i) { If(i == 0, [&] { Store(out, Load(in)); }); });
 
         // For with (int64_t, Scalar).
-        For(0, ten, [&](Scalar i) { If(i == 5, [&] { out = Tile(in); }); });
+        For(0, ten,
+            [&](Scalar i) { If(i == 5, [&] { Store(out, Load(in)); }); });
 
         // Bitwise shifts with Literal on LHS: 1 << i, 1024 >> i.
         Scalar shift_val = I32(2);
@@ -1230,7 +1311,7 @@ TEST(KilnTest, SimplifiedOverloadsAndBounds) {
         // Logical ops with literals and on tiles.
         Scalar s_logic = (cond & true) | (false | !cond);
         EXPECT_EQ(s_logic.dtype(), bool_);
-        Tile t_cond = Tile(in) > 0.0;
+        Tile t_cond = Load(in) > 0.0;
         Tile t_logic = (t_cond & true) | (false | !t_cond);
         EXPECT_EQ(t_logic.dtype(), bool_);
 
@@ -1314,8 +1395,8 @@ TEST(KilnTest, UnsignedOperations) {
       GridSpec{.name = "unsigned_ops", .grid = {1}}, InSpec{u32(32, 128)},
       InSpec{u32(32, 128)}, OutSpec{u32(32, 128)},
       [](Ref in_a, Ref in_b, Ref out) {
-        Tile a(in_a);
-        Tile b(in_b);
+        Tile a = Load(in_a);
+        Tile b = Load(in_b);
         EXPECT_TRUE(a.dtype().IsUnsigned());
         EXPECT_FALSE(a.dtype().IsSigned());
         EXPECT_TRUE(b.dtype().IsUnsigned());
@@ -1358,8 +1439,8 @@ TEST(KilnTest, UnsignedOperations) {
 
         Tile s_tile = Splat(s_div + s_rem + s_shr, {32, 128});
         If(s_lt, [&] {
-          out = sel + red_lane + div + rem + min_val + max_val + shr + abs_a +
-                s_tile;
+          Store(out, sel + red_lane + div + rem + min_val + max_val + shr +
+                         abs_a + s_tile);
         });
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
@@ -1398,9 +1479,9 @@ TEST(KilnTest, UnsignedAndSignedCasts) {
       GridSpec{.name = "unsigned_casts", .grid = {1}}, InSpec{f32(32, 128)},
       InSpec{u8(32, 128)}, InSpec{i8(32, 128)}, OutSpec{f32(32, 128)},
       [](Ref in_f, Ref in_u8, Ref in_i8, Ref out) {
-        Tile f(in_f);
-        Tile u(in_u8);
-        Tile i(in_i8);
+        Tile f = Load(in_f);
+        Tile u = Load(in_u8);
+        Tile i = Load(in_i8);
 
         // Float to Unsigned vs Signed
         Tile f_to_u32 = f.AsType(u32);
@@ -1418,8 +1499,8 @@ TEST(KilnTest, UnsignedAndSignedCasts) {
         Tile u_bitcast_i = f_to_u32.Bitcast(i32);
         EXPECT_EQ(u_bitcast_i.dtype(), i32);
 
-        out = f_to_u32.AsType(f32) + f_to_i32.AsType(f32) + u_to_f + i_to_f +
-              u8_to_u32.AsType(f32) + i8_to_i32.AsType(f32);
+        Store(out, f_to_u32.AsType(f32) + f_to_i32.AsType(f32) + u_to_f +
+                       i_to_f + u8_to_u32.AsType(f32) + i8_to_i32.AsType(f32));
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @unsigned_casts(
@@ -1513,12 +1594,13 @@ TEST(KilnTest, SteppedForScopedAllocaAndUnsignedBounds) {
             EXPECT_EQ(scratch_tile.memory_space(), MemorySpace::kVmem);
             Ref tile_in = dyn_in(Slice(aligned_r, 8), all);
             EXPECT_TRUE(tile_in.HasStaticShape());
-            scratch_tile = Tile(tile_in);
-            vmem_out = Tile(scratch_tile);
+            Store(scratch_tile, Load(tile_in));
+            Store(vmem_out, Load(scratch_tile));
           });
         });
 
-        For(U32(0), U32(8), U32(4), [&](Scalar idx) { local_smem(0) = idx; });
+        For(U32(0), U32(8), U32(4),
+            [&](Scalar idx) { Store(local_smem(0), idx); });
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @stepped_for_alloca(
@@ -1549,15 +1631,16 @@ TEST(KilnTest, SteppedForScopedAllocaAndUnsignedBounds) {
   )"));
 }
 
-TEST(KilnTest, DynamicShapeSliceAndAllocaValidationErrors) {
+TEST(KilnDeathTest, DynamicShapeSliceAndAllocaValidationErrors) {
   absl::StatusOr<Kernel> kernel = CreateKernel(
       GridSpec{.name = "validation_errors"}, InSpec::Vmem(f32(kDynamic, 128)),
       OutSpec::Vmem(f32(8, 128)), [](Ref dyn_in, Ref vmem_out) {
         Scalar rows = dyn_in.Dim(0);
-        EXPECT_DEATH(static_cast<void>(Tile(dyn_in)),
-                     "Tile load requires a Ref with a static shape");
-        EXPECT_DEATH(dyn_in.Store(Tile(vmem_out)),
-                     "Tile store requires a Ref with a static shape");
+        EXPECT_DEATH(static_cast<void>(Load(dyn_in)),
+                     "Load\\(\\) requires a Ref with a static shape");
+        EXPECT_DEATH(
+            Store(dyn_in, Load(vmem_out)),
+            "Store\\(\\) of a Tile requires a Ref with a static shape");
         EXPECT_DEATH(static_cast<void>(dyn_in.IsDynamicDim(-1)),
                      "Dimension axis must be non-negative");
         EXPECT_DEATH(static_cast<void>(dyn_in.IsDynamicDim(2)),
@@ -1662,7 +1745,7 @@ TEST(KilnTest, SemaphoreAndBarrierOperations) {
   )"));
 }
 
-TEST(KilnTest, HbmAndSemaphoreValidationErrors) {
+TEST(KilnDeathTest, HbmAndSemaphoreValidationErrors) {
   // HBM input/output specs with index_map are rejected by BuildKernel.
   absl::StatusOr<Kernel> bad_hbm_in_map = CreateKernel(
       GridSpec{.name = "bad_hbm_in", .grid = {1}},
@@ -1731,12 +1814,12 @@ TEST(KilnTest, HbmAndSemaphoreValidationErrors) {
                      "SemaphoreArray indexing requires exactly 1 indices");
         EXPECT_DEATH(static_cast<void>(dma_sems(2)),
                      "Slice offset \\+ size must not exceed dimension size");
-        EXPECT_DEATH(static_cast<void>(Tile(hbm_tile)),
-                     "Tile load requires a VMEM ref");
-        EXPECT_DEATH((hbm_tile = Tile(vmem_out)),
-                     "Tile store requires a VMEM ref");
-        EXPECT_DEATH(static_cast<void>(Tile(hbm_in)),
-                     "Tile load requires a Ref with a static shape");
+        EXPECT_DEATH(static_cast<void>(Load(hbm_tile)),
+                     "Load\\(\\) requires a VMEM ref");
+        EXPECT_DEATH(Store(hbm_tile, Load(vmem_out)),
+                     "Store\\(\\) of a Tile requires a VMEM ref");
+        EXPECT_DEATH(static_cast<void>(Load(hbm_in)),
+                     "Load\\(\\) requires a Ref with a static shape");
         EXPECT_DEATH(dma_sems(0).Signal(1),
                      "Semaphore::Signal\\(\\) requires a regular semaphore");
         EXPECT_DEATH(dma_sems(0).Wait(1),
@@ -1876,7 +1959,7 @@ TEST(KilnTest, UnboundedDynamicDma) {
           Ref in_tile = hbm_in(Slice(aligned_r, 8), all);
           Ref out_tile = hbm_out(Slice(aligned_r, 8), all);
           AsyncCopy(in_tile, vmem_buf, in_sem).Wait();
-          vmem_buf = Tile(vmem_buf) + 1.0f;
+          Store(vmem_buf, Load(vmem_buf) + 1.0f);
           AsyncCopy(vmem_buf, out_tile, out_sem).Wait();
         });
       });
@@ -1903,7 +1986,7 @@ TEST(KilnTest, UnboundedDynamicDma) {
   )"));
 }
 
-TEST(KilnTest, DmaValidationErrors) {
+TEST(KilnDeathTest, DmaValidationErrors) {
   absl::StatusOr<Kernel> kernel = CreateKernel(
       GridSpec{.name = "dma_errors"}, InSpec::Hbm(f32(kDynamic, 128)),
       OutSpec::Vmem(f32(8, 128)), [](Ref hbm_in, Ref vmem_out) {
@@ -1984,8 +2067,8 @@ TEST(KilnTest, CanonicalizeFoldsMemRefSliceAndEliminatesDeadOps) {
                    ScalarPrefetchSpec{i32(4)}, OutSpec::Smem(i32(4, 8)),
                    [](Ref idx, Ref out) {
                      Scalar i = ProgramId(0);
-                     Scalar v = Scalar(idx(i));
-                     out(i, 0) = v;
+                     Scalar v = LoadScalar(idx(i));
+                     Store(out(i, 0), v);
                    });
   ASSERT_THAT(kernel, IsOk());
   ASSERT_THAT(kernel->Canonicalize(), IsOk());
@@ -2046,13 +2129,38 @@ TEST(KilnTest, RefAtSlicesWithAListOfIndexers) {
         const llvm::SmallVector<Indexer, 3> indexers = {1, Slice(8, 8), all};
         Ref view = in.At(indexers);
         EXPECT_THAT(view.dims(), ElementsAre(8, 128));
-        out = Tile(view);
+        Store(out, Load(view));
       });
   EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
     CHECK-LABEL: func.func @ref_at(
     CHECK-SAME:    %{{.*}}: i32, %[[IN:arg[0-9]+]]: memref<4x32x128xf32, #tpu.memory_space<vmem>>
     CHECK:         %[[SLICE:.*]] = tpu.memref_slice %[[IN]]{{.*}} -> memref<1x8x128xf32, #tpu.memory_space<vmem>>
     CHECK:         tpu.memref_squeeze %[[SLICE]] : {{.*}} -> memref<8x128xf32, #tpu.memory_space<vmem>>
+  )"));
+}
+
+// Copy assignment rebinds the handle and emits no IR; a later `Store` writes
+// to the newly bound memref.
+TEST(KilnTest, RefCopyAssignmentRebinds) {
+  EXPECT_THAT(
+      CreateKernel(GridSpec{.name = "ref_rebind", .grid = {1}},
+                   InSpec::Vmem(f32(8, 128)), OutSpec::Vmem(f32(8, 128)),
+                   ScratchSpec::Vmem(f32(8, 128)),
+                   [](Ref in, Ref out, Ref scratch) {
+                     Ref dst = scratch;
+                     dst = out;
+                     Store(dst, Load(in));
+                   }),
+      IsOkAndMatchesIr(R"(
+    CHECK-LABEL: func.func @ref_rebind(
+    CHECK-SAME:    %{{.*}}: i32, %[[IN:arg[0-9]+]]: memref<8x128xf32, #tpu.memory_space<vmem>>,
+    CHECK-SAME:    %[[OUT:arg[0-9]+]]: memref<8x128xf32, #tpu.memory_space<vmem>>,
+    CHECK-SAME:    %[[SCRATCH:arg[0-9]+]]: memref<8x128xf32, #tpu.memory_space<vmem>>)
+    CHECK:         %[[V:.*]] = vector.load %[[IN]]
+    CHECK-NOT:     %[[SCRATCH]]
+    CHECK:         tpu.vector_store %[[OUT]][%{{.*}}, %{{.*}}], %[[V]]
+    CHECK-NOT:     %[[SCRATCH]]
+    CHECK:         return
   )"));
 }
 
@@ -2083,10 +2191,10 @@ TEST(KilnTest, EmitPipeline) {
             .hbm = in, .block_shape = {kBlock}, .region = [](Scalar step) {
               return BlockRegion{.offsets = {step * kBlock}, .sizes = {kBlock}};
             }};
-        acc = Zeros(acc.shape());
+        Store(acc, Zeros(acc.shape()));
         EmitPipeline(0, in.Dim(0) / kBlock, {std::move(input)},
                      /*outputs=*/{}, [&](const PipelineStep& s) {
-                       acc = Tile(acc) + Tile(s.inputs[0]);
+                       Store(acc, Load(acc) + Load(s.inputs[0]));
                      });
         AsyncCopy(acc, out, AllocaDmaSemaphore()).Wait();
       });
@@ -2127,12 +2235,13 @@ TEST(KilnTest, EmitPipelineWithTwo2dInputs) {
       GridSpec{.name = "emit_pipeline_2d"}, InSpec::Hbm(f32(kDynamic, 128)),
       InSpec::Hbm(f32(kDynamic, 128)), OutSpec::Hbm(f32(8, 128)),
       ScratchSpec::Vmem(f32(8, 128)), [&](Ref a, Ref b, Ref out, Ref acc) {
-        acc = Zeros(acc.shape());
+        Store(acc, Zeros(acc.shape()));
         EmitPipeline(0, a.Dim(0) / 8,
                      {{.hbm = a, .block_shape = {8, 128}, .region = rows},
                       {.hbm = b, .block_shape = {8, 128}, .region = rows}},
                      /*outputs=*/{}, [&](const PipelineStep& s) {
-                       acc = Tile(acc) + Tile(s.inputs[0]) * Tile(s.inputs[1]);
+                       Store(acc,
+                             Load(acc) + Load(s.inputs[0]) * Load(s.inputs[1]));
                      });
         AsyncCopy(acc, out, AllocaDmaSemaphore()).Wait();
       });
@@ -2187,7 +2296,7 @@ TEST(KilnTest, EmitPipelineWithOutputs) {
                 {{.hbm = in, .block_shape = {kBlock}, .region = block}},
                 {{.hbm = out, .block_shape = {kBlock}, .region = block}},
                 [&](const PipelineStep& s) {
-                  Store(s.outputs[0], Tile(s.inputs[0]) * 2.0);
+                  Store(s.outputs[0], Load(s.inputs[0]) * 2.0);
                 });
           }),
       IsOkAndMatchesIr(R"(

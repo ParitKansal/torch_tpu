@@ -216,9 +216,18 @@ class ScopedPythonContextCapturer {
   // ScopedPythonContextCapturer is alive for the current thread.
   [[nodiscard]] static std::optional<PythonContext> MaybeGetContext();
 
-  // Pushes or pops a full name scope hierarchy (e.g. from `nn_module_stack`) on
-  // the current thread's `ContextManagerState` stack. Every `PushNameScopes`
-  // call must be balanced by a matching `PopNameScopes` call.
+  // Manages the stack of active name scope hierarchies (e.g. from
+  // `nn_module_stack` or `named_scope`) on the current thread's
+  // `ContextManagerState`.
+  // - `PushNameScopes` pushes a full scope hierarchy onto the stack, replacing
+  //   the active hierarchy until popped (pass `{}` to isolate from outer
+  //   scopes).
+  // - `AppendNameScope` appends a single `scope` to the active hierarchy on top
+  //   of the stack (if not already present) and pushes that extended hierarchy.
+  // - `PopNameScopes` pops the top hierarchy from the stack, restoring the
+  //   previous hierarchy. Every `PushNameScopes` or `AppendNameScope` call must
+  //   be balanced by a matching `PopNameScopes` call.
+  static void AppendNameScope(std::string scope);
   static void PushNameScopes(std::vector<std::string> scopes);
   static void PopNameScopes();
 

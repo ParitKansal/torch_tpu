@@ -208,6 +208,7 @@ class DeviceModuleBase(
     self.assertIsNotNone(stats)
     self.assertGreaterEqual(stats.num_cache_reqs, 0)
     self.assertGreaterEqual(stats.num_cache_hits, 0)
+    self.assertGreaterEqual(stats.num_unbounded_dynamic_hits, 0)
     self.assertFalse(stats.peak_compilation_host_memory_bytes)
     self.assertIsInstance(stats.per_entry_stats, list)
 

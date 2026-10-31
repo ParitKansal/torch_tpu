@@ -152,64 +152,58 @@ Ref::Ref(const void* impl, DType dtype) : ValueBase(impl, dtype) {
       << "Ref must be a memref value";
 }
 
-Ref& Ref::operator=(Tile rhs) {
-  Store(rhs, std::nullopt);
-  return *this;
-}
-
-Ref& Ref::operator=(Scalar rhs) {
-  ABSL_CHECK_EQ(rank(), 0)  // CRASH_OK
-      << "Ref::operator=(Scalar) expects a 0-D ref";
-  ABSL_CHECK(IsSmemRef(*this))  // CRASH_OK
-      << "Ref::operator=(Scalar) expects an SMEM ref";
-  mlir::ImplicitLocOpBuilder& b = internal::CurrentBuilder();
-  memref::StoreOp::create(b, internal::unwrap(rhs.AsType(dtype())),
-                          internal::unwrap(*this), mlir::ValueRange{});
-  return *this;
-}
-
-Ref::operator Scalar() const {
-  ABSL_CHECK_EQ(rank(), 0)  // CRASH_OK
-      << "Ref::operator Scalar() expects a 0-D ref";
-  ABSL_CHECK(IsSmemRef(*this))  // CRASH_OK
-      << "Ref::operator Scalar() expects an SMEM ref";
-  return internal::wrap<Scalar>(
-      memref::LoadOp::create(internal::CurrentBuilder(),
-                             internal::unwrap(*this), mlir::ValueRange{}),
-      dtype());
-}
-
-Ref::operator Tile() const {
-  ABSL_CHECK(HasStaticShape())  // CRASH_OK
-      << "Tile load requires a Ref with a static shape";
-  ABSL_CHECK(IsVmemRef(*this))  // CRASH_OK
-      << "Tile load requires a VMEM ref (use AsyncCopy for HBM)";
+Tile Load(Ref src) {
+  ABSL_CHECK(src.HasStaticShape())  // CRASH_OK
+      << "Load() requires a Ref with a static shape";
+  ABSL_CHECK(IsVmemRef(src))  // CRASH_OK
+      << "Load() requires a VMEM ref (use AsyncCopy for HBM)";
   mlir::ImplicitLocOpBuilder& b = internal::CurrentBuilder();
   return internal::wrap<Tile>(
-      vector::LoadOp::create(b, internal::ToMlirVectorType(shape()),
-                             internal::unwrap(*this), ZeroIndices(b, rank())),
-      dtype());
+      vector::LoadOp::create(b, internal::ToMlirVectorType(src.shape()),
+                             internal::unwrap(src), ZeroIndices(b, src.rank())),
+      src.dtype());
 }
 
-void Ref::Store(Tile value, std::optional<Tile> mask) {
-  ABSL_CHECK(HasStaticShape())  // CRASH_OK
-      << "Tile store requires a Ref with a static shape";
-  ABSL_CHECK(IsVmemRef(*this))  // CRASH_OK
-      << "Tile store requires a VMEM ref (use AsyncCopy for HBM)";
-  Tile converted = value.AsType(dtype());
-  Tile shaped = converted.ToShape(dims());
+Scalar LoadScalar(Ref src) {
+  ABSL_CHECK_EQ(src.rank(), 0)  // CRASH_OK
+      << "LoadScalar() requires a 0-D ref";
+  ABSL_CHECK(IsSmemRef(src))  // CRASH_OK
+      << "LoadScalar() requires an SMEM ref";
+  return internal::wrap<Scalar>(
+      memref::LoadOp::create(internal::CurrentBuilder(), internal::unwrap(src),
+                             mlir::ValueRange{}),
+      src.dtype());
+}
+
+void Store(Ref dst, Tile value, const StoreOptions& options) {
+  ABSL_CHECK(dst.HasStaticShape())  // CRASH_OK
+      << "Store() of a Tile requires a Ref with a static shape";
+  ABSL_CHECK(IsVmemRef(dst))  // CRASH_OK
+      << "Store() of a Tile requires a VMEM ref (use AsyncCopy for HBM)";
+  Tile converted = value.AsType(dst.dtype());
+  Tile shaped = converted.ToShape(dst.dims());
   mlir::Value mask_value;
-  if (mask.has_value()) {
-    ABSL_CHECK(mask->dtype().IsBool())  // CRASH_OK
-        << "Masked tile store requires an i1 mask tile";
-    Tile shaped_mask = mask->ToShape(dims());
+  if (options.mask.has_value()) {
+    ABSL_CHECK(options.mask->dtype().IsBool())  // CRASH_OK
+        << "Masked Store() requires an i1 mask tile";
+    Tile shaped_mask = options.mask->ToShape(dst.dims());
     mask_value = internal::unwrap(shaped_mask);
   }
 
   mlir::ImplicitLocOpBuilder& b = internal::CurrentBuilder();
-  tpu::VectorStoreOp::create(b, internal::unwrap(shaped),
-                             internal::unwrap(*this), ZeroIndices(b, rank()),
-                             mask_value, /*add=*/false);
+  tpu::VectorStoreOp::create(b, internal::unwrap(shaped), internal::unwrap(dst),
+                             ZeroIndices(b, dst.rank()), mask_value,
+                             /*add=*/false);
+}
+
+void Store(Ref dst, Scalar value) {
+  ABSL_CHECK_EQ(dst.rank(), 0)  // CRASH_OK
+      << "Store() of a Scalar requires a 0-D ref";
+  ABSL_CHECK(IsSmemRef(dst))  // CRASH_OK
+      << "Store() of a Scalar requires an SMEM ref";
+  memref::StoreOp::create(internal::CurrentBuilder(),
+                          internal::unwrap(value.AsType(dst.dtype())),
+                          internal::unwrap(dst), mlir::ValueRange{});
 }
 
 llvm::ArrayRef<int64_t> Ref::dims() const {

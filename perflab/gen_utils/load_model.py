@@ -233,3 +233,42 @@ def default_load_model(
       )
 
   return model, inputs
+
+
+def tapas_load_model(
+    ctx: context_lib.Context,
+    model_id: str,
+    is_training: bool,
+    full_scope_batch_size: int = 1,
+) -> tuple[torch.nn.Module, dict[str, Any]]:
+  """Loads a TAPAS QA model with binary `{0, 1}` cell-selection `labels`.
+
+  Unlike standard HuggingFace `*ForQuestionAnswering` heads (which take
+  `start_positions`/`end_positions`), `TapasForQuestionAnswering`
+  (`google/tapas-*-finetuned-sqa`) computes binary cell-selection loss via
+  `torch.distributions.Bernoulli(logits=...).log_prob(labels.float())`, which
+  requires `{0, 1}` targets of shape `(batch_size, seq_len)` rather than random
+  vocabulary token IDs in `[0, vocab_size)`.
+
+  Args:
+    ctx: Benchmark execution context containing device and run scope options.
+    model_id: Name of the transformer model to retrieve from the registry.
+    is_training: Whether to generate training labels and configurations.
+    full_scope_batch_size: Batch size to use for the full run scope.
+
+  Returns:
+    A tuple of `(model, inputs)` ready for execution.
+  """
+  model, inputs = default_load_model(
+      ctx, model_id, is_training, full_scope_batch_size
+  )
+  if is_training and "labels" in inputs:
+    inputs["labels"] = torch.randint(
+        0,
+        2,
+        inputs["labels"].shape,
+        device=inputs["labels"].device,
+        dtype=torch.long,
+        requires_grad=False,
+    )
+  return model, inputs

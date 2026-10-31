@@ -37,6 +37,7 @@
 #include "csrc/common/error_utils.h"
 #include "csrc/common/fixed_size_span.h"
 #include "csrc/common/to_string.h"
+#include "csrc/common/utils.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/tensor_to_buffer.h"
@@ -101,9 +102,9 @@ absl::StatusOr<BatchNormDispatchParams> PrepareBatchNormDispatch(
   TT_ASSIGN_OR_RETURN(const auto acc_dtype,
                       ConvertTo<mlir::ElementType>(acc_type));
 
-  const std::array<Dimensions, 3> output_dims = {
-      Dimensions(input_dims.begin(), input_dims.end()), output_mean_dims,
-      output_variance_inverted_dims};
+  const std::array<Dimensions, 3> output_dims = {CopyIntVector(input_dims),
+                                                 output_mean_dims,
+                                                 output_variance_inverted_dims};
   const std::array<mlir::ElementType, 3> output_dtypes = {input_dtype,
                                                           acc_dtype, acc_dtype};
 
@@ -383,8 +384,7 @@ absl::StatusOr<DeviceBufferRefArray<3>> TpuBatchNormBackward(
   Dimensions empty_dims = {0};
 
   Dimensions grad_input_dims =
-      output_mask[0] ? Dimensions(input_dims.begin(), input_dims.end())
-                     : empty_dims;
+      output_mask[0] ? CopyIntVector(input_dims) : empty_dims;
   Dimensions grad_weight_dims = output_mask[1] ? feature_dims : empty_dims;
   Dimensions grad_bias_dims = output_mask[2] ? feature_dims : empty_dims;
 
@@ -458,9 +458,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> AtenNativeBatchNorm(
                                SanitizeOptionalTensor(running_mean),
                                SanitizeOptionalTensor(running_variance),
                                training, momentum, eps, std::move(param_keys)));
-              return {MakeTensor(std::move(output)),
-                      MakeTensor(std::move(mean)),
-                      MakeTensor(std::move(variance_inverse))};
+              return {MakeTensor(output), MakeTensor(mean),
+                      MakeTensor(variance_inverse)};
             });
 }
 
@@ -590,14 +589,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> AtenNativeBatchNormBackward(
                       output_mask, std::move(param_keys)));
 
               at::Tensor grad_input =
-                  output_mask[0] ? MakeTensor(std::move(grad_input_buf))
-                                 : at::Tensor();
+                  output_mask[0] ? MakeTensor(grad_input_buf) : at::Tensor();
               at::Tensor grad_weight =
-                  output_mask[1] ? MakeTensor(std::move(grad_weight_buf))
-                                 : at::Tensor();
-              at::Tensor grad_bias = output_mask[2]
-                                         ? MakeTensor(std::move(grad_bias_buf))
-                                         : at::Tensor();
+                  output_mask[1] ? MakeTensor(grad_weight_buf) : at::Tensor();
+              at::Tensor grad_bias =
+                  output_mask[2] ? MakeTensor(grad_bias_buf) : at::Tensor();
 
               return {grad_input, grad_weight, grad_bias};
             });

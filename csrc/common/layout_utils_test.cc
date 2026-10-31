@@ -16,6 +16,10 @@
 
 #include "csrc/common/layout_utils.h"
 
+#include <optional>
+#include <vector>
+
+#include "ATen/core/ATen_fwd.h"
 #include "ATen/core/TensorBody.h"
 #include "ATen/ops/empty.h"
 #include "c10/core/ScalarType.h"
@@ -173,6 +177,78 @@ TEST(LayoutUtilsTest, ResolveTpuLayout_FP4TensorNonContiguous_ReturnsError) {
   invalid_unit_stride.as_strided_({1, 4}, {1, 2}, 0);
   EXPECT_EQ(ResolveTpuLayout(invalid_unit_stride).status().code(),
             error::kInvalidArgument);
+}
+
+TEST(LayoutUtilsTest, ResolveXlaLayoutsWithCustomLayout) {
+  Shape default_bitwidth_shape({16, 128}, mlir::ElementType::F32);
+  default_bitwidth_shape.set_layout(CustomLayout{
+      .minor_to_major = {0, 1},
+      .tiles = {{8, 128}},
+      .element_size_in_bits = 32,
+  });
+
+  Shape custom_bitwidth_shape({16, 128}, mlir::ElementType::I8);
+  custom_bitwidth_shape.set_layout(CustomLayout{
+      .minor_to_major = {1, 0},
+      .tiles = {{8, 128}},
+      .element_size_in_bits = 4,
+  });
+
+  TT_ASSERT_OK_AND_ASSIGN(
+      const auto layouts,
+      ResolveXlaLayouts({default_bitwidth_shape, custom_bitwidth_shape}));
+  ASSERT_EQ(layouts.size(), 2);
+  EXPECT_EQ(layouts[0], xla::Layout({0, 1}, {xla::Tile({8, 128})},
+                                    /*element_size_in_bits=*/0));
+  EXPECT_EQ(layouts[1], xla::Layout({1, 0}, {xla::Tile({8, 128})},
+                                    /*element_size_in_bits=*/4));
+}
+
+// Converts `layout`'s dimension order and tiles to a `CustomLayout`.
+CustomLayout ToCustomLayout(const xla::Layout& layout) {
+  CustomLayout result{.minor_to_major = Indices(layout.minor_to_major().begin(),
+                                                layout.minor_to_major().end())};
+  for (const xla::Tile& tile : layout.tiles()) {
+    result.tiles.push_back(
+        Indices(tile.dimensions().begin(), tile.dimensions().end()));
+  }
+  return result;
+}
+
+TEST(LayoutUtilsTest, ExtractCustomLayoutReturnsNulloptWithoutLayout) {
+  const Shape shape({16, 128}, mlir::ElementType::F32);
+  TT_ASSERT_OK_AND_ASSIGN(const std::optional<CustomLayout> layout,
+                          ExtractCustomLayoutIfDifferentFromDefault(shape));
+  EXPECT_EQ(layout, std::nullopt);
+}
+
+TEST(LayoutUtilsTest, ExtractCustomLayoutReturnsNulloptForDefaultLayout) {
+  Shape shape({16, 128}, mlir::ElementType::F32);
+  TT_ASSERT_OK_AND_ASSIGN(const std::vector<xla::Layout> default_layouts,
+                          ResolveXlaLayouts({shape}));
+  shape.set_layout(ToCustomLayout(default_layouts[0]));
+  TT_ASSERT_OK_AND_ASSIGN(const std::optional<CustomLayout> layout,
+                          ExtractCustomLayoutIfDifferentFromDefault(shape));
+  EXPECT_EQ(layout, std::nullopt);
+}
+
+TEST(LayoutUtilsTest, ExtractCustomLayoutReturnsNonDefaultLayout) {
+  Shape shape({16, 128}, mlir::ElementType::F32);
+  const CustomLayout transposed{.minor_to_major = {0, 1}, .tiles = {{8, 128}}};
+  shape.set_layout(transposed);
+  TT_ASSERT_OK_AND_ASSIGN(const std::optional<CustomLayout> layout,
+                          ExtractCustomLayoutIfDifferentFromDefault(shape));
+  EXPECT_EQ(layout, transposed);
+}
+
+TEST(LayoutUtilsTest, ExtractCustomLayoutOmitsTilesForDynamicShape) {
+  Shape shape({16, 128}, mlir::ElementType::F32);
+  shape.set_on_device_shape_is_dynamic(true);
+  shape.set_layout(CustomLayout{.minor_to_major = {0, 1}, .tiles = {{8, 128}}});
+  TT_ASSERT_OK_AND_ASSIGN(const std::optional<CustomLayout> layout,
+                          ExtractCustomLayoutIfDifferentFromDefault(shape));
+  const CustomLayout untiled{.minor_to_major = {0, 1}};
+  EXPECT_EQ(layout, untiled);
 }
 
 }  // namespace

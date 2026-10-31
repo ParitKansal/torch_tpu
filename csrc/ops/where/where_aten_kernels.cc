@@ -83,7 +83,7 @@ at::Tensor AtenWhereSelf(const at::Tensor& condition, const at::Tensor& self,
                    .out_dims = output_dims,
                    .op_param_cache_keys = OpParamCacheKeys::Empty()});
             })));
-    return MakeTensor(std::move(result_buf));
+    return MakeTensor(result_buf);
   });
 }
 

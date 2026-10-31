@@ -16,13 +16,22 @@
 
 #include "csrc/internal/mosaic/kiln/core/control_flow.h"
 
+#include <cstddef>
+#include <type_traits>
+#include <variant>
+
 #include "absl/functional/function_ref.h"
 #include "absl/log/absl_check.h"
 #include "csrc/internal/mosaic/kiln/core/context.h"
 #include "csrc/internal/mosaic/kiln/core/dtype.h"
 #include "csrc/internal/mosaic/kiln/core/index_arg.h"
 #include "csrc/internal/mosaic/kiln/core/scalar.h"
+#include "csrc/internal/mosaic/kiln/core/shape.h"
+#include "csrc/internal/mosaic/kiln/core/tile.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -67,6 +76,68 @@ void ValidateLoopStep(const IndexArg& step) {
   }
 }
 
+// The value of a `LoopVar`.
+using LoopValue = std::variant<Scalar, Tile>;
+using LoopValues = llvm::SmallVector<LoopValue, 4>;
+
+// The current values of `vars`.
+LoopValues Load(llvm::ArrayRef<LoopVar> vars) {
+  LoopValues values;
+  for (const LoopVar& var : vars) {
+    values.push_back(std::visit(
+        [](auto* p) -> LoopValue {
+          ABSL_CHECK(p != nullptr)  // CRASH_OK
+              << "For() loop variables must not be null";
+          return *p;
+        },
+        var));
+  }
+  return values;
+}
+
+// Binds each of `vars` to the matching `values`, with the kind and dtype of the
+// matching `prototypes`.
+void Bind(llvm::ArrayRef<LoopVar> vars, mlir::ValueRange values,
+          llvm::ArrayRef<LoopValue> prototypes) {
+  for (auto [var, value, prototype] :
+       llvm::zip_equal(vars, values, prototypes)) {
+    std::visit(
+        [value, &prototype](auto* p) {
+          using T = std::remove_pointer_t<decltype(p)>;
+          *p = internal::wrap<T>(value, std::get<T>(prototype).dtype());
+        },
+        var);
+  }
+}
+
+llvm::SmallVector<mlir::Value, 4> Unwrap(llvm::ArrayRef<LoopValue> values) {
+  llvm::SmallVector<mlir::Value, 4> unwrapped;
+  for (const LoopValue& v : values) {
+    unwrapped.push_back(
+        std::visit([](const auto& x) { return internal::unwrap(x); }, v));
+  }
+  return unwrapped;
+}
+
+// Checks that each loop variable kept its dtype and shape.
+void ValidateLoopValues(llvm::ArrayRef<LoopValue> init,
+                        llvm::ArrayRef<LoopValue> next) {
+  for (size_t i = 0; i < init.size(); ++i) {
+    if (const Scalar* want = std::get_if<Scalar>(&init[i])) {
+      const DType got = std::get<Scalar>(next[i]).dtype();
+      ABSL_CHECK(got == want->dtype())  // CRASH_OK
+          << "For() loop variable " << i << " changed dtype: expected "
+          << want->dtype() << ", got " << got;
+    } else {
+      const Shape want_shape = std::get<Tile>(init[i]).shape();
+      const Shape got = std::get<Tile>(next[i]).shape();
+      ABSL_CHECK(got == want_shape)  // CRASH_OK
+          << "For() loop variable " << i << " changed shape: expected "
+          << want_shape << ", got " << got;
+    }
+  }
+}
+
 }  // namespace
 
 void If(Scalar cond, absl::FunctionRef<void()> then_body) {
@@ -105,6 +176,33 @@ void For(IndexArg lower, IndexArg upper, IndexArg step,
   mlir::Value iv = mlir::arith::IndexCastOp::create(b, b.getI32Type(),
                                                     for_op.getInductionVar());
   body(internal::wrap<Scalar>(iv, i32));
+}
+
+void For(IndexArg lower, IndexArg upper, IndexArg step,
+         llvm::ArrayRef<LoopVar> vars, absl::FunctionRef<void(Scalar)> body) {
+  ValidateLoopStep(step);
+  const LoopValues init = Load(vars);
+  mlir::ImplicitLocOpBuilder& b = internal::CurrentBuilder();
+  auto for_op = mlir::scf::ForOp::create(
+      b, ToIndex(b, lower), ToIndex(b, upper), ToIndex(b, step), Unwrap(init));
+  {
+    mlir::OpBuilder::InsertionGuard guard(b);
+    mlir::Block* block = for_op.getBody();
+    // Without `iter_args`, `scf.for` comes with an empty `scf.yield`.
+    if (!block->empty()) block->back().erase();
+    b.setInsertionPointToStart(block);
+    mlir::Value iv = mlir::arith::IndexCastOp::create(b, b.getI32Type(),
+                                                      for_op.getInductionVar());
+    // `body` sees and reassigns the current iteration's values, then yields
+    // whatever `vars` hold.
+    Bind(vars, for_op.getRegionIterArgs(), init);
+    body(internal::wrap<Scalar>(iv, i32));
+    const LoopValues next = Load(vars);
+    ValidateLoopValues(init, next);
+    mlir::scf::YieldOp::create(b, Unwrap(next));
+  }
+  // After the loop, `vars` hold the final values.
+  Bind(vars, for_op.getResults(), init);
 }
 
 void RunScoped(absl::FunctionRef<void()> body) {

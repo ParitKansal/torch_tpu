@@ -22,8 +22,9 @@ Handles the following details for per-op unit testing:
 """
 
 from collections.abc import Mapping, Sequence
+import dataclasses
 import enum
-import random
+import itertools
 from typing import Any
 
 from absl import logging
@@ -45,6 +46,53 @@ class DynamismMode(enum.Enum):
 EAGER = DynamismMode.EAGER
 COMPILE = DynamismMode.COMPILE
 ALL_MODES = frozenset({DynamismMode.EAGER, DynamismMode.COMPILE})
+
+
+@dataclasses.dataclass(frozen=True, order=True)
+class TensorDim:
+  """Identifies a 0-based dimension on a specific tensor in `input_value`.
+
+  Attributes:
+    tensor_index: Non-negative 0-based index of the tensor in `input_value` (`0`
+      when `input_value` is a single `Tensor`).
+    dim: Non-negative 0-based dimension index on that tensor.
+  """
+
+  tensor_index: int
+  dim: int
+
+
+def _format_plan_label(tensor_dims: Sequence[TensorDim]) -> str:
+  """Formats a deterministic `DynamicMarkingPlan.label` for `tensor_dims`."""
+  if not tensor_dims:
+    raise ValueError("tensor_dims must be non-empty to format a plan label.")
+  return "_".join(
+      f"t{target.tensor_index}d{target.dim}" for target in tensor_dims
+  )
+
+
+@dataclasses.dataclass(frozen=True)
+class DynamicMarkingPlan:
+  """A deterministic plan describing which tensor dimensions to mark dynamic.
+
+  Attributes:
+    label: Identifier used in subtest names and `--dynamism_plan_filter` (e.g.,
+      `"t0d0"`, `"t0d0_t0d1"`).
+    tensor_dims: Strictly ascending, duplicate-free `TensorDim` targets to mark
+      dynamic.
+  """
+
+  label: str
+  tensor_dims: tuple[TensorDim, ...] = ()
+
+  def __post_init__(self) -> None:
+    if any(td.tensor_index < 0 or td.dim < 0 for td in self.tensor_dims) or any(
+        a >= b for a, b in itertools.pairwise(self.tensor_dims)
+    ):
+      raise ValueError(
+          "tensor_dims must be non-negative and strictly ascending without"
+          f" duplicates, got {self.tensor_dims}."
+      )
 
 
 def _mark_tensor_dynamic(
@@ -93,32 +141,65 @@ def _get_dynamic_dimension_candidates(
 
 def _get_canonical_input_value(
     op_info: core.OpInfo,
-    input_value: torch.Tensor | Sequence[torch.Tensor],
-) -> torch.Tensor:
-  """Returns the canonical input value for the given input.
+    input_value: torch.Tensor | Sequence[Any],
+) -> tuple[int, Any]:
+  """Returns `(tensor_index, canonical_value)` for the given `input_value`.
 
-  For most ops, this is a noop, but for foreach ops, returns a "canonical" input
-  tensor that is used to check if test case is valid for dynamism. This should
-  be expanded in the future to handle other cases.
+  When `input_value` is a list or tuple, selects the first element that is
+  eligible for dynamism (falling back to element `0` if non-empty) and returns
+  its 0-based index alongside the value. When `input_value` is a single
+  `Tensor` (or an empty/non-sequence input), returns `(0, input_value)`.
 
   Args:
     op_info: The op to be tested.
-    input_value: The primary input value to for the op test.
+    input_value: The primary input value for the op test.
 
   Returns:
-    The canonical input value for the given input.
+    A `(tensor_index, canonical_value)` tuple, where `tensor_index` is the
+    0-based index into `input_value` (`0` when `input_value` is a single
+    `Tensor`).
   """
-
   if isinstance(input_value, (list, tuple)):
-    # Scan for valid input values
-    valid_inputs = [
-        v for v in input_value if not _should_skip_input_marking(op_info, v)
-    ]
-    if valid_inputs:
-      return valid_inputs[0]
+    for i, v in enumerate(input_value):
+      if not _should_skip_input_marking(op_info, v):
+        return i, v
     if input_value:
-      return input_value[0]
-  return input_value
+      return 0, input_value[0]
+  return 0, input_value
+
+
+def _resolve_input_tensor(
+    input_value: torch.Tensor | Sequence[torch.Tensor],
+    tensor_index: int,
+) -> torch.Tensor:
+  """Resolves the target `Tensor` in `input_value` from `tensor_index`.
+
+  Args:
+    input_value: Single `Tensor` or sequence of `Tensor`s passed to the op.
+    tensor_index: 0-based index into `input_value` (`0` when `input_value` is a
+      single `Tensor`).
+
+  Returns:
+    The resolved `torch.Tensor`.
+
+  Raises:
+    IndexError: If `input_value` is a single `Tensor` and `tensor_index != 0`,
+      or `tensor_index` is out of range for a sequence `input_value`.
+    TypeError: If the resolved element is not a `torch.Tensor`.
+  """
+  if isinstance(input_value, torch.Tensor):
+    if tensor_index != 0:
+      raise IndexError(
+          f"tensor_index must be 0 for a single Tensor, got {tensor_index}."
+      )
+    return input_value
+  tensor = input_value[tensor_index]
+  if not isinstance(tensor, torch.Tensor):
+    raise TypeError(
+        f"Expected torch.Tensor at input_value[{tensor_index}], got"
+        f" {type(tensor).__name__}."
+    )
+  return tensor
 
 
 def _should_skip_input_marking(
@@ -389,8 +470,6 @@ DYNAMISM_DENY_LISTS: DenyList = {
         "ldexp": ALL_MODES,  # dynamic shape value permutation mismatch
         "nn.functional.mse_loss": ALL_MODES,  # binop LHS / RHS mismatch
         "std": {COMPILE},  # shape mismatch on out under dynamic compile
-        "tril": ALL_MODES,  # bad broadcast
-        "triu": ALL_MODES,  # bad broadcast, iota-like
     },
     "untriaged: data-dependent output shape (invalid TPU shape)": {
         "unique": ALL_MODES,
@@ -507,13 +586,11 @@ def verify_op_supports_dynamism(
 
   # The loop above sees no values in an empty input, e.g. the shape `()` passed
   # to `torch.empty`, so also check the input that `mark_dynamic` will mark.
-  canonical_input = _get_canonical_input_value(op, input_value)
+  _, canonical_input = _get_canonical_input_value(op, input_value)
   skip_input = _should_skip_input_marking(op, canonical_input)
   if skip_input:
     return skip_input
-  if not DynamicOpInfo.get(op).dynamic_dimension_candidates(
-      input_value if op.name == "einsum" else canonical_input, args
-  ):
+  if not DynamicOpInfo.get(op).get_candidate_dims(input_value, args):
     return "No valid input dimensions to mark dynamic."
 
   # Valid testcase!
@@ -608,44 +685,163 @@ class DynamicOpInfo:
     del args  # Unused.
     return _get_dynamic_dimension_candidates(input_value)
 
-  def mark_dynamic(
+  def get_candidate_dims(
       self,
-      seed: int,
-      input_value: torch.Tensor,
+      input_value: torch.Tensor | Sequence[torch.Tensor],
+      args: Sequence[Any],
+  ) -> Sequence[TensorDim]:
+    """Returns candidate `TensorDim`s on the canonical input tensor.
+
+    Note that this method only discovers candidate dimensions on a single
+    primary tensor, not independently across every tensor in a sequence
+    or in `args`.
+
+    Args:
+      input_value: First positional argument passed to the op — either a single
+        `Tensor` or, for ops whose first parameter is a tensor list (such as
+        foreach ops or `einsum`), a `Sequence[Tensor]`. When `input_value` is a
+        sequence, this base implementation selects the first dynamism-eligible
+        tensor via `_get_canonical_input_value`.
+      args: Remaining positional op arguments, including any secondary operand
+        tensors and non-tensor parameters.
+
+    Returns:
+      Strictly ascending `TensorDim` candidates (each with dimension size >= 2)
+      identifying both the selected tensor and its 0-based dimension index.
+    """
+    tensor_index, canonical_input = _get_canonical_input_value(
+        self.op_info, input_value
+    )
+    return [
+        TensorDim(tensor_index=tensor_index, dim=dim)
+        for dim in self.dynamic_dimension_candidates(canonical_input, args)
+    ]
+
+  def generate_exhaustive_marking_plans(
+      self,
+      input_value: torch.Tensor | Sequence[torch.Tensor],
+      args: Sequence[Any],
+      mode: DynamismMode = DynamismMode.EAGER,
+  ) -> Sequence[DynamicMarkingPlan]:
+    """Generates all valid dynamic marking plans for the canonical input tensor.
+
+    Plans record both the selected tensor index and 0-based dimension indices on
+    that tensor. Dimensions on secondary tensors or subsequent tensors in a
+    sequence are not swept as separate plans yet.
+
+    Args:
+      input_value: First positional argument passed to the op.
+      args: Remaining positional arguments passed to the op.
+      mode: Dynamism execution mode (`EAGER` or `COMPILE`). Simultaneous
+        multi-dimension plans are only emitted in `COMPILE` mode.
+
+    Returns:
+      A sequence of `DynamicMarkingPlan` instances targeting the canonical
+      primary input tensor: one single-dimension plan (`"t{i}d{d}"`) per
+      `TensorDim` returned by `get_candidate_dims`, plus a combined
+      multi-dimension plan (`"t{i}d{d0}_t{i}d{d1}..."`) when
+      `mode == DynamismMode.COMPILE` and at least two candidate dimensions
+      exist. Returns `()` if no dimensions on the canonical input tensor can be
+      marked dynamic.
+    """
+    candidates = list(self.get_candidate_dims(input_value, args))
+    if not candidates:
+      return ()
+    plans = [
+        DynamicMarkingPlan(
+            label=_format_plan_label((candidate,)),
+            tensor_dims=(candidate,),
+        )
+        for candidate in candidates
+    ]
+    # Eager `dynamism.mark_dynamic` only supports one dynamic dimension per
+    # tensor, so simultaneous multi-dimension plans are restricted to COMPILE.
+    if mode == DynamismMode.COMPILE and len(candidates) >= 2:
+      dims_tuple = tuple(candidates)
+      plans.append(
+          DynamicMarkingPlan(
+              label=_format_plan_label(dims_tuple),
+              tensor_dims=dims_tuple,
+          )
+      )
+    return tuple(plans)
+
+  def _mark_single_dim(
+      self,
+      target: TensorDim,
+      input_value: torch.Tensor | Sequence[torch.Tensor],
       args: Sequence[Any],
       mode: DynamismMode = DynamismMode.EAGER,
       kwargs: Mapping[str, Any] | None = None,
-  ):
-    """Mark the op as dynamic."""
+  ) -> None:
+    """Marks `target` in `input_value` and coupled dimensions on dependent args.
 
-    logging.debug(
-        "[DynamicOpInfo] mark_dynamic(%s, %s, %s, mode=%s)",
-        self.op_info.name,
-        utils.InputMetadata(input_value),
-        utils.InputMetadata(args),
-        mode,
-    )
-
-    # Allow picking a list value from input_value for ops like cat, etc.
-    input_value = _get_canonical_input_value(self.op_info, input_value)
-    candidates = self.dynamic_dimension_candidates(input_value, args)
-    random.seed(seed)
-    idx = random.choice(candidates)
-    input_value_str = utils.get_tensor_summary(input_value, data=False)
-    ub = input_value.shape[idx] + 10
+    Args:
+      target: `TensorDim` identifying which tensor in `input_value` and which
+        0-based dimension on that tensor to mark dynamic.
+      input_value: Primary tensor or sequence of tensors passed to the op.
+      args: Additional positional arguments whose corresponding dimensions
+        should also be marked dynamic.
+      mode: Dynamism execution mode (`EAGER` or `COMPILE`).
+      kwargs: Optional keyword arguments passed to the op (used by adapters such
+        as `SdpaDynamicOpInfo` to mark keyword tensor arguments).
+    """
+    target_tensor = _resolve_input_tensor(input_value, target.tensor_index)
+    idx = target.dim
+    input_value_str = utils.get_tensor_summary(target_tensor, data=False)
+    ub = target_tensor.shape[idx] + 10
     print(
         f">>>> Marking dim {idx} dynamic [<={ub}] in {input_value_str}"
         f" (mode={mode.value})",
         flush=True,
     )
-
-    # Mark input_value as dynamic.
-    _mark_tensor_dynamic(input_value, idx, 2, ub, mode=mode)
-
-    # Mark any dependent args as dynamic.
+    _mark_tensor_dynamic(target_tensor, idx, 2, ub, mode=mode)
     self._mark_dependent_arg_dynamic(
-        args, input_value, idx, ub, mode=mode, kwargs=kwargs
+        args, target_tensor, idx, ub, mode=mode, kwargs=kwargs
     )
+
+  def mark_dynamic(
+      self,
+      input_value: torch.Tensor | Sequence[torch.Tensor],
+      args: Sequence[Any],
+      mode: DynamismMode = DynamismMode.EAGER,
+      kwargs: Mapping[str, Any] | None = None,
+      plan: DynamicMarkingPlan | None = None,
+  ) -> None:
+    """Marks the op dynamic per `plan`, or on the first candidate dim if `None`.
+
+    Args:
+      input_value: Primary tensor or sequence of tensors passed to the op.
+      args: Additional positional arguments passed to the op.
+      mode: Dynamism execution mode (`EAGER` or `COMPILE`).
+      kwargs: Optional keyword arguments passed to the op.
+      plan: Explicit `DynamicMarkingPlan` specifying which dimensions to mark
+        dynamic. When `None`, marks the first candidate `TensorDim`.
+
+    Raises:
+      ValueError: If `plan is None` and no candidate dynamic dimensions exist.
+    """
+    if plan is None:
+      candidates = list(self.get_candidate_dims(input_value, args))
+      if not candidates:
+        raise ValueError(
+            f"No dynamic marking plans available for {self.op_info.name}."
+        )
+      chosen = candidates[0]
+      plan = DynamicMarkingPlan(
+          label=_format_plan_label((chosen,)),
+          tensor_dims=(chosen,),
+      )
+    logging.debug(
+        "[DynamicOpInfo] mark_dynamic(%s, plan=%s, %s, %s, mode=%s)",
+        self.op_info.name,
+        plan.label,
+        utils.InputMetadata(input_value),
+        utils.InputMetadata(args),
+        mode,
+    )
+    for target in plan.tensor_dims:
+      self._mark_single_dim(target, input_value, args, mode=mode, kwargs=kwargs)
 
   def _mark_dependent_arg_dynamic(
       self,
@@ -753,16 +949,56 @@ class ForEachDynamicOpInfo(DynamicOpInfo):
 
     return isinstance(op_info, core.ForeachFuncInfo)
 
+  def generate_exhaustive_marking_plans(
+      self,
+      input_value: torch.Tensor | Sequence[torch.Tensor],
+      args: Sequence[Any],
+      mode: DynamismMode = DynamismMode.EAGER,
+  ) -> Sequence[DynamicMarkingPlan]:
+    """Overrides `DynamicOpInfo.generate_exhaustive_marking_plans` for foreach.
+
+    Foreach ops operate on heterogeneous tensor lists and delegate per-element
+    dimension selection to `ForEachDynamicOpInfo.mark_dynamic`, so this override
+    emits at most one `"foreach"` sentinel plan while keeping the base class
+    method name and `Sequence[DynamicMarkingPlan]` return type for polymorphic
+    dispatch via `DynamicOpInfo.get(op_info)`.
+
+    Args:
+      input_value: Sequence of primary input tensors passed to the foreach op.
+      args: Additional positional arguments (scalars or sequences of tensors).
+      mode: Dynamism execution mode (`EAGER` or `COMPILE`), accepted to match
+        the `DynamicOpInfo` base signature.
+
+    Returns:
+      `(DynamicMarkingPlan(label="foreach"),)` if `input_value` has at least one
+      candidate dynamic dimension, or `()` otherwise.
+    """
+    del mode  # Unused; accepted to match DynamicOpInfo base signature.
+    if not self.get_candidate_dims(input_value, args):
+      return ()
+    return (DynamicMarkingPlan(label="foreach"),)
+
   def mark_dynamic(
       self,
-      seed: int,
       input_value: torch.Tensor | Sequence[torch.Tensor],
       args: Sequence[Any],
       mode: DynamismMode = DynamismMode.EAGER,
       kwargs: Mapping[str, Any] | None = None,
+      plan: DynamicMarkingPlan | None = None,
   ):
-    """Mark the op as dynamic, handling for list types."""
-    del kwargs
+    """Overrides `DynamicOpInfo.mark_dynamic` for foreach tensor-list inputs.
+
+    Args:
+      input_value: Sequence of primary input tensors passed to the foreach op.
+      args: Additional positional arguments (scalar or per-element tensor
+        sequences).
+      mode: Dynamism execution mode (`EAGER` or `COMPILE`).
+      kwargs: Optional keyword arguments, accepted to match the `DynamicOpInfo`
+        base signature for polymorphic dispatch via `DynamicOpInfo.get`.
+      plan: Optional `DynamicMarkingPlan` (e.g., the `"foreach"` sentinel plan),
+        accepted to match the `DynamicOpInfo` base signature.
+    """
+    del kwargs, plan  # Unused; accepted to match DynamicOpInfo base signature.
     # Split the inputs into their logical units for marking dynamic.
     # Options are:
     #   - foreach_add(list, [scalar|tensor])
@@ -792,14 +1028,14 @@ class ForEachDynamicOpInfo(DynamicOpInfo):
           or not isinstance(args, (list, tuple))
           or not isinstance(args[0], (list, tuple))
       ):
-        super().mark_dynamic(seed, value, [], mode=mode)
+        super().mark_dynamic(value, [], mode=mode)
         continue
 
       # Binary ops expect len(args) == 1
       if self.op_info.name in foreach_binops:
         rhs_vals = args[0]
         BinaryElementwiseDynamicOpInfo(self.op_info).mark_dynamic(
-            seed, value, (rhs_vals[idx],), mode=mode
+            value, (rhs_vals[idx],), mode=mode
         )
         continue
 
@@ -812,7 +1048,6 @@ class ForEachDynamicOpInfo(DynamicOpInfo):
         rhs_vals = args[0] if len(args) >= 1 else None
         ehs_vals = args[1] if len(args) >= 2 else None
         TernaryElementwiseDynamicOpInfo(self.op_info).mark_dynamic(
-            seed,
             value,
             (rhs_vals[idx], ehs_vals[idx]),  # pyrefly: ignore[unsupported-operation]
             mode=mode,
@@ -820,7 +1055,7 @@ class ForEachDynamicOpInfo(DynamicOpInfo):
         continue
 
       # Not binary or ternary, no dependent args.
-      super().mark_dynamic(seed, value, [], mode=mode)
+      super().mark_dynamic(value, [], mode=mode)
       logging.debug(
           "[ForEachDynamicOpInfo] no dependent args %s",
           utils.InputMetadata(args),
@@ -1058,12 +1293,27 @@ class EinsumDynamicOpInfo(DynamicOpInfo):
 
     return operand_labels, rhs_labels
 
-  def dynamic_dimension_candidates(
+  def get_candidate_dims(
       self,
       input_value: torch.Tensor | Sequence[torch.Tensor],
       args: Sequence[Any],
-  ) -> Sequence[int]:
-    """Returns the dimensions of the first operand that can be marked dynamic."""
+  ) -> Sequence[TensorDim]:
+    """Returns candidate `TensorDim`s on `einsum`'s first operand.
+
+    Overrides `DynamicOpInfo.get_candidate_dims` to inspect the full operand
+    sequence when checking Einstein-label constraints instead of collapsing
+    `input_value` via `_get_canonical_input_value`.
+
+    Args:
+      input_value: Single operand tensor or sequence of operand tensors passed
+        to `torch.einsum`.
+      args: Positional arguments where `args[0]` is the einsum equation string.
+
+    Returns:
+      Strictly ascending `TensorDim` candidates on the first operand
+      (`tensor_index=0`) that can be safely marked dynamic along with matching
+      label dimensions on subsequent operands.
+    """
     tensors: list[torch.Tensor] = (
         [input_value]
         if isinstance(input_value, torch.Tensor)
@@ -1075,11 +1325,11 @@ class EinsumDynamicOpInfo(DynamicOpInfo):
         or not args
         or not isinstance(args[0], str)
     ):
-      return []
+      return ()
 
     operand_labels, rhs_labels = self._parse_einsum_labels(tensors, args[0])
     if not operand_labels or len(operand_labels[0]) != tensors[0].ndim:
-      return []
+      return ()
 
     any_requires_grad = any(t.requires_grad for t in tensors)
     if any_requires_grad:
@@ -1087,7 +1337,7 @@ class EinsumDynamicOpInfo(DynamicOpInfo):
       # zeros tensor in backward, and uncontracted single-operand dimensions
       # summed out in forward use static expand in backward.
       if any(len(set(lbls)) != len(lbls) for lbls in operand_labels):
-        return []
+        return ()
       for k, t_k in enumerate(tensors):
         if not t_k.requires_grad:
           continue
@@ -1098,11 +1348,11 @@ class EinsumDynamicOpInfo(DynamicOpInfo):
               lbl in operand_labels[j] for j in range(len(tensors)) if j != k
           )
           if not in_bwd_lhs:
-            return []
+            return ()
 
     first_tensor = tensors[0]
     first_labels = operand_labels[0]
-    candidates = []
+    candidates: list[TensorDim] = []
     for d, sz in enumerate(first_tensor.shape):
       if sz <= 1:
         continue
@@ -1110,43 +1360,57 @@ class EinsumDynamicOpInfo(DynamicOpInfo):
       # Repeated labels with size > 1 use stablehlo.iota in forward.
       if any(lbls.count(lbl) > 1 for lbls in operand_labels):
         continue
-      candidates.append(d)
+      candidates.append(TensorDim(tensor_index=0, dim=d))
     return candidates
 
-  def mark_dynamic(
+  def _mark_single_dim(
       self,
-      seed: int,
+      target: TensorDim,
       input_value: torch.Tensor | Sequence[torch.Tensor],
       args: Sequence[Any],
       mode: DynamismMode = DynamismMode.EAGER,
       kwargs: Mapping[str, Any] | None = None,
   ) -> None:
-    """Marks a chosen dimension of the first operand and matching label dims dynamic."""
+    """Marks `target` and matching Einstein-label dims on other operands.
+
+    Args:
+      target: `TensorDim` identifying which einsum operand in `input_value` and
+        which 0-based dimension on that operand to mark dynamic.
+      input_value: Single operand tensor or sequence of operand tensors passed
+        to `torch.einsum`.
+      args: Positional arguments where `args[0]` is the einsum equation string.
+      mode: Dynamism execution mode (`EAGER` or `COMPILE`).
+      kwargs: Optional keyword arguments, accepted to match the
+        `DynamicOpInfo._mark_single_dim` signature.
+    """
     del kwargs
+    target_tensor = _resolve_input_tensor(input_value, target.tensor_index)
+    target_tensor_idx = target.tensor_index
+    idx = target.dim
     tensors: list[torch.Tensor] = (
         [input_value]
         if isinstance(input_value, torch.Tensor)
         else list(input_value)
     )
-    candidates = self.dynamic_dimension_candidates(tensors, args)
-    random.seed(seed)
-    idx = random.choice(candidates)
-    first_tensor = tensors[0]
-    ub = first_tensor.shape[idx] + 10
-    first_tensor_str = utils.get_tensor_summary(first_tensor, data=False)
+    ub = target_tensor.shape[idx] + 10
+    target_tensor_str = utils.get_tensor_summary(target_tensor, data=False)
     print(
-        f">>>> Marking dim {idx} dynamic [<={ub}] in {first_tensor_str}"
+        f">>>> Marking dim {idx} dynamic [<={ub}] in {target_tensor_str}"
         f" (mode={mode.value})",
         flush=True,
     )
-    _mark_tensor_dynamic(first_tensor, idx, 2, ub, mode=mode)
+    _mark_tensor_dynamic(target_tensor, idx, 2, ub, mode=mode)
 
     operand_labels, _ = self._parse_einsum_labels(tensors, args[0])
-    target_label = operand_labels[0][idx]
-    for t_k, lbls_k in zip(tensors[1:], operand_labels[1:], strict=True):
+    target_label = operand_labels[target_tensor_idx][idx]
+    for k, (t_k, lbls_k) in enumerate(
+        zip(tensors, operand_labels, strict=True)
+    ):
+      if k == target_tensor_idx:
+        continue
       if target_label in lbls_k:
         d_k = lbls_k.index(target_label)
-        if t_k.shape[d_k] == first_tensor.shape[idx] and t_k.shape[d_k] > 1:
+        if t_k.shape[d_k] == target_tensor.shape[idx] and t_k.shape[d_k] > 1:
           print(
               f">>>> Marking dependent arg dim {d_k} dynamic [<={ub}] in"
               f" {utils.InputMetadata(t_k)} (mode={mode.value})",
@@ -1155,30 +1419,57 @@ class EinsumDynamicOpInfo(DynamicOpInfo):
           _mark_tensor_dynamic(t_k, d_k, 2, ub, mode=mode)
 
 
+def generate_exhaustive_input_marking_plans(
+    op_info: core.OpInfo,
+    input_value: torch.Tensor | Sequence[torch.Tensor],
+    args: Sequence[Any],
+    mode: DynamismMode = DynamismMode.EAGER,
+) -> Sequence[DynamicMarkingPlan]:
+  """Generates all valid dynamic marking plans for an op sample.
+
+  Args:
+    op_info: The `OpInfo` descriptor for the operator under test.
+    input_value: Primary tensor or sequence of tensors passed to the op.
+    args: Additional positional arguments passed to the op.
+    mode: Dynamism execution mode (`EAGER` or `COMPILE`).
+
+  Returns:
+    A sequence of `DynamicMarkingPlan` instances for the sample, or `()` if no
+    dimensions can be marked dynamic.
+  """
+  return DynamicOpInfo.get(op_info).generate_exhaustive_marking_plans(
+      input_value,
+      args,
+      mode=mode,
+  )
+
+
 def mark_input_dynamic(
-    seed: int,
     op_info: core.OpInfo,
     input_value: torch.Tensor | Sequence[torch.Tensor],
     args: Sequence[Any],
     mode: DynamismMode = DynamismMode.EAGER,
     kwargs: Mapping[str, Any] | None = None,
-):
+    plan: DynamicMarkingPlan | None = None,
+) -> None:
   """Mark an arg tensor as dynamic.
 
   Args:
-    seed: The seed to use for random choice of the dimension to mark dynamic.
     op_info: The op to be tested.
     input_value: The primary input value to for the op test.
     args: The additional args to the op test.
     mode: The dynamism mode (EAGER or COMPILE).
     kwargs: The keyword arguments to the op test.
+    plan: Optional deterministic marking plan to apply. When `None`, marks the
+      first candidate dimension.
   """
 
   dynamic_op_info = DynamicOpInfo.get(op_info)
+  plan_suffix = f" (plan={plan.label})" if plan is not None else ""
   print(
-      ">>> Marking input dynamic using"
+      f">>> Marking input dynamic{plan_suffix} using"
       f" {type(dynamic_op_info)} (mode={mode.value})"
   )
   dynamic_op_info.mark_dynamic(
-      seed, input_value, args, mode=mode, kwargs=kwargs
+      input_value, args, mode=mode, kwargs=kwargs, plan=plan
   )

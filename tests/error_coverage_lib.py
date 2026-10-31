@@ -522,15 +522,29 @@ def get_per_file_coverage(
 COVERAGE_DATA_PATH = "tests/error_coverage_data.yaml"
 
 
+# The order of the per-file statistics in the coverage data file, from the most
+# to the least important.
+_STATS_ORDER = ("remaining", "total", "infeasible")
+
+
 class _FlowDict(dict):
   """A dict that PyYAML dumps in the inline (flow) style."""
+
+
+def _stats_sort_key(key: str) -> tuple[int, str]:
+  """Orders the keys by _STATS_ORDER, then any unknown keys alphabetically."""
+  if key in _STATS_ORDER:
+    return _STATS_ORDER.index(key), ""
+  return len(_STATS_ORDER), key
 
 
 def _represent_flow_dict(
     dumper: yaml.SafeDumper, data: _FlowDict
 ) -> yaml.MappingNode:
   return dumper.represent_mapping(
-      "tag:yaml.org,2002:map", sorted(data.items()), flow_style=True
+      "tag:yaml.org,2002:map",
+      sorted(data.items(), key=lambda item: _stats_sort_key(item[0])),
+      flow_style=True,
   )
 
 

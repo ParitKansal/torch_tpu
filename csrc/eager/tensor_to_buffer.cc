@@ -425,8 +425,7 @@ at::Tensor MakeTensor(DeviceBufferRef buffer_ref,
 
   const auto dtype = ConvertTo<at::ScalarType>(buffer_ref.element_type());
   auto caffe2_type_meta = c10::scalarTypeToTypeMeta(dtype);
-  Dimensions sizes(buffer_ref.dimensions().begin(),
-                   buffer_ref.dimensions().end());
+  Dimensions sizes = CopyIntVector(buffer_ref.dimensions());
   if (buffer_ref.element_type() == mlir::ElementType::F4E2M1FN) {
     ABSL_CHECK(!sizes.empty());         // CRASH_OK
     ABSL_CHECK_EQ(sizes.back() % 2, 0)  // CRASH_OK
@@ -708,7 +707,7 @@ absl::StatusOr<at::Tensor> MakeEmptyMemoryFormat(
   // Create an empty DeviceBufferRef.
   TT_ASSIGN_OR_RETURN(DeviceBufferRef buffer,
                       CreateEmptyDeviceBufferRef(std::move(xla_sizes), dtype));
-  at::Tensor result = MakeTensor(std::move(buffer));
+  at::Tensor result = MakeTensor(buffer);
 
   // MakeTensor defaults to a contiguous tensor, and so
   // does aten::empty().

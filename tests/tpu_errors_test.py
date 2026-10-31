@@ -358,6 +358,39 @@ class TpuOnlyErrorTest(et.TpuOnlyErrorTestBase):
       )
       t.to("cpu")
 
+  @parameterized.parameters("cpu", "tpu")
+  @et.why_tpu_only(
+      "PyTorch still accepts uint8 indices as a deprecated mask, while TorchTPU"
+      " rejects them like masked_fill, masked_select and masked_scatter."
+  )
+  def test_index_uint8_indices(self, index_device):
+    """Tests that index() rejects uint8 index tensors."""
+    x = torch.zeros(4, 3, device="tpu")
+    index = torch.tensor([1, 0, 1, 1], dtype=torch.uint8, device=index_device)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""index(): expected index tensors to have dtype bool, int32, or int64, got uint8 at index 0; indexing with uint8 tensors is deprecated in PyTorch and not supported in TorchTPU, use bool tensors instead""",
+        message_reviewed_by="jihonggan",
+    ):
+      x[index].to("cpu")
+
+  @parameterized.parameters("cpu", "tpu")
+  @et.why_tpu_only(
+      "PyTorch still accepts uint8 indices as a deprecated mask, while TorchTPU"
+      " rejects them like masked_fill, masked_select and masked_scatter."
+  )
+  def test_index_put_uint8_indices(self, index_device):
+    """Tests that index_put_() rejects uint8 index tensors."""
+    x = torch.zeros(4, 3, device="tpu")
+    index = torch.tensor([1, 0, 1, 1], dtype=torch.uint8, device=index_device)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""index_put_(): expected index tensors to have dtype bool, int32, or int64, got uint8 at index 0; indexing with uint8 tensors is deprecated in PyTorch and not supported in TorchTPU, use bool tensors instead""",
+        message_reviewed_by="jihonggan",
+    ):
+      x.index_put_([index], torch.ones(3, 3, device="tpu"))
+      x.to("cpu")
+
   @et.why_tpu_only("The behavior is undefined on CPU.")
   def test_index_put_with_assign_buffer_to_at_tensor_failure(self):
     """Tests that index_put() bubbles up the error from AssignBufferToAtTensor.
@@ -403,40 +436,6 @@ Because multiple logical tensor indices point to the same buffer elements, write
 Please use clone() or contiguous() to copy the tensor before writing""",
     ):
       torch.index_copy(self_tensor, 0, index, source, out=t)
-
-  @et.why_tpu_only("Testing TPU OOM behavior.")
-  def test_mm_with_oom_result(self):
-    """Tests that mm with a large result that OOMs fails with expected error."""
-
-    # Each input tensor is 4 MB.
-    t1 = torch.ones(2**20, 1, device=et.device(), dtype=torch.float32)
-    t2 = torch.ones(1, 2**20, device=et.device(), dtype=torch.float32)
-    # The result tensor would need 4 TB, which is impossible to allocate.
-    t3 = torch.mm(t1, t2)
-    # Error message format from XLA varies. Known examples:
-    # ```
-    #   failed to compile MLIR module -- the XLA compiler failed with: e1000:
-    #   CompileTimeHbmOom: Ran out of memory on HBM, the total memory required
-    #   for HLO temporaries (4.00T) exceeds available HBM (15.75G). HLO module:
-    #   tt_jit_mm.
-    # ```
-    # ```
-    #   failed to compile MLIR module -- the XLA compiler failed with:
-    #   allocation (size=4398046511104) would exceed memory (size=17179869184)
-    #   :: %s2 = inlined_call_operand.hbm
-    #   [shape: f32[1048576,1048576], index: 2, kind: output, shape index: {}]
-    #   /* operand 2 */ :: broadcast_multiply_fusion
-    # ```
-    # Regex will match either of these.
-    with et.assert_raises_message(
-        RuntimeError,
-        tpu=re.compile(
-            r""".*failed to compile MLIR module.+the XLA compiler failed with:.+(exceeds available HBM|allocation.+would exceed memory).*""",
-            re.DOTALL,
-        ),
-    ):
-      t3.to("cpu")
-    tt_testing.reset_eager_state()
 
   @et.why_tpu_only(
       "PyTorch CUDA _mm_dtype_cuda indexes self.size(0) and mat2.size(1)"
@@ -2387,6 +2386,50 @@ Please use clone() or contiguous() to copy the tensor before writing""",
         message_reviewed_by="adivinpatel",
     ):
       sync.is_materialized(x)
+
+  @et.why_tpu_only("Sync computation graph queries are TPU-specific.")
+  def test_computation_mlir_empty_tensors(self):
+    """Tests computation_mlir throws when tensors list is empty."""
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""_get_computation_mlir(): the tensor list must not be empty""",
+        message_reviewed_by="wan",
+    ):
+      sync.computation_mlir()
+
+  @et.why_tpu_only("Sync computation graph queries are TPU-specific.")
+  def test_computation_graphviz_empty_tensors(self):
+    """Tests computation_graphviz throws when tensors list is empty."""
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""_get_computation_graphviz(): the tensor list must not be empty""",
+        message_reviewed_by="wan",
+    ):
+      sync.computation_graphviz()
+
+  @et.why_tpu_only("Sync computation graph queries are TPU-specific.")
+  def test_computation_mlir_placeholder_tensor(self):
+    """Tests computation_mlir throws on a placeholder tensor."""
+    with execution_mode.set_eager_mode(EagerMode._INTERNAL_COMPILE_FX_GRAPH):
+      x = tpu_torch_compile.placeholder([4, 4], torch.float32, False)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""_get_computation_mlir(): the tensors must not be placeholders""",
+        message_reviewed_by="wan",
+    ):
+      sync.computation_mlir(x)
+
+  @et.why_tpu_only("Sync computation graph queries are TPU-specific.")
+  def test_computation_graphviz_placeholder_tensor(self):
+    """Tests computation_graphviz throws on a placeholder tensor."""
+    with execution_mode.set_eager_mode(EagerMode._INTERNAL_COMPILE_FX_GRAPH):
+      x = tpu_torch_compile.placeholder([4, 4], torch.float32, False)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""_get_computation_graphviz(): the tensors must not be placeholders""",
+        message_reviewed_by="wan",
+    ):
+      sync.computation_graphviz(x)
 
   @et.why_tpu_only("TODO: investigate why this is TPU-only.")
   def test_execute_output_shapes_rank_mismatch(self):
@@ -5568,6 +5611,8 @@ class FlexAttentionErrorsTest(et.TpuOnlyErrorTestBase):
         q_block=128,
         kv_block=128,
         scale=1.0,
+        score_mod_mlir="",
+        mask_mod_mlir="",
     )
     args.update(overrides)
     return torch.ops.tpu._flex_attention_fwd(*args.values())
@@ -5657,23 +5702,36 @@ class FlexAttentionErrorsTest(et.TpuOnlyErrorTestBase):
           kv_indices=torch.zeros(3, dtype=torch.int32, device=et.device())
       )
 
-  # Only until the kernel gets a per-element mask.
-  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
-  def test_partial_blocks(self):
-    q, k, v = self._inputs(1024)
-    causal = flex_attention.create_block_mask(
-        lambda b, h, q_idx, kv_idx: q_idx >= kv_idx,
-        1,
-        1,
-        1024,
-        1024,
-        device="cpu",
+  def _causal_mask(self):
+    return flex_attention.create_block_mask(
+        lambda b, h, q_idx, kv_idx: q_idx >= kv_idx, 1, 1, 1024, 1024, "cpu"
     )
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_mask_mod_must_return_bool(self):
+    q, k, v = self._inputs(1024)
+    block_mask = self._causal_mask()
+    block_mask.mask_mod = lambda b, h, q_idx, kv_idx: q_idx - kv_idx
     with et.assert_raises_message(
-        NotImplementedError,
-        tpu="""flex_attention on TPU does not support partially masked blocks yet""",
+        TypeError,
+        tpu="""expected mask_mod to return torch.bool, got torch.int32""",
     ):
-      tpu_flex_attention.flex_attention_fwd(q, k, v, causal)
+      tpu_flex_attention.flex_attention_fwd(q, k, v, block_mask)
+
+  @et.why_tpu_only("The flex_attention Kiln kernel only exists on TPU.")
+  def test_score_mod_must_keep_the_tile_shape(self):
+    q, k, v = self._inputs(1024)
+    with et.assert_raises_message(
+        ValueError,
+        tpu="""expected score_mod to return shape [128, 128], got [128]""",
+    ):
+      tpu_flex_attention.flex_attention_fwd(
+          q,
+          k,
+          v,
+          self._causal_mask(),
+          score_mod=lambda score, b, h, q_idx, kv_idx: score.sum(-1),
+      )
 
 
 if __name__ == "__main__":

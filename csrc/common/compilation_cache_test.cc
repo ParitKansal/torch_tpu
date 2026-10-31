@@ -64,13 +64,8 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
-#include "xla/hlo/builder/xla_builder.h"
-#include "xla/hlo/builder/xla_computation.h"
-#include "xla/layout_util.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_executable.h"
-#include "xla/shape.h"
-#include "xla/shape_util.h"
 #include "xla/xla_data.pb.h"
 
 ABSL_DECLARE_FLAG(bool, torch_tpu_internal_enable_compilation_container);
@@ -116,9 +111,11 @@ TEST(PerfStatsPrinterTest, EmptyPerEntry) {
   stats.num_cache_reqs = 10;
   stats.num_cache_hits = 5;
   stats.num_compilations = 3;
+  stats.num_unbounded_dynamic_hits = 4;
   EXPECT_EQ(absl::StrCat(stats),
             "num_cache_reqs=10\nnum_cache_hits=5 "
             "{50.0%}\nnum_compilations=3\n"
+            "num_unbounded_dynamic_hits=4\n"
             "peak_compilation_memory_bytes=unknown\n");
 }
 
@@ -143,6 +140,7 @@ TEST(PerfStatsPrinterTest, WithPerEntry) {
   static constexpr std::string_view kExpected = R"(num_cache_reqs=10
 num_cache_hits=5 {50.0%}
 num_compilations=2
+num_unbounded_dynamic_hits=0
 peak_compilation_memory_bytes=unknown
 num_compilation_events=2
 sum_compilation_time=150ms
@@ -524,6 +522,7 @@ TEST_F(CompilationCacheTest, UnboundedDynamicCache) {
   EXPECT_EQ(cache.GetCacheHits(), 0);
   EXPECT_EQ(cache.GetCacheMisses(), 1);
   EXPECT_EQ(cache.GetCacheStats().num_compilations, 1);
+  EXPECT_EQ(cache.GetCacheStats().num_unbounded_dynamic_hits, 1);
   EXPECT_TRUE(cache.IsExecutableReady(
       key, CompilationCache::CacheEntryKind::kUnboundedDynamic));
   EXPECT_TRUE(first_exec->unbounded_dynamic_execution_metadata().has_value());
@@ -549,6 +548,7 @@ TEST_F(CompilationCacheTest, UnboundedDynamicCache) {
   EXPECT_EQ(cache.GetCacheHits(), 1);
   EXPECT_EQ(cache.GetCacheMisses(), 1);
   EXPECT_EQ(cache.GetCacheStats().num_compilations, 1);
+  EXPECT_EQ(cache.GetCacheStats().num_unbounded_dynamic_hits, 2);
 
   auto updated_stats =
       CompilationCacheTestHelper::GetUnboundedDynamicCacheEntryStats(cache,
@@ -592,6 +592,7 @@ TEST_P(UnboundedDynamicCacheMissTest, FallsBackToStaticPath) {
   EXPECT_FALSE(result.fixed_shape_kernel.get().ok());
   EXPECT_EQ(cache.GetCacheHits(), 0);
   EXPECT_EQ(cache.GetCacheMisses(), 1);
+  EXPECT_EQ(cache.GetCacheStats().num_unbounded_dynamic_hits, 0);
   EXPECT_FALSE(
       CompilationCacheTestHelper::GetUnboundedDynamicCacheEntryStats(cache, key)
           .has_value());

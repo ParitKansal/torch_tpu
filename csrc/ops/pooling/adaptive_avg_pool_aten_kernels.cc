@@ -584,7 +584,7 @@ absl::StatusOr<at::Tensor> MakeAdaptiveAvgPoolZeroOutput(
     TT_RETURN_IF_ERROR(AssignBufferToAtTensor(std::move(zero_buf), out->get()));
     return out->get();
   }
-  return MakeTensor(std::move(zero_buf));
+  return MakeTensor(zero_buf);
 }
 
 }  // namespace
@@ -600,7 +600,7 @@ absl::Status ValidateAdaptiveAvgPool2dInputs(const at::Tensor& self) {
                error::kInvalidArgument)
       << "expected input dtype to be none of (bool, uint8, int8, int16, int32, "
          "int64, complex64), got "
-      << torch_tpu::ToString(self.scalar_type());
+      << ToString(self.scalar_type());
 
   const int64_t spatial_dim_count = 2;
   const int64_t num_dims = self.dim();
@@ -682,7 +682,7 @@ absl::StatusOr<at::Tensor> AdaptiveAvgPool2dHelper(
                        // Override the OpName to kAvgPool2dOut, since we are
                        // lowering into it, anyway.
                        /*override_op_name=*/OpName::kAvgPool2dOut));
-    return MakeTensor(std::move(buffer));
+    return MakeTensor(buffer);
   } else {
     auto op_builder = [in_h, in_w, out_h, out_w](
                           mlir::MlirOp input) -> absl::StatusOr<mlir::MlirOp> {
@@ -704,7 +704,7 @@ absl::StatusOr<at::Tensor> AdaptiveAvgPool2dHelper(
                       {.out_dtype = output_mlir_dtype,
                        .out_dims = std::move(out_dims),
                        .op_param_cache_keys = std::move(param_keys)}));
-    return MakeTensor(std::move(buffer));
+    return MakeTensor(buffer);
   }
 }
 
@@ -827,7 +827,7 @@ at::Tensor& AtenAdaptiveAvgPool3dOut(const at::Tensor& self,
                        error::kInvalidArgument)
             << "expected input dtype to be none of (bool, uint8, int8, "
                "int16, int32, int64, complex64), got "
-            << torch_tpu::ToString(self.scalar_type());
+            << ToString(self.scalar_type());
 
         TT_THROW_IF_ERROR(ResizeTensorIfShapeDiffers(out, expected_out_shape));
 

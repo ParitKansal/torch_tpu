@@ -54,6 +54,7 @@
 #include "csrc/common/error_utils.h"
 #include "csrc/common/fake_tensor_utils.h"
 #include "csrc/common/to_string.h"
+#include "csrc/common/utils.h"
 #include "csrc/eager/device_buffer.h"
 #include "csrc/eager/op_dispatcher.h"
 #include "csrc/eager/tensor_to_buffer.h"
@@ -795,7 +796,7 @@ absl::StatusOr<mlir::MlirOp> BuildExtractDiagonalShlo(mlir::MlirOp op,
   mlir::MlirOp iota = mlir::stablehlo::Iota(builder, iota_type, 0);
   TT_ASSIGN_OR_RETURN(mlir::MlirOp index_2d, Unsqueeze(iota, 1));
 
-  Dimensions target_index_shape(shape.begin(), shape.end());
+  Dimensions target_index_shape = CopyIntVector(shape);
   target_index_shape[dim1] = n;
   target_index_shape[dim2] = 1;
 
@@ -1476,7 +1477,7 @@ at::Tensor AtenEinsum(c10::string_view equation, at::TensorList tensors,
                            {.out_dtype = out_dtype,
                             .out_dims = std::move(output_dims),
                             .op_param_cache_keys = std::move(param_keys)})));
-    return MakeTensor(std::move(result_buffer));
+    return MakeTensor(result_buffer);
   });
 }
 

@@ -41,6 +41,10 @@ _STATUS_METRICS = ("wall_time", "succeeded", "skipped")
 # of a case: torch_tpu/<platform>/<benchmark>/<run mode>/<framework>.
 _TEST_NAME = "torch_tpu/v7_1x1x1/model_forward/compiled/torch"
 
+# The torch_benchmark_test flag that makes it count the model FLOPs of each case
+# and export the FLOPs metrics.
+_COUNT_FLOPS_FLAG = "--count_flops"
+
 _NAME_RE = re.compile(r'^  name: "([^"]+)"$')
 _PATTERN_RE = re.compile(r'^  metrics \{ pattern: "([^"]+)"')
 _ACTION_INPUT_RE = re.compile(
@@ -56,6 +60,7 @@ class _Benchmark:
 
   name: str = ""
   script: str = ""
+  runtime_flags: list[str] = dataclasses.field(default_factory=list)
   env_vars: dict[str, str] = dataclasses.field(default_factory=dict)
   # Environment id -> hardware-specific environment variables.
   env_vars_hw: dict[str, dict[str, str]] = dataclasses.field(
@@ -89,6 +94,8 @@ def _parse_registry(text: str) -> list[_Benchmark]:
       key, value = match.groups()
       if key == "script":
         benchmark.script = value
+      elif key == "runtime_flags":
+        benchmark.runtime_flags = value.split()
       elif key == "env_vars":
         benchmark.env_vars = _parse_env_vars(value)
       elif key == "env_vars_hw":
@@ -137,14 +144,24 @@ class _DeviceOps:
     return 0
 
 
-def _exported_metrics() -> set[str]:
-  """Returns the metrics that a successful GCP benchmark case exports."""
+def _exported_metrics(count_flops: bool = False) -> set[str]:
+  """Returns the metrics that a successful GCP benchmark case exports.
+
+  Args:
+    count_flops: Whether the case is run with `--count_flops`, which also
+      exports the FLOPs metrics of the case.
+  """
   with flagsaver.flagsaver(
       min_warmup_steps=2, max_warmup_steps=2, post_warmup_steps=1
   ):
     metrics = measure_lib.measure(
         _Stepper(), _DeviceOps(), name="registry_test", enable_xprof=False
     )
+  if count_flops:
+    # As torch_benchmark_test sets them for a counted case on a device whose
+    # peak FLOP/s are known.
+    metrics.model_flops_per_step = 1e12
+    metrics.peak_flops_per_second = 1e15
   return set(metrics.metric_map()) | set(_STATUS_METRICS)
 
 
@@ -173,6 +190,25 @@ class BenchmarkRegistryTest(seed_test_utils.RepeatableTest):
     exported_metrics = _exported_metrics()
     for benchmark in self.benchmarks:
       for metric in sorted(exported_metrics):
+        with self.subTest(benchmark=benchmark.name, metric=metric):
+          tag = f"{_TEST_NAME}/{metric}"
+          self.assertTrue(
+              any(re.match(p, tag) for p in benchmark.metric_patterns),
+              msg=f"no metric pattern of {benchmark.name} matches {tag}",
+          )
+
+  def test_every_flops_metric_is_ingested(self):
+    flops_metrics = _exported_metrics(count_flops=True) - _exported_metrics()
+    self.assertNotEmpty(flops_metrics)
+    counted = [
+        b for b in self.benchmarks if _COUNT_FLOPS_FLAG in b.runtime_flags
+    ]
+    self.assertNotEmpty(counted)
+    for benchmark in counted:
+      with self.subTest(benchmark=benchmark.name):
+        # Only torch_benchmark_test counts FLOPs.
+        self.assertEqual(benchmark.script, _TORCH_BENCHMARK_SCRIPT)
+      for metric in sorted(flops_metrics):
         with self.subTest(benchmark=benchmark.name, metric=metric):
           tag = f"{_TEST_NAME}/{metric}"
           self.assertTrue(

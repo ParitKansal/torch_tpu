@@ -537,13 +537,6 @@ ACCURACY_OVERRIDES_VS_GPU = {
         torch.bfloat16: {"rtol": 1.8e-2, "atol": 2.0e-2},
         torch.float16: {"rtol": 3.5e-3, "atol": 3.0e-3},
     },
-    "nn.functional.avg_pool1d": {
-        torch.float16: {"rtol": 1.9e-3, "atol": 7.4e-4},
-    },
-    "nn.functional.avg_pool2d": {
-        torch.bfloat16: {"rtol": 3.1e-2, "atol": 4.5e-2},
-        torch.float16: {"rtol": 3.1e-3, "atol": 4.1e-3},
-    },
     "nn.functional.binary_cross_entropy": {
         torch.bfloat16: {"rtol": 9e-3, "atol": 5.9e-3},
         torch.float16: {"rtol": 8.5e-3, "atol": 4.4e-4},
@@ -900,10 +893,6 @@ ACCURACY_OVERRIDES_VS_GPU_COMPILED = {
     "nn.functional.adaptive_avg_pool3d": {
         torch.bfloat16: {"rtol": 1.8e-2, "atol": 2.0e-2},
         torch.float16: {"rtol": 3.5e-3, "atol": 3.0e-3},
-    },
-    "nn.functional.avg_pool2d": {
-        torch.bfloat16: {"rtol": 3.1e-2, "atol": 4.5e-2},
-        torch.float16: {"rtol": 3.1e-3, "atol": 4.1e-3},
     },
     "nn.functional.binary_cross_entropy": {
         torch.bfloat16: {"rtol": 9e-3, "atol": 5.9e-3},
@@ -1401,6 +1390,7 @@ class TestOps(op_testing.OpInfoTestBase):
     self.set_dynamism_handlers(
         dynamism_test_utils.verify_op_supports_dynamism,
         dynamism_test_utils.mark_input_dynamic,
+        dynamism_test_utils.generate_exhaustive_input_marking_plans,
     )
     self.set_symbolic_shapes_known_failures(SYMBOLIC_SHAPES_KNOWN_FAILURES)
 
@@ -1606,9 +1596,6 @@ class TestOps(op_testing.OpInfoTestBase):
   def test_avg_pool1d(self):
     self.do_test_op(
         "nn.functional.avg_pool1d",
-        # GPU goldens for avg_pool1d gradients have not been recorded yet.
-        # Gradients are checked against CPU in ops_unit_test.
-        check_grad=False,
         # GPU short-circuits empty-batch inputs in avg_pool1d before checking
         # dtype, whereas TorchTPU's ValidateAvgPool1dDtype rejects bool, uint8,
         # int8, int16, int32, and complex64 upfront.
@@ -4002,7 +3989,7 @@ class TestOps(op_testing.OpInfoTestBase):
         # TODO: _unique2 on 0D inputs with return_inverse=True produces a 1D
         # PjRtBuffer for a 0D ATen inverse_indices output tensor.
         skip_if=lambda _variant, op_input: (
-            not op_testing._CHECK_DYNAMISM_USING_SEED.value
+            not op_testing._CHECK_DYNAMISM.value
             and (
                 op_testing.is_compiled_mode()
                 or (
@@ -4207,6 +4194,9 @@ class TestOps(op_testing.OpInfoTestBase):
     )
 
   def test_geqrf(self):
+    if op_testing.is_check_symbolic_shapes_mode():
+      # Triggers use-of-uninitialized errors on as_strided
+      self.skipTest("bypassing SymInt MSAN errors in upstream PyTorch")
     self.do_test_op(
         "geqrf",
         # TODO(b/561796361): PyTorch autograd backward fails with:

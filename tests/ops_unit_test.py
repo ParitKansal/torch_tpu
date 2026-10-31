@@ -6406,6 +6406,71 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
 
     self.assert_close_tpu_vs_cpu(fn)
 
+  @parameterized.product(
+      dtype=[torch.bfloat16, torch.float32], world_size=[1, 2, 8]
+  )
+  def test_split_with_sizes_copy_fsdp2_copy_out(self, dtype, world_size):
+    """Tests split_with_sizes_copy as FSDP2 (fully_shard) calls it.
+
+    After every all-gather, FSDP2 views the flat buffer as (world_size, N) and
+    copies its columns into (world_size, split_size) views of flat
+    per-parameter buffers.
+
+    Args:
+      dtype: The dtype of the buffers.
+      world_size: The number of rows of the all-gather buffer.
+    """
+    split_sizes = [512, 128, 1, 0, 130]
+    gathered = torch.randn(world_size * sum(split_sizes)).to(dtype)
+
+    def fn(device):
+      out = [
+          torch.empty(world_size * size, dtype=dtype, device=device).view(
+              world_size, size
+          )
+          for size in split_sizes
+      ]
+      torch.split_with_sizes_copy(
+          gathered.to(device).view(world_size, -1), split_sizes, dim=1, out=out
+      )
+      return tuple(out)
+
+    self.assert_close_tpu_vs_cpu(fn, check_value=CheckValueMode.STRICT)
+
+  def test_split_with_sizes_copy_fsdp2_ops_do_not_grow_with_world_size(self):
+    """FSDP2's copy-out must not record more ATen ops for more ranks."""
+    split_sizes = [512, 128, 1, 130]
+
+    def count_aten_ops(world_size):
+      gathered = torch.randn(world_size * sum(split_sizes), device="tpu")
+      out = [
+          torch.empty(world_size * size, device="tpu").view(world_size, size)
+          for size in split_sizes
+      ]
+      with torch.profiler.profile(
+          activities=[torch.profiler.ProfilerActivity.CPU]
+      ) as prof:
+        torch.split_with_sizes_copy(
+            gathered.view(world_size, -1), split_sizes, dim=1, out=out
+        )
+      return sum(
+          event.count
+          for event in prof.key_averages()
+          if event.key.startswith("aten::")
+      )
+
+    self.assertEqual(count_aten_ops(2), count_aten_ops(16))
+
+  def test_split_with_sizes_copy_dim1_split_sizes_mismatch(self):
+    def fn(device):
+      out = [torch.empty(2, 2, device=device), torch.empty(2, 3, device=device)]
+      torch.split_with_sizes_copy(
+          torch.zeros(2, 6, device=device), [2, 3], dim=1, out=out
+      )
+      return tuple(out)
+
+    self.assert_close_tpu_vs_cpu(fn, allow_failure=True)
+
   def test_cumprod_default_dtype(self):
     """Tests torch.cumprod with default dtype (None)."""
     x = torch.randn(2, 3, dtype=torch.float32)
@@ -7580,6 +7645,258 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
       return index_fn(x.to(device), mask.to(device))
 
     self.assert_close_tpu_vs_cpu(boolean_indexing)
+
+  # PyTorch allows indexing a device tensor with index tensors that live on
+  # CPU (`dev_tensor[{cpu,dev}_tensor]`), so the index tensors are deliberately
+  # kept on CPU here while `self` is moved to the device under test.
+  @parameterized.named_parameters(
+      (
+          "1d_bool_mask",
+          lambda: torch.randn(4, 3),
+          lambda: torch.tensor([True, False, True, True]),
+          lambda x, i: x[i],
+      ),
+      (
+          "all_true_1d_bool_mask",
+          lambda: torch.arange(4),
+          lambda: torch.ones(4, dtype=torch.bool),
+          lambda x, i: x[i],
+      ),
+      (
+          "all_false_1d_bool_mask",
+          lambda: torch.randn(4, 3),
+          lambda: torch.zeros(4, dtype=torch.bool),
+          lambda x, i: x[i],
+      ),
+      (
+          "1d_bool_mask_with_leading_slice",
+          lambda: torch.randn(2, 5, 3),
+          lambda: torch.tensor([False, True, True, False, True]),
+          lambda x, i: x[:, i],
+      ),
+      (
+          "2d_bool_mask_with_leading_slice",
+          lambda: torch.randn(2, 3, 4),
+          lambda: torch.tensor([
+              [True, False, True, False],
+              [False, False, True, True],
+              [True, True, False, False],
+          ]),
+          lambda x, i: x[:, i],
+      ),
+      (
+          "non_contiguous_2d_bool_mask",
+          lambda: torch.randn(4, 3, 2),
+          lambda: torch.tensor([
+              [True, False, True, False],
+              [False, False, True, True],
+              [True, True, False, False],
+          ]).t(),
+          lambda x, i: x[i],
+      ),
+      (
+          "0d_bool_mask",
+          lambda: torch.randn(2, 3),
+          lambda: torch.tensor(True),
+          lambda x, i: x[i],
+      ),
+      (
+          "empty_bool_mask",
+          lambda: torch.randn(0, 3),
+          lambda: torch.zeros(0, dtype=torch.bool),
+          lambda x, i: x[i],
+      ),
+      (
+          "1d_bool_mask_aten_index_out",
+          lambda: torch.randn(4, 3),
+          lambda: torch.tensor([True, False, True, True]),
+          lambda x, i: torch.ops.aten.index.Tensor_out(
+              x, [i], out=torch.empty(0, dtype=x.dtype, device=x.device)
+          ),
+      ),
+      (
+          "long_indices",
+          lambda: torch.randn(5, 3),
+          lambda: torch.tensor([2, 0, -1, 2]),
+          lambda x, i: x[i],
+      ),
+      (
+          "long_indices_with_leading_slice",
+          lambda: torch.randn(2, 5, 3),
+          lambda: torch.tensor([[4, 0], [1, -2]]),
+          lambda x, i: x[:, i],
+      ),
+      (
+          "int_indices",
+          lambda: torch.randn(5, 3),
+          lambda: torch.tensor([3, 1], dtype=torch.int32),
+          lambda x, i: x[i],
+      ),
+  )
+  def test_index_with_cpu_indices(self, x_fn, index_fn, index_op):
+    x = x_fn()
+    index = index_fn()
+    self.assert_close_tpu_vs_cpu(lambda device: index_op(x.to(device), index))
+
+  def test_index_with_mixed_cpu_and_device_indices(self):
+    x = torch.randn(4, 5, 3)
+    cpu_index = torch.tensor([3, 0, -1])
+    device_index = torch.tensor([1, 4, 2])
+    self.assert_close_tpu_vs_cpu(
+        lambda device: x.to(device)[cpu_index, device_index.to(device)]
+    )
+
+  @parameterized.named_parameters(
+      (
+          "bool_mask_broadcast_value",
+          lambda: torch.randn(4, 3),
+          lambda: [torch.tensor([True, False, True, True])],
+          lambda: torch.tensor(2.5),
+      ),
+      (
+          "bool_mask_per_row_values",
+          lambda: torch.randn(4, 3),
+          lambda: [torch.tensor([True, False, True, True])],
+          lambda: torch.randn(3, 3),
+      ),
+      (
+          "bool_mask_with_leading_slice",
+          lambda: torch.randn(2, 4, 3),
+          lambda: [None, torch.tensor([True, False, True, True])],
+          lambda: torch.randn(2, 3, 3),
+      ),
+      (
+          "2d_bool_mask",
+          lambda: torch.randn(3, 4),
+          lambda: [
+              torch.tensor([
+                  [True, False, True, False],
+                  [False, False, True, True],
+                  [True, True, False, False],
+              ])
+          ],
+          lambda: torch.randn(6),
+      ),
+      (
+          "non_contiguous_2d_bool_mask_per_element_values",
+          lambda: torch.randn(4, 3),
+          lambda: [
+              torch.tensor([
+                  [True, False, True, False],
+                  [False, False, True, True],
+                  [True, True, False, False],
+              ]).t()
+          ],
+          lambda: torch.randn(6),
+      ),
+      (
+          "long_indices",
+          lambda: torch.randn(5, 3),
+          lambda: [torch.tensor([-1, 0, 2])],
+          lambda: torch.randn(3, 3),
+      ),
+      (
+          "long_indices_with_leading_slice",
+          lambda: torch.randn(2, 5),
+          lambda: [None, torch.tensor([4, 1])],
+          lambda: torch.randn(2, 2),
+      ),
+      (
+          "multiple_long_indices",
+          lambda: torch.randn(4, 5),
+          lambda: [torch.tensor([0, 3]), torch.tensor([-1, 2])],
+          lambda: torch.randn(2),
+      ),
+      (
+          "int_indices",
+          lambda: torch.randn(5, 3),
+          lambda: [torch.tensor([3, -1], dtype=torch.int32)],
+          lambda: torch.randn(2, 3),
+      ),
+      (
+          "empty_bool_mask_broadcast_value",
+          lambda: torch.randn(0, 3),
+          lambda: [torch.zeros(0, dtype=torch.bool)],
+          lambda: torch.tensor(2.5),
+      ),
+      (
+          "empty_bool_mask_per_row_values",
+          lambda: torch.randn(0, 3),
+          lambda: [torch.zeros(0, dtype=torch.bool)],
+          lambda: torch.randn(0, 3),
+      ),
+      (
+          "bool_mask_and_long_index",
+          lambda: torch.randn(4, 5),
+          lambda: [
+              torch.tensor([True, False, True, True]),
+              torch.tensor([0, 4, -2]),
+          ],
+          lambda: torch.randn(3),
+      ),
+  )
+  def test_index_put_with_cpu_indices(self, x_fn, indices_fn, values_fn):
+    x = x_fn()
+    indices = indices_fn()
+    values = values_fn()
+    for accumulate in (False, True):
+      with self.subTest(accumulate=accumulate):
+        # `x` is cloned since `x.to("cpu")` aliases `x`, which `index_put_`
+        # would otherwise modify in place. `torch.ops.aten.index_put_` is used
+        # since the `Tensor.index_put_` Python binding rejects `None` indices.
+        self.assert_close_tpu_vs_cpu(
+            lambda device, accumulate=accumulate: torch.ops.aten.index_put_(
+                x.clone().to(device), indices, values.to(device), accumulate
+            )
+        )
+
+  # CPU PyTorch only supports a 0-d bool mask in `index_put_` through its
+  # `masked_fill_` fast path (scalar value, `accumulate=False`); otherwise its
+  # CPU index kernel hits an internal assert, so only that case is compared.
+  @parameterized.parameters(True, False)
+  def test_index_put_with_cpu_0d_bool_mask(self, mask_value):
+    x = torch.randn(2, 3)
+    mask = torch.tensor(mask_value)
+    self.assert_close_tpu_vs_cpu(
+        lambda device: torch.ops.aten.index_put_(
+            x.clone().to(device), [mask], torch.tensor(2.5).to(device), False
+        )
+    )
+
+  @parameterized.named_parameters(
+      (
+          "long_indices",
+          lambda: torch.randn(4, 5),
+          lambda: torch.tensor([0, 3]),
+          lambda: torch.tensor([-1, 2]),
+          lambda: torch.randn(2),
+      ),
+      (
+          "bool_mask_and_long_index",
+          lambda: torch.randn(4, 5),
+          lambda: torch.tensor([True, False, True, True]),
+          lambda: torch.tensor([0, 4, -2]),
+          lambda: torch.randn(3),
+      ),
+  )
+  def test_index_put_with_mixed_cpu_and_device_indices(
+      self, x_fn, cpu_index_fn, device_index_fn, values_fn
+  ):
+    x = x_fn()
+    cpu_index = cpu_index_fn()
+    device_index = device_index_fn()
+    values = values_fn()
+    for accumulate in (False, True):
+      with self.subTest(accumulate=accumulate):
+        self.assert_close_tpu_vs_cpu(
+            lambda device, accumulate=accumulate: x.clone()
+            .to(device)
+            .index_put_(
+                [cpu_index, device_index.to(device)],
+                values.to(device),
+                accumulate=accumulate,
+            )
+        )
 
   def test_is_nonzero(self):
     def assert_is_nonzero_equal_on_cpu_vs_tpu(tensor: torch.Tensor):
@@ -14056,6 +14373,120 @@ class OpsUnitTest(TorchTpuVsCpuTestBase):
 
     self.assert_close_tpu_vs_cpu(test_fn)
 
+  def test_boolean_mask_cpu_tensor_index(self):
+    # 1D CPU boolean mask with repeat_interleave + ~mask (LightGlue pattern).
+    x_3d = torch.randn(4, 6, 8, dtype=torch.float32)
+    prune_mask_cpu = torch.tensor([True, False], dtype=torch.bool, device="cpu")
+    mask_1d_cpu = ~prune_mask_cpu.repeat_interleave(2)
+    self.assert_close_tpu_vs_cpu(lambda device: x_3d.to(device)[mask_1d_cpu])
+
+    # 2D CPU boolean mask with leading and trailing slices, plus non-contiguous.
+    x_4d = torch.randn(2, 3, 4, 5, dtype=torch.bfloat16)
+    mask_2d_cpu = torch.tensor(
+        [
+            [True, False, True],
+            [False, True, False],
+            [True, True, False],
+            [False, False, True],
+        ],
+        dtype=torch.bool,
+        device="cpu",
+    ).t()
+    self.assert_close_tpu_vs_cpu(
+        lambda device: x_4d.to(device)[:, mask_2d_cpu, :]
+    )
+
+    # Zero-sized CPU boolean mask.
+    x_empty = torch.randn(2, 0, 4, dtype=torch.float32)
+    mask_empty_cpu = torch.zeros(0, 4, dtype=torch.bool, device="cpu")
+    self.assert_close_tpu_vs_cpu(
+        lambda device: x_empty.to(device)[:, mask_empty_cpu]
+    )
+
+    # 0D True and False CPU boolean masks.
+    x_2d = torch.randn(2, 3, dtype=torch.float32)
+    mask_true_0d = torch.tensor(True, dtype=torch.bool, device="cpu")
+    mask_false_0d = torch.tensor(False, dtype=torch.bool, device="cpu")
+    self.assert_close_tpu_vs_cpu(
+        lambda device: x_2d.to(device)[:, mask_true_0d, :]
+    )
+    self.assert_close_tpu_vs_cpu(lambda device: x_2d.to(device)[mask_false_0d])
+
+  def test_boolean_mask_cpu_tensor_index_put(self):
+    mask_1d_cpu = torch.tensor(
+        [False, True, False, True], dtype=torch.bool, device="cpu"
+    )
+
+    # Select fast path (broadcastable values, overwrite and accumulate).
+    def select_overwrite(device):
+      t = torch.arange(8, dtype=torch.float32, device=device).reshape(4, 2)
+      t[mask_1d_cpu] = torch.tensor(9.0, dtype=torch.float32, device=device)
+      return t
+
+    self.assert_close_tpu_vs_cpu(select_overwrite)
+
+    def select_accumulate(device):
+      t = torch.arange(8, dtype=torch.float32, device=device).reshape(4, 2)
+      t[mask_1d_cpu] += torch.tensor(
+          [10.0, 20.0], dtype=torch.float32, device=device
+      )
+      return t
+
+    self.assert_close_tpu_vs_cpu(select_accumulate)
+
+    # 0D CPU boolean masks on select fast path.
+    mask_true_0d = torch.tensor(True, dtype=torch.bool, device="cpu")
+    mask_false_0d = torch.tensor(False, dtype=torch.bool, device="cpu")
+
+    def select_0d(device):
+      t1 = torch.ones(2, 3, dtype=torch.float32, device=device)
+      t1[:, mask_true_0d] = torch.tensor(
+          5.0, dtype=torch.float32, device=device
+      )
+      t2 = torch.ones(2, 3, dtype=torch.float32, device=device)
+      t2[mask_false_0d] = torch.tensor(7.0, dtype=torch.float32, device=device)
+      return t1, t2
+
+    self.assert_close_tpu_vs_cpu(select_0d)
+
+    # Scatter path (non-broadcastable values varying across masked dimension).
+    def scatter_overwrite_and_accumulate(device):
+      t = torch.zeros(4, 2, dtype=torch.float32, device=device)
+      vals = torch.tensor(
+          [[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32, device=device
+      )
+      t[mask_1d_cpu] = vals
+      t[mask_1d_cpu] += vals
+      return t
+
+    self.assert_close_tpu_vs_cpu(scatter_overwrite_and_accumulate)
+
+    # 2D CPU boolean mask with leading slice on scatter path, plus all-False mask.
+    mask_2d_cpu = torch.tensor(
+        [[True, False, True], [False, True, False]],
+        dtype=torch.bool,
+        device="cpu",
+    )
+    mask_all_false_cpu = torch.zeros(3, dtype=torch.bool, device="cpu")
+
+    def scatter_2d_and_empty(device):
+      t = torch.zeros(2, 2, 3, dtype=torch.float32, device=device)
+      vals = torch.tensor(
+          [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+          dtype=torch.float32,
+          device=device,
+      )
+      t[:, mask_2d_cpu] = vals
+      t_empty = torch.tensor(
+          [1.0, 2.0, 3.0], dtype=torch.float32, device=device
+      )
+      t_empty[mask_all_false_cpu] = torch.empty(
+          0, dtype=torch.float32, device=device
+      )
+      return t, t_empty
+
+    self.assert_close_tpu_vs_cpu(scatter_2d_and_empty)
+
   def test_masked_fill_inplace_tensor_value_different_dtype(self):
     input_value = torch.randn(2, 3, dtype=torch.float32)
     mask_value = torch.tensor(
@@ -18968,6 +19399,14 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
 
       self.assert_close_tpu_vs_cpu(test_fn)
 
+    for dtype in [torch.bfloat16, torch.float16]:
+      x_zero_feat = torch.randn(3, 0, dtype=dtype)
+
+      def test_zero_feat_fn(device, x_zero_feat=x_zero_feat):
+        return torch.nn.functional.pdist(x_zero_feat.to(device), p=2.0)
+
+      self.assert_close_tpu_vs_cpu(test_zero_feat_fn)
+
   @parameterized.product(
       stride=[2],
       padding=[1],
@@ -19786,6 +20225,52 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
 
     self.assert_close_tpu_vs_cpu(compute)
 
+  def test_avg_pool_low_precision_large_window(self):
+    """Tests 16-bit avg_pool1d/2d with windows larger than 256 elements.
+
+    Window sums (and, with count_include_pad=False, the element counts) must
+    accumulate in float32 like ATen does. Accumulating in bfloat16 cannot
+    represent counts above 256 exactly, which made the result up to 3x off.
+    """
+    torch.manual_seed(0)
+    x2d = torch.randn(2, 4, 64, 64) + 3.0
+    grad2d = torch.randn(2, 4, 4, 4)
+    x1d = torch.randn(2, 4, 2048) + 3.0
+    for dtype in (torch.bfloat16, torch.float16):
+
+      def compute_2d(device, dtype=dtype):
+        return torch.nn.functional.avg_pool2d(
+            x2d.to(dtype).to(device),
+            kernel_size=32,
+            stride=16,
+            padding=8,
+            count_include_pad=False,
+        )
+
+      def compute_2d_grad(device, dtype=dtype):
+        inp = x2d.to(dtype).to(device).requires_grad_()
+        out = torch.nn.functional.avg_pool2d(
+            inp, kernel_size=32, stride=16, padding=8, count_include_pad=False
+        )
+        out.backward(grad2d.to(dtype).to(device))
+        return inp.grad
+
+      def compute_1d(device, dtype=dtype):
+        return torch.nn.functional.avg_pool1d(
+            x1d.to(dtype).to(device),
+            kernel_size=512,
+            stride=256,
+            padding=128,
+            count_include_pad=False,
+        )
+
+      with self.subTest(dtype=dtype, op="avg_pool2d"):
+        self.assert_close_tpu_vs_cpu(compute_2d)
+      with self.subTest(dtype=dtype, op="avg_pool2d_backward"):
+        self.assert_close_tpu_vs_cpu(compute_2d_grad)
+      with self.subTest(dtype=dtype, op="avg_pool1d"):
+        self.assert_close_tpu_vs_cpu(compute_1d)
+
   def test_bernoulli_out_dtypes(self):
     device = torch.device("tpu")
     p = torch.full((4, 4), 0.5, device=device)
@@ -19923,48 +20408,6 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
 
     atol = 5e-3 if dtype == torch.bfloat16 else None
     self.assert_close_tpu_vs_cpu(compute, atol=atol)
-
-  @parameterized.product(
-      shape=[(2, 3, 16), (3, 20), (1, 2, 5)],
-      kernel_size=[2, 3],
-      stride=[None, 1, 2, 3],
-      padding=[0, 1],
-      ceil_mode=[False, True],
-      count_include_pad=[False, True],
-      dtype=[torch.float32, torch.bfloat16],
-  )
-  def test_avg_pool1d_backward(
-      self,
-      shape,
-      kernel_size,
-      stride,
-      padding,
-      ceil_mode,
-      count_include_pad,
-      dtype,
-  ):
-    torch.manual_seed(42)
-    x_cpu = torch.randn(shape, dtype=dtype, requires_grad=True)
-    x_tpu = x_cpu.detach().to("tpu").requires_grad_(True)
-    kwargs = {
-        "kernel_size": kernel_size,
-        "padding": padding,
-        "ceil_mode": ceil_mode,
-        "count_include_pad": count_include_pad,
-    }
-    if stride is not None:
-      kwargs["stride"] = stride
-    atol = 5e-3 if dtype == torch.bfloat16 else None
-
-    out_cpu = torch.nn.functional.avg_pool1d(x_cpu, **kwargs)
-    out_tpu = torch.nn.functional.avg_pool1d(x_tpu, **kwargs)
-    self.assertIsNotNone(out_tpu.grad_fn)
-    utils.assert_close(actual=out_tpu.cpu(), expected=out_cpu, atol=atol)
-
-    grad_out_cpu = torch.randn_like(out_cpu)
-    out_cpu.backward(grad_out_cpu)
-    out_tpu.backward(grad_out_cpu.to("tpu"))
-    utils.assert_close(actual=x_tpu.grad.cpu(), expected=x_cpu.grad, atol=atol)
 
   def test_avg_pool1d_backward_empty_batch(self):
     x_cpu = torch.randn(0, 3, 16, requires_grad=True)
@@ -22264,6 +22707,19 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
                   f" {actual=}"
               ),
           )
+
+  def test_index_backward_with_cpu_mask(self):
+    # The backward of `index` scatters the gradient with
+    # `_index_put_impl_(accumulate=True)` using the saved CPU mask.
+    x = torch.randn(4, 3)
+    mask = torch.tensor([True, False, True, True])
+
+    def index_grad(device):
+      x_device = x.to(device).detach().requires_grad_()
+      x_device[mask].pow(2).sum().backward()
+      return x_device.grad
+
+    self.assert_close_tpu_vs_cpu(index_grad)
 
   def test_index_put_boolean(self):
     # Case 1: Standard 1D boolean advanced indexing

@@ -148,6 +148,8 @@ struct PerfStats {
   int64_t num_cache_reqs = 0;
   int64_t num_cache_hits = 0;
   int64_t num_compilations = 0;
+  // Tracks the number of dynamic kernels that actually ran
+  int64_t num_unbounded_dynamic_hits = 0;
   // Peak memory usage (host) during compilation in bytes across all concurrent
   // calls. std::nullopt represents failed to retrieve or unknown.
   std::optional<int64_t> peak_compilation_memory_bytes;
@@ -160,6 +162,8 @@ struct PerfStats {
     absl::Format(&sink, "num_cache_hits=%d {%s}\n", stats.num_cache_hits,
                  PercAsStr(stats.num_cache_hits, stats.num_cache_reqs));
     absl::Format(&sink, "num_compilations=%d\n", stats.num_compilations);
+    absl::Format(&sink, "num_unbounded_dynamic_hits=%d\n",
+                 stats.num_unbounded_dynamic_hits);
     if (stats.peak_compilation_memory_bytes.has_value()) {
       absl::Format(&sink, "peak_compilation_memory_bytes=%d\n",
                    *stats.peak_compilation_memory_bytes);

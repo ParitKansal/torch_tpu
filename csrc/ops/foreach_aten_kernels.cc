@@ -285,7 +285,7 @@ std::vector<at::Tensor> ForeachConvertToTensor(
   std::vector<at::Tensor> result;
   result.reserve(result_buffers.size());
   for (auto i = 0; i < result_buffers.size(); ++i) {
-    at::Tensor tensor = MakeTensor(std::move(result_buffers[i]));
+    at::Tensor tensor = MakeTensor(result_buffers[i]);
     at::ScalarType target_dtype = ConvertTo<at::ScalarType>(out_dtypes[i]);
     if (tensor.scalar_type() != target_dtype) {
       tensor = AtenToCopy(tensor, target_dtype, /*layout=*/std::nullopt,
@@ -301,7 +301,7 @@ std::vector<at::Tensor> ForeachConvertToTensor(
 absl::Status ForeachAssignToTensor(std::vector<DeviceBufferRef> result_buffers,
                                    at::TensorList self, DtypeSpan out_dtypes) {
   for (auto i = 0; i < result_buffers.size(); ++i) {
-    at::Tensor tensor = MakeTensor(std::move(result_buffers[i]));
+    at::Tensor tensor = MakeTensor(result_buffers[i]);
     at::ScalarType target_dtype = ConvertTo<at::ScalarType>(out_dtypes[i]);
     if (tensor.scalar_type() != target_dtype) {
       tensor = AtenToCopy(tensor, target_dtype, /*layout=*/std::nullopt,
@@ -668,7 +668,7 @@ absl::StatusOr<std::vector<DeviceBufferRef>> ForeachUnaryOp(
 
   std::vector<at::Tensor> inputs(self.begin(), self.end());
   const auto out_dims_list = GetDimsList(self);
-  DispatchOpOptions<torch_tpu::kDynamicSize> options = {
+  DispatchOpOptions<kDynamicSize> options = {
       .op_name = op_name,
       .out_dtypes = out_dtypes,
       .out_dims_list = out_dims_list,

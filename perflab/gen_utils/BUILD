@@ -57,6 +57,7 @@ torch_tpu_py_test(
     srcs = ["gen_utils_test.py"],
     deps = [
         ":gen_utils",
+        ":load_model",
         "//shims/absl_py/testing:absltest",
         "//shims/absl_py/testing:parameterized",
         "//shims/torch:pytorch",

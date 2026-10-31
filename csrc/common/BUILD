@@ -169,17 +169,28 @@ torch_tpu_cc_library(
         ":dimension_types",
         ":dtype",
         ":error_utils",
+        ":shape",
         ":to_string",
+        ":utils",
+        "//csrc/pjrt:pjrt_state",
         "//shims/torch:aten_headers",
         "//shims/torch/c10/core:base_headers",
+        "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
         "@stablehlo//stablehlo/integrations/cpp/builder:attr_type_builder_util",
+        "@xla//xla:shape_util",
+        "@xla//xla:util",
+        "@xla//xla:xla_data_proto_cc",
+        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
 torch_tpu_cc_test(
     name = "layout_utils_test",
     srcs = ["layout_utils_test.cc"],
+    requires_libtpu = True,
+    tags = ["requires-tpu-v5lite"],
     deps = [
         ":dimension_types",
         ":dtype",
@@ -971,6 +982,7 @@ torch_tpu_cc_test(
 
 torch_tpu_cc_library(
     name = "env_vars",
+    srcs = ["env_vars.cc"],
     hdrs = ["env_vars.h"],
     deps = [
         ":constexpr_map",
@@ -1001,6 +1013,7 @@ torch_tpu_cc_test(
         "//csrc/common:oss_test_main",
         "//shims/torch",  # build_cleaner: keep for c10::WarningUtils
         "//shims/torch/c10/util:base",
+        "@com_google_absl//absl/log:absl_check",
     ],
 )
 
@@ -1169,6 +1182,15 @@ torch_tpu_cc_library(
     ],
 )
 
+torch_tpu_cc_test(
+    name = "device_utils_test",
+    srcs = ["device_utils_test.cc"],
+    deps = [
+        ":device_utils",
+        "//csrc/common:oss_test_main",
+    ],
+)
+
 oss_target(
     torch_tpu_cc_library,
     name = "environment",
@@ -1178,6 +1200,7 @@ oss_target(
         ":device_utils",
         ":env_vars",
         ":error_utils",
+        ":tpu_hardware",
         "//csrc/distributed/slicebuilder:discovery",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/log:absl_log",
@@ -1196,7 +1219,9 @@ oss_target(
         ":environment",
         "//csrc/common:oss_test_main",
         "//csrc/distributed/slicebuilder:discovery",
+        "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -1654,10 +1679,7 @@ torch_tpu_cc_test(
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@stablehlo//stablehlo/integrations/cpp/builder:attr_type_builder_util",
-        "@xla//xla:shape_util",
         "@xla//xla:xla_data_proto_cc",
-        "@xla//xla/hlo/builder:xla_builder",
-        "@xla//xla/hlo/builder:xla_computation",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:pjrt_executable",
         "@xla//xla/pjrt/plugin/xla_tpu:xla_tpu_pjrt_client",  # buildcleaner: keep
@@ -1994,6 +2016,25 @@ torch_tpu_cc_test(
         "//csrc/common:oss_test_main",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+    ],
+)
+
+torch_tpu_cc_library(
+    name = "process",
+    srcs = ["process.cc"],
+    hdrs = ["process.h"],
+    deps = [
+        ":env_vars",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+torch_tpu_cc_test(
+    name = "process_test",
+    srcs = ["process_test.cc"],
+    deps = [
+        ":process",
+        "//csrc/common:oss_test_main",
     ],
 )
 

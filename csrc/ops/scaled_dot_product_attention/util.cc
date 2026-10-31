@@ -126,7 +126,7 @@ kiln::Tile LoadBias(kiln::Ref bias_ref, const FlashAttnConfig& config,
       q_bcast ? kiln::Slice(0, 1) : kiln::Slice(row_offset, rows);
   const kiln::SliceDim col_slice =
       kv_bcast ? kiln::Slice(0, 1) : kiln::Slice(col_offset, cols);
-  kiln::Tile bias(bias_ref(0, 0, row_slice, col_slice));
+  kiln::Tile bias = kiln::Load(bias_ref(0, 0, row_slice, col_slice));
   return bias.AsType(kiln::f32).BroadcastTo({rows, cols});
 }
 
@@ -209,10 +209,10 @@ kiln::Tile DropoutKeepMask(const FlashAttnConfig& config, const Tiling& tiling,
   const kiln::Shape i32_shape = kiln::i32(mask_rows, mask_cols);
 
   // 1. The Philox {seed_lo, seed_hi, offset_lo, offset_hi} words.
-  kiln::Scalar seed_lo(seed_ref(0));
-  kiln::Scalar seed_hi(seed_ref(1));
-  kiln::Scalar offset_lo(seed_ref(2));
-  kiln::Scalar offset_hi(seed_ref(3));
+  kiln::Scalar seed_lo = kiln::LoadScalar(seed_ref(0));
+  kiln::Scalar seed_hi = kiln::LoadScalar(seed_ref(1));
+  kiln::Scalar offset_lo = kiln::LoadScalar(seed_ref(2));
+  kiln::Scalar offset_hi = kiln::LoadScalar(seed_ref(3));
 
   // 2. Fold the stream identity into one word. This is scalar work, so it costs
   // once per tile rather than once per element, and we can afford to avalanche

@@ -34,8 +34,6 @@
 #include "absl/log/absl_log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/match.h"
-#include "absl/strings/str_replace.h"
 #include "absl/synchronization/mutex.h"
 #include "csrc/common/contain.h"
 #include "csrc/common/device_type.h"
@@ -62,15 +60,6 @@
 
 namespace torch_tpu {
 namespace {
-
-template <const char* env_var_name>
-void TryExpandRankInEnvVar(std::string_view rank) {
-  const char* env_val = std::getenv(env_var_name);  // GETENV_OK=Expanding rank.
-  if (env_val == nullptr || !absl::StrContains(env_val, "${RANK}")) return;
-  std::string new_val(env_val);
-  absl::StrReplaceAll({{"${RANK}", rank}}, &new_val);
-  SetEnv<env_var_name>(new_val);
-}
 
 // Creates a PluginTracer instance to collect TPU profile metrics.
 // Returns nullptr in environments where libtpu is statically linked to prevent
@@ -236,11 +225,7 @@ absl::Status PjrtBackend::EnsureInitialized() {
 absl::Status PjrtBackend::InitializeInternal() {
   // Expand ${RANK} to the actual rank in relevant environment variables.
   // Required for dumping debug information separately per rank.
-  const char* rank_val =
-      std::getenv(kRankEnvVar);  // GETENV_OK=Getting rank for expansion.
-  std::string rank = rank_val != nullptr ? rank_val : "0";
-  TryExpandRankInEnvVar<kXlaFlagsEnvVar>(rank);
-  TryExpandRankInEnvVar<kLibtpuInitArgsEnvVar>(rank);
+  EnsureRankIsExpandedInEnvVars();
 
   PjRtDeviceType device_type = PjRtDeviceType::kUnknown;
   std::string plugin_name;
@@ -248,9 +233,15 @@ absl::Status PjrtBackend::InitializeInternal() {
     device_type = PjRtDeviceType::kTpu;
     plugin_name = kTpuPjrtName;
 
-    if (const auto& world_size_or =
-            GetRequiredIntegerEnvOnce<int, kWorldSizeEnvVar>();
-        world_size_or.ok()) {
+    // When WORLD_SIZE is not set (or is 1), TorchTPU defaults to single-device
+    // mode.
+    const auto& world_size_or =
+        GetRequiredIntegerEnvOnce<int, kWorldSizeEnvVar>();
+    const bool single_device = !world_size_or.ok() || *world_size_or == 1;
+    if (single_device) {
+      TT_RETURN_IF_ERROR(InitializeSingleDeviceEnvironment()).SetPrepend()
+          << "failed to initialize single-device environment: ";
+    } else {
       TT_ASSIGN_OR_RETURN(auto config, GetDistributedWorkerConfiguration());
       TT_RETURN_IF_ERROR(InitializeDistributedEnvironment(config)).SetPrepend()
           << "failed to initialize distributed environment: ";

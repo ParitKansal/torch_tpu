@@ -30,7 +30,7 @@
 //       InSpec{f32(tm, n), row_map},
 //       OutSpec{f32(tm, n), row_map},
 //       [](Ref x, Ref y, Ref out) {
-//         out = Tile(x) + Tile(y);
+//         Store(out, Load(x) + Load(y));
 //       });
 //
 // Concepts map 1:1 onto Pallas TPU:
@@ -42,8 +42,8 @@
 //     <-> pl.program_id / pl.num_programs
 //   * ref(0, 0) / ref(0, Slice(c, kChunk), all)
 //     <-> ref slicing; emits tpu::MemRefSlice / Squeeze
-//   * Tile(ref) / ref = tile / Scalar(ref)
-//     <-> load/store on ref arguments
+//   * Load(ref) / LoadScalar(ref) / Store(ref, value)
+//     <-> ref[...] / ref[...] = value
 //   * Tile
 //     <-> a jax.Array value inside the kernel
 //   * Scalar

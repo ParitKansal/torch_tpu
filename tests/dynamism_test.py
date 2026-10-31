@@ -1070,6 +1070,133 @@ class DynamismTest(seed_test_utils.RepeatableTest):
     self.assertEqual(grad_x_dynamism_info[0].upper_bound, upper_bound)
     self.assertEmpty(dynamism.get_dynamism_info(act[1]))
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="2d_dynamic_batch",
+          shape=(3, 8),
+          dim=0,
+          upper_bound=10,
+          affine=True,
+          dtype=torch.float32,
+      ),
+      dict(
+          testcase_name="3d_dynamic_sequence",
+          shape=(2, 5, 8),
+          dim=1,
+          upper_bound=16,
+          affine=True,
+          dtype=torch.float32,
+      ),
+      dict(
+          testcase_name="3d_dynamic_sequence_no_affine",
+          shape=(2, 5, 8),
+          dim=1,
+          upper_bound=16,
+          affine=False,
+          dtype=torch.float32,
+      ),
+      # bf16 computes the statistics in f32, which takes a separate code path.
+      dict(
+          testcase_name="3d_dynamic_sequence_bf16",
+          shape=(2, 5, 8),
+          dim=1,
+          upper_bound=16,
+          affine=True,
+          dtype=torch.bfloat16,
+      ),
+  )
+  def test_layer_norm_dynamic_unnormalized_dim(
+      self,
+      shape: tuple[int, ...],
+      dim: int,
+      upper_bound: int,
+      affine: bool,
+      dtype: torch.dtype,
+  ):
+    normalized_shape = shape[-1:]
+
+    def mark_dynamic(x: torch.Tensor, *unused_args: torch.Tensor) -> None:
+      dynamism.mark_dynamic(x, dim, 2, upper_bound)
+
+    def layer_norm_fn(x: torch.Tensor, *affine_args: torch.Tensor):
+      return torch.nn.functional.layer_norm(x, normalized_shape, *affine_args)
+
+    args = [torch.randn(shape, dtype=dtype)]
+    if affine:
+      args += [
+          torch.randn(normalized_shape, dtype=dtype),
+          torch.randn(normalized_shape, dtype=dtype),
+      ]
+    tol = 1e-2 if dtype == torch.bfloat16 else 1e-5
+    act = self._run_bounded_dynamism_test(
+        layer_norm_fn, mark_dynamic, *args, rtol=tol, atol=tol
+    )
+    act_dynamism_info = dynamism.get_dynamism_info(act)
+    self.assertLen(act_dynamism_info, 1)
+    self.assertEqual(act_dynamism_info[0].dimension, dim)
+    self.assertEqual(act_dynamism_info[0].lower_bound, 2)
+    self.assertEqual(act_dynamism_info[0].upper_bound, upper_bound)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="3d_dynamic_sequence",
+          affine=True,
+          dtype=torch.float32,
+      ),
+      dict(
+          testcase_name="3d_dynamic_sequence_no_affine",
+          affine=False,
+          dtype=torch.float32,
+      ),
+      # bf16 computes the gradients in f32, which takes a separate code path.
+      dict(
+          testcase_name="3d_dynamic_sequence_bf16",
+          affine=True,
+          dtype=torch.bfloat16,
+      ),
+  )
+  def test_layer_norm_backward_dynamic_unnormalized_dim(
+      self, affine: bool, dtype: torch.dtype
+  ):
+    shape, dim, upper_bound = (2, 5, 8), 1, 16
+    normalized_shape = shape[-1:]
+
+    def mark_dynamic(
+        x: torch.Tensor, grad_out: torch.Tensor, *unused_args: torch.Tensor
+    ) -> None:
+      dynamism.mark_dynamic(x, dim, 2, upper_bound)
+      dynamism.mark_dynamic(grad_out, dim, 2, upper_bound)
+
+    def layer_norm_backward_fn(
+        x: torch.Tensor, grad_out: torch.Tensor, *affine_args: torch.Tensor
+    ):
+      x_req = x.detach().clone().requires_grad_(True)
+      affine_req = [
+          a.detach().clone().requires_grad_(True) for a in affine_args
+      ]
+      out = torch.nn.functional.layer_norm(x_req, normalized_shape, *affine_req)
+      out.backward(grad_out)
+      return (x_req.grad, *(a.grad for a in affine_req))
+
+    args = [torch.randn(shape, dtype=dtype), torch.randn(shape, dtype=dtype)]
+    if affine:
+      args += [
+          torch.randn(normalized_shape, dtype=dtype),
+          torch.randn(normalized_shape, dtype=dtype),
+      ]
+    tol = 5e-2 if dtype == torch.bfloat16 else 1e-4
+    act = self._run_bounded_dynamism_test(
+        layer_norm_backward_fn, mark_dynamic, *args, rtol=tol, atol=tol
+    )
+    grad_x_dynamism_info = dynamism.get_dynamism_info(act[0])
+    self.assertLen(grad_x_dynamism_info, 1)
+    self.assertEqual(grad_x_dynamism_info[0].dimension, dim)
+    self.assertEqual(grad_x_dynamism_info[0].lower_bound, 2)
+    self.assertEqual(grad_x_dynamism_info[0].upper_bound, upper_bound)
+    # Weight and bias gradients reduce over the dynamic dimension.
+    for grad_affine in act[1:]:
+      self.assertEmpty(dynamism.get_dynamism_info(grad_affine))
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -17,11 +17,18 @@
 #ifndef TORCH_TPU_CSRC_INTERNAL_MOSAIC_KILN_CORE_CONTROL_FLOW_H_
 #define TORCH_TPU_CSRC_INTERNAL_MOSAIC_KILN_CORE_CONTROL_FLOW_H_
 
+#include <variant>
+
 #include "absl/functional/function_ref.h"
 #include "csrc/internal/mosaic/kiln/core/index_arg.h"
 #include "csrc/internal/mosaic/kiln/core/scalar.h"
+#include "csrc/internal/mosaic/kiln/core/tile.h"
+#include "llvm/ADT/ArrayRef.h"
 
 namespace torch_tpu::kiln {
+
+// A variable carried from one loop iteration to the next (see `For` below).
+using LoopVar = std::variant<Scalar*, Tile*>;
 
 // Structured control flow inside a kernel body.
 //
@@ -44,6 +51,14 @@ inline void For(IndexArg lower, IndexArg upper,
 inline void For(IndexArg upper, absl::FunctionRef<void(Scalar)> body) {
   For(0, upper, 1, body);
 }
+
+// Counted loop with loop-carried SSA values (`scf.for` with `iter_args`, the
+// carry of `lax.fori_loop`). Within `body`, each of `vars` holds its value for
+// the current iteration, and `body` may reassign it, keeping its dtype and
+// shape. After the loop, each holds its final value. The pointees must outlive
+// the call.
+void For(IndexArg lower, IndexArg upper, IndexArg step,
+         llvm::ArrayRef<LoopVar> vars, absl::FunctionRef<void(Scalar)> body);
 
 // Executes `body` synchronously inside a `tpu.region` (Pallas `pl.run_scoped`)
 // before `RunScoped` returns.
